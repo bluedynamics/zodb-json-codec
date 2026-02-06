@@ -9,7 +9,7 @@ mod types;
 mod zodb;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::decode::decode_pickle;
 use crate::encode::encode_pickle;
@@ -66,7 +66,7 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 #[pyfunction]
 fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
     let json_val = pyobject_to_json_value(obj.as_any())?;
-    let bytes = zodb::encode_zodb_record(&json_val)?;
+    let bytes = zodb::encode_zodb_record(json_val)?;
     Ok(PyBytes::new(py, &bytes).into())
 }
 
@@ -86,10 +86,12 @@ fn json_value_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyResult<P
         }
         serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
         serde_json::Value::Array(arr) => {
-            let list = pyo3::types::PyList::empty(py);
-            for item in arr {
-                list.append(json_value_to_pyobject(py, item)?)?;
-            }
+            // Pre-collect into Vec then build list in one shot
+            let items: PyResult<Vec<PyObject>> = arr
+                .iter()
+                .map(|item| json_value_to_pyobject(py, item))
+                .collect();
+            let list = PyList::new(py, items?)?;
             Ok(list.into_any().unbind())
         }
         serde_json::Value::Object(map) => {
@@ -103,30 +105,40 @@ fn json_value_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyResult<P
 }
 
 /// Convert a Python object to a serde_json Value.
+///
+/// Uses type-based dispatch (is_instance_of) instead of try-extract to avoid
+/// creating and discarding Python error objects on type mismatches.
 fn pyobject_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<serde_json::Value> {
     if obj.is_none() {
         return Ok(serde_json::Value::Null);
     }
-    if let Ok(b) = obj.extract::<bool>() {
+    // Check bool BEFORE int (bool is a subclass of int in Python)
+    if obj.is_instance_of::<PyBool>() {
+        let b: bool = obj.extract()?;
         return Ok(serde_json::Value::Bool(b));
     }
-    if let Ok(i) = obj.extract::<i64>() {
+    if obj.is_instance_of::<PyInt>() {
+        let i: i64 = obj.extract()?;
         return Ok(serde_json::json!(i));
     }
-    if let Ok(f) = obj.extract::<f64>() {
+    if obj.is_instance_of::<PyFloat>() {
+        let f: f64 = obj.extract()?;
         return Ok(serde_json::Number::from_f64(f)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null));
     }
-    if let Ok(s) = obj.extract::<String>() {
+    if obj.is_instance_of::<PyString>() {
+        let s: String = obj.extract()?;
         return Ok(serde_json::Value::String(s));
     }
-    if let Ok(list) = obj.downcast::<pyo3::types::PyList>() {
+    if obj.is_instance_of::<PyList>() {
+        let list = obj.downcast::<PyList>()?;
         let arr: PyResult<Vec<serde_json::Value>> =
             list.iter().map(|item| pyobject_to_json_value(&item)).collect();
         return Ok(serde_json::Value::Array(arr?));
     }
-    if let Ok(dict) = obj.downcast::<PyDict>() {
+    if obj.is_instance_of::<PyDict>() {
+        let dict = obj.downcast::<PyDict>()?;
         let mut map = serde_json::Map::new();
         for (k, v) in dict {
             let key: String = k.extract()?;

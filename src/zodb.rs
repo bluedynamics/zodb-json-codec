@@ -157,13 +157,11 @@ pub fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
 }
 
 /// Encode a ZODB JSON record back into two concatenated pickles.
-pub fn encode_zodb_record(json_val: &Value) -> Result<Vec<u8>, CodecError> {
+/// Takes ownership to avoid cloning the state tree for persistent ref restoration.
+pub fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     let cls = json_val
         .get("@cls")
         .ok_or_else(|| CodecError::InvalidData("missing @cls in ZODB record".to_string()))?;
-    let state = json_val
-        .get("@s")
-        .ok_or_else(|| CodecError::InvalidData("missing @s in ZODB record".to_string()))?;
 
     let (module, name) = if let Value::Array(arr) = cls {
         if arr.len() == 2 {
@@ -185,8 +183,12 @@ pub fn encode_zodb_record(json_val: &Value) -> Result<Vec<u8>, CodecError> {
     let class_val = PickleValue::Global { module, name };
     let class_bytes = encode_pickle(&class_val)?;
 
-    // Restore compact persistent refs before encoding
-    let state = restore_persistent_refs(state.clone());
+    // Take ownership of @s to avoid cloning, then restore persistent refs
+    let state = json_val
+        .as_object_mut()
+        .and_then(|m| m.remove("@s"))
+        .unwrap_or(Value::Null);
+    let state = restore_persistent_refs(state);
 
     // Use BTree-specific state decoding if applicable
     let state_val = if let Some(info) = btree_info {
@@ -389,8 +391,8 @@ mod tests {
         assert_eq!(json["@cls"][1], "MyClass");
         assert_eq!(json["@s"]["title"], "hello");
 
-        // Encode back
-        let re_encoded = encode_zodb_record(&json).unwrap();
+        // Encode back (clone since encode takes ownership)
+        let re_encoded = encode_zodb_record(json.clone()).unwrap();
 
         // Decode again to verify
         let json2 = decode_zodb_record(&re_encoded).unwrap();
