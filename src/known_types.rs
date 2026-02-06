@@ -87,7 +87,7 @@ pub fn try_typed_json_to_pickle_value(
 // ===========================================================================
 
 /// Decode 10-byte datetime binary: (year_hi, year_lo, month, day, hour, min, sec, us_hi, us_mid, us_lo)
-fn decode_datetime_bytes(b: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8, u32)> {
+pub fn decode_datetime_bytes(b: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8, u32)> {
     if b.len() != 10 {
         return None;
     }
@@ -101,7 +101,7 @@ fn decode_datetime_bytes(b: &[u8]) -> Option<(u16, u8, u8, u8, u8, u8, u32)> {
     Some((year, month, day, hour, minute, second, microsecond))
 }
 
-fn encode_datetime_bytes(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8, us: u32) -> Vec<u8> {
+pub fn encode_datetime_bytes(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8, us: u32) -> Vec<u8> {
     vec![
         (year >> 8) as u8,
         (year & 0xff) as u8,
@@ -116,7 +116,7 @@ fn encode_datetime_bytes(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: 
     ]
 }
 
-fn format_datetime_iso(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8, us: u32) -> String {
+pub fn format_datetime_iso(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8, us: u32) -> String {
     if us > 0 {
         format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{us:06}")
     } else {
@@ -125,7 +125,7 @@ fn format_datetime_iso(year: u16, month: u8, day: u8, hour: u8, min: u8, sec: u8
 }
 
 /// Extract timezone info from a PickleValue (the second arg of datetime REDUCE).
-fn extract_tz_info(
+pub fn extract_tz_info(
     tz_val: &PickleValue,
     to_json: &dyn Fn(&PickleValue) -> Result<Value, CodecError>,
 ) -> Result<Option<TzInfo>, CodecError> {
@@ -196,7 +196,7 @@ fn extract_tz_info(
 }
 
 /// Extract total seconds from a timedelta PickleValue (REDUCE(datetime.timedelta, (d, s, us))).
-fn extract_timedelta_seconds(val: &PickleValue) -> Option<i64> {
+pub fn extract_timedelta_seconds(val: &PickleValue) -> Option<i64> {
     if let PickleValue::Reduce { callable, args } = val {
         if let PickleValue::Global { module, name } = callable.as_ref() {
             if module == "datetime" && name == "timedelta" {
@@ -221,14 +221,14 @@ fn extract_timedelta_seconds(val: &PickleValue) -> Option<i64> {
 }
 
 #[derive(Debug)]
-enum TzInfo {
+pub enum TzInfo {
     FixedOffset(i64), // total seconds from UTC
     PytzUtc,
     Pytz { name: String, args: Vec<Value> },
     ZoneInfo(String),
 }
 
-fn format_offset(total_seconds: i64) -> String {
+pub fn format_offset(total_seconds: i64) -> String {
     let sign = if total_seconds >= 0 { '+' } else { '-' };
     let abs_secs = total_seconds.unsigned_abs();
     let hours = abs_secs / 3600;
@@ -314,7 +314,7 @@ fn try_encode_date(args: &PickleValue) -> Result<Option<Value>, CodecError> {
 // datetime.time
 // ===========================================================================
 
-fn decode_time_bytes(b: &[u8]) -> Option<(u8, u8, u8, u32)> {
+pub fn decode_time_bytes(b: &[u8]) -> Option<(u8, u8, u8, u32)> {
     if b.len() != 6 {
         return None;
     }
@@ -699,7 +699,7 @@ fn try_decode_uuid(val: &Value) -> Result<PickleValue, CodecError> {
 // ===========================================================================
 
 /// Parse ISO datetime string, returning components and optional offset in seconds.
-fn parse_iso_datetime(
+pub fn parse_iso_datetime(
     s: &str,
 ) -> Result<((u16, u8, u8, u8, u8, u8, u32), Option<i64>), CodecError> {
     // Format: YYYY-MM-DDTHH:MM:SS[.ffffff][+HH:MM]
@@ -754,7 +754,7 @@ fn parse_iso_datetime(
 }
 
 /// Parse ISO time string.
-fn parse_iso_time(s: &str) -> Result<((u8, u8, u8, u32), Option<i64>), CodecError> {
+pub fn parse_iso_time(s: &str) -> Result<((u8, u8, u8, u32), Option<i64>), CodecError> {
     if s.len() < 8 {
         return Err(CodecError::InvalidData(format!("time too short: {s}")));
     }
@@ -825,7 +825,7 @@ fn parse_offset_suffix(s: &str) -> Result<Option<i64>, CodecError> {
 // ===========================================================================
 
 /// Construct PickleValue for datetime.timezone(timedelta(seconds=N)).
-fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
+pub fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
     let td = PickleValue::Reduce {
         callable: Box::new(PickleValue::Global {
             module: "datetime".into(),

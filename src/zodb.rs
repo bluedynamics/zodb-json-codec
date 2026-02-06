@@ -1,10 +1,17 @@
-use base64::Engine as _;
-use crate::btrees;
-use crate::decode::decode_pickle;
-use crate::encode::encode_pickle;
 use crate::error::CodecError;
-use crate::json::{json_to_pickle_value, pickle_value_to_json};
 use crate::types::PickleValue;
+
+#[cfg(test)]
+use base64::Engine as _;
+#[cfg(test)]
+use crate::btrees;
+#[cfg(test)]
+use crate::decode::decode_pickle;
+#[cfg(test)]
+use crate::encode::encode_pickle;
+#[cfg(test)]
+use crate::json::{json_to_pickle_value, pickle_value_to_json};
+#[cfg(test)]
 use serde_json::{json, Value};
 
 /// A ZODB record consists of two concatenated pickles:
@@ -13,7 +20,7 @@ use serde_json::{json, Value};
 ///
 /// We need to find the boundary between the two pickles.
 /// The first pickle ends at its STOP opcode (0x2e = '.').
-fn split_zodb_record(data: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
+pub fn split_zodb_record(data: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
     // We need to properly walk the first pickle to find its STOP opcode.
     // Simple approach: scan for STOP, but STOP byte (0x2e) can appear inside
     // string/bytes data. We need a minimal pickle walker.
@@ -129,8 +136,10 @@ fn find_pickle_end(data: &[u8]) -> Result<usize, CodecError> {
 }
 
 /// Decode a ZODB record (two concatenated pickles) into a JSON value.
+/// (serde_json path — used by Rust tests; Python API uses pyconv instead)
 ///
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
+#[cfg(test)]
 pub fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
     let (class_pickle, state_pickle) = split_zodb_record(data)?;
 
@@ -157,7 +166,9 @@ pub fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
 }
 
 /// Encode a ZODB JSON record back into two concatenated pickles.
+/// (serde_json path — used by Rust tests; Python API uses pyconv instead)
 /// Takes ownership to avoid cloning the state tree for persistent ref restoration.
+#[cfg(test)]
 pub fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     let cls = json_val
         .get("@cls")
@@ -204,6 +215,7 @@ pub fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     Ok(result)
 }
 
+#[cfg(test)]
 /// Transform ZODB persistent references from generic form to compact form.
 ///
 /// ZODB persistent references in pickle are tuples: (oid_bytes, class_info)
@@ -240,6 +252,7 @@ fn transform_persistent_refs(val: Value) -> Value {
     }
 }
 
+#[cfg(test)]
 /// Try to convert a generic persistent ref value to compact ZODB form.
 fn try_compact_ref(ref_val: &Value) -> Option<Value> {
     // Expected: {"@t": [{"@b": "base64_oid"}, class_or_null]}
@@ -276,6 +289,7 @@ fn try_compact_ref(ref_val: &Value) -> Option<Value> {
     }
 }
 
+#[cfg(test)]
 /// Restore compact ZODB persistent refs back to the generic form for encoding.
 ///
 /// Compact: {"@ref": "0000000000000003"} or {"@ref": ["oid_hex", "mod.Cls"]}
@@ -302,6 +316,7 @@ fn restore_persistent_refs(val: Value) -> Value {
     }
 }
 
+#[cfg(test)]
 /// Expand a compact ref back to generic tuple form.
 fn try_expand_ref(ref_val: &Value) -> Option<Value> {
     match ref_val {
@@ -332,7 +347,7 @@ fn try_expand_ref(ref_val: &Value) -> Option<Value> {
 }
 
 /// Extract (module, name) from a class pickle value.
-fn extract_class_info(val: &PickleValue) -> (String, String) {
+pub fn extract_class_info(val: &PickleValue) -> (String, String) {
     match val {
         PickleValue::Tuple(items) if items.len() == 2 => {
             let module = match &items[0] {

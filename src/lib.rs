@@ -5,11 +5,12 @@ mod error;
 mod json;
 mod known_types;
 mod opcodes;
+mod pyconv;
 mod types;
 mod zodb;
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::decode::decode_pickle;
 use crate::encode::encode_pickle;
@@ -37,118 +38,86 @@ fn json_to_pickle(py: Python<'_>, json_str: &str) -> PyResult<Py<PyBytes>> {
     Ok(PyBytes::new(py, &bytes).into())
 }
 
-/// Convert pickle bytes to a Python dict (via JSON internally).
+/// Convert pickle bytes to a Python dict (direct PickleValue → PyObject).
 #[pyfunction]
 fn pickle_to_dict(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     let val = decode_pickle(data).map_err(CodecError::from)?;
-    let json_val = pickle_value_to_json(&val)?;
-    json_value_to_pyobject(py, &json_val)
+    pyconv::pickle_value_to_pyobject(py, &val, false)
 }
 
-/// Convert a Python dict to pickle bytes.
+/// Convert a Python dict to pickle bytes (direct PyObject → PickleValue).
 #[pyfunction]
 fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
-    let json_val = pyobject_to_json_value(obj.as_any())?;
-    let pickle_val = json_to_pickle_value(&json_val)?;
+    let pickle_val = pyconv::pyobject_to_pickle_value(obj.as_any(), false)?;
     let bytes = encode_pickle(&pickle_val)?;
     Ok(PyBytes::new(py, &bytes).into())
 }
 
-/// Decode a ZODB record (two concatenated pickles) into a JSON string.
+/// Decode a ZODB record (two concatenated pickles) into a Python dict.
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[pyfunction]
 fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
-    let json_val = zodb::decode_zodb_record(data)?;
-    json_value_to_pyobject(py, &json_val)
+    let (class_data, state_data) = zodb::split_zodb_record(data)?;
+    let class_val = decode_pickle(class_data).map_err(CodecError::from)?;
+    let state_val = decode_pickle(state_data).map_err(CodecError::from)?;
+    let (module, name) = zodb::extract_class_info(&class_val);
+
+    // BTree-aware state conversion with inline persistent ref compaction
+    let state_obj = if let Some(info) = btrees::classify_btree(&module, &name) {
+        pyconv::btree_state_to_pyobject(py, &info, &state_val, true)?
+    } else {
+        pyconv::pickle_value_to_pyobject(py, &state_val, true)?
+    };
+
+    // Build result dict directly
+    let dict = PyDict::new(py);
+    let cls_list = PyList::new(py, [module.as_str(), name.as_str()])?;
+    dict.set_item("@cls", cls_list)?;
+    dict.set_item("@s", state_obj)?;
+    Ok(dict.into_any().unbind())
 }
 
 /// Encode a ZODB JSON record back into two concatenated pickles.
 #[pyfunction]
 fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
-    let json_val = pyobject_to_json_value(obj.as_any())?;
-    let bytes = zodb::encode_zodb_record(json_val)?;
-    Ok(PyBytes::new(py, &bytes).into())
-}
+    let cls_val = obj
+        .get_item("@cls")?
+        .ok_or_else(|| CodecError::InvalidData("missing @cls in ZODB record".to_string()))?;
+    let cls_list = cls_val.downcast::<PyList>().map_err(|_| {
+        CodecError::InvalidData("@cls must be a list".to_string())
+    })?;
+    if cls_list.len() != 2 {
+        return Err(CodecError::InvalidData("@cls must be [module, name]".to_string()).into());
+    }
+    let module: String = cls_list.get_item(0)?.extract()?;
+    let name: String = cls_list.get_item(1)?.extract()?;
 
-/// Convert a serde_json Value to a Python object.
-fn json_value_to_pyobject(py: Python<'_>, val: &serde_json::Value) -> PyResult<PyObject> {
-    match val {
-        serde_json::Value::Null => Ok(py.None()),
-        serde_json::Value::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
-        serde_json::Value::Number(n) => {
-            if let Some(i) = n.as_i64() {
-                Ok(i.into_pyobject(py)?.into_any().unbind())
-            } else if let Some(f) = n.as_f64() {
-                Ok(f.into_pyobject(py)?.into_any().unbind())
-            } else {
-                Ok(py.None())
-            }
-        }
-        serde_json::Value::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
-        serde_json::Value::Array(arr) => {
-            // Pre-collect into Vec then build list in one shot
-            let items: PyResult<Vec<PyObject>> = arr
-                .iter()
-                .map(|item| json_value_to_pyobject(py, item))
-                .collect();
-            let list = PyList::new(py, items?)?;
-            Ok(list.into_any().unbind())
-        }
-        serde_json::Value::Object(map) => {
-            let dict = PyDict::new(py);
-            for (k, v) in map {
-                dict.set_item(k, json_value_to_pyobject(py, v)?)?;
-            }
-            Ok(dict.into_any().unbind())
-        }
-    }
-}
+    // Check for BTree class
+    let btree_info = btrees::classify_btree(&module, &name);
 
-/// Convert a Python object to a serde_json Value.
-///
-/// Uses type-based dispatch (is_instance_of) instead of try-extract to avoid
-/// creating and discarding Python error objects on type mismatches.
-fn pyobject_to_json_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<serde_json::Value> {
-    if obj.is_none() {
-        return Ok(serde_json::Value::Null);
-    }
-    // Check bool BEFORE int (bool is a subclass of int in Python)
-    if obj.is_instance_of::<PyBool>() {
-        let b: bool = obj.extract()?;
-        return Ok(serde_json::Value::Bool(b));
-    }
-    if obj.is_instance_of::<PyInt>() {
-        let i: i64 = obj.extract()?;
-        return Ok(serde_json::json!(i));
-    }
-    if obj.is_instance_of::<PyFloat>() {
-        let f: f64 = obj.extract()?;
-        return Ok(serde_json::Number::from_f64(f)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null));
-    }
-    if obj.is_instance_of::<PyString>() {
-        let s: String = obj.extract()?;
-        return Ok(serde_json::Value::String(s));
-    }
-    if obj.is_instance_of::<PyList>() {
-        let list = obj.downcast::<PyList>()?;
-        let arr: PyResult<Vec<serde_json::Value>> =
-            list.iter().map(|item| pyobject_to_json_value(&item)).collect();
-        return Ok(serde_json::Value::Array(arr?));
-    }
-    if obj.is_instance_of::<PyDict>() {
-        let dict = obj.downcast::<PyDict>()?;
-        let mut map = serde_json::Map::new();
-        for (k, v) in dict {
-            let key: String = k.extract()?;
-            map.insert(key, pyobject_to_json_value(&v)?);
-        }
-        return Ok(serde_json::Value::Object(map));
-    }
-    // Fallback: try str() representation
-    let s = obj.str()?.to_string();
-    Ok(serde_json::Value::String(s))
+    // Encode class pickle
+    let class_val = types::PickleValue::Global {
+        module: module.clone(),
+        name: name.clone(),
+    };
+    let class_bytes = encode_pickle(&class_val)?;
+
+    // Get state with persistent ref expansion
+    let state_obj = obj
+        .get_item("@s")?
+        .unwrap_or_else(|| py.None().into_bound(py));
+
+    let state_val = if let Some(info) = btree_info {
+        pyconv::btree_state_from_pyobject(&info, &state_obj, true)?
+    } else {
+        pyconv::pyobject_to_pickle_value(&state_obj, true)?
+    };
+    let state_bytes = encode_pickle(&state_val)?;
+
+    // Concatenate
+    let mut result = class_bytes;
+    result.extend_from_slice(&state_bytes);
+    Ok(PyBytes::new(py, &result).into())
 }
 
 /// Python module definition

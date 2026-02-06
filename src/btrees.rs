@@ -147,7 +147,7 @@ fn btree_node_state_to_json(
 /// Unwrap the inner 3 levels of a small inline BTree.
 /// Input: the single element of the outermost tuple.
 /// Expected: (((flat_data,),),) → returns flat_data items.
-fn unwrap_inline_btree(val: &PickleValue) -> Option<&[PickleValue]> {
+pub fn unwrap_inline_btree(val: &PickleValue) -> Option<&[PickleValue]> {
     // Level 2: should be 1-tuple
     let level2 = match val {
         PickleValue::Tuple(items) if items.len() == 1 => &items[0],
@@ -166,7 +166,7 @@ fn unwrap_inline_btree(val: &PickleValue) -> Option<&[PickleValue]> {
 }
 
 /// Check if a children tuple contains any PersistentRef values.
-fn children_has_refs(children: &[PickleValue]) -> bool {
+pub fn children_has_refs(children: &[PickleValue]) -> bool {
     children
         .iter()
         .any(|item| matches!(item, PickleValue::PersistentRef(_)))
@@ -358,7 +358,7 @@ fn decode_keys(
 }
 
 /// Wrap flat data items in the appropriate tuple nesting for the BTree kind.
-fn wrap_flat_data(
+pub fn wrap_flat_data(
     info: &BTreeClassInfo,
     flat_data: Vec<PickleValue>,
     next_ref: Option<PickleValue>,
