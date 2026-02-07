@@ -10,6 +10,7 @@ mod types;
 mod zodb;
 
 use pyo3::prelude::*;
+use pyo3::intern;
 use pyo3::types::{PyBytes, PyDict, PyList};
 
 use crate::decode::decode_pickle;
@@ -72,8 +73,8 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     // Build result dict directly
     let dict = PyDict::new(py);
     let cls_list = PyList::new(py, [module.as_str(), name.as_str()])?;
-    dict.set_item("@cls", cls_list)?;
-    dict.set_item("@s", state_obj)?;
+    dict.set_item(intern!(py, "@cls"), cls_list)?;
+    dict.set_item(intern!(py, "@s"), state_obj)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -81,7 +82,7 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 #[pyfunction]
 fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
     let cls_val = obj
-        .get_item("@cls")?
+        .get_item(intern!(py, "@cls"))?
         .ok_or_else(|| CodecError::InvalidData("missing @cls in ZODB record".to_string()))?;
     let cls_list = cls_val.downcast::<PyList>().map_err(|_| {
         CodecError::InvalidData("@cls must be a list".to_string())
@@ -104,7 +105,7 @@ fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<Py
 
     // Get state with persistent ref expansion
     let state_obj = obj
-        .get_item("@s")?
+        .get_item(intern!(py, "@s"))?
         .unwrap_or_else(|| py.None().into_bound(py));
 
     let state_val = if let Some(info) = btree_info {

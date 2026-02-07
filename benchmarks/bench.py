@@ -639,6 +639,57 @@ def results_to_json(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Regression check: ratio-based thresholds (machine-independent)
+# ---------------------------------------------------------------------------
+
+# Expected minimum codec/python speed ratios (codec_time / python_time).
+# Values < 1.0 mean codec is faster. Values > 1.0 mean codec is slower.
+# Thresholds are generous to account for CI runner variability.
+# A regression is when the ratio exceeds the threshold (codec gets slower).
+REGRESSION_THRESHOLDS: dict[str, dict[str, float]] = {
+    # category: {operation: max_allowed_ratio}
+    # ratio = codec_mean / python_mean (lower is better)
+    "simple_flat_dict": {"decode": 1.0, "encode": 1.0},
+    "nested_dict": {"decode": 1.0, "encode": 1.2},
+    "large_flat_dict": {"decode": 1.5, "encode": 2.5},
+    "bytes_in_state": {"decode": 1.5, "encode": 2.0},
+    "special_types": {"decode": 1.0, "encode": 1.0},
+    "btree_small": {"decode": 1.5, "encode": 1.0},
+    "btree_length": {"decode": 1.0, "encode": 1.0},
+    "scalar_string": {"decode": 1.0, "encode": 1.0},
+    "wide_dict": {"decode": 1.5, "encode": 2.0},
+    "deep_nesting": {"decode": 1.5, "encode": 2.5},
+}
+
+
+def check_regression(results: list[BenchmarkResult]) -> list[str]:
+    """Check benchmark results against thresholds. Returns list of failures."""
+    failures = []
+    for r in results:
+        thresholds = REGRESSION_THRESHOLDS.get(r.name, {})
+        for op, max_ratio in thresholds.items():
+            if op == "decode":
+                codec_mean = r.decode_codec.mean
+                python_mean = r.decode_python.mean
+            elif op == "encode":
+                codec_mean = r.encode_codec.mean
+                python_mean = r.encode_python.mean
+            else:
+                continue
+            if python_mean <= 0 or codec_mean <= 0:
+                continue
+            ratio = codec_mean / python_mean
+            if ratio > max_ratio:
+                failures.append(
+                    f"REGRESSION: {r.name} {op}: "
+                    f"codec/python ratio {ratio:.2f} exceeds "
+                    f"threshold {max_ratio:.1f} "
+                    f"(codec={codec_mean:.1f}us, python={python_mean:.1f}us)"
+                )
+    return failures
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Benchmark zodb-json-codec vs Python pickle"
@@ -662,7 +713,15 @@ def main() -> None:
     both.add_argument("--warmup", type=int, default=100)
     both.add_argument("--max-records", type=int, default=None)
 
-    for p in [syn, fs, both]:
+    # check (CI regression detection)
+    chk = sub.add_parser(
+        "check",
+        help="Run synthetic benchmarks and fail on performance regression",
+    )
+    chk.add_argument("--iterations", type=int, default=500)
+    chk.add_argument("--warmup", type=int, default=100)
+
+    for p in [syn, fs, both, chk]:
         p.add_argument("--output", help="Write JSON results to file")
         p.add_argument(
             "--format",
@@ -689,7 +748,7 @@ def main() -> None:
     synthetic_results = None
     fs_result = None
 
-    if args.command in ("synthetic", "all"):
+    if args.command in ("synthetic", "all", "check"):
         iters = getattr(args, "iterations", 1000)
         warm = getattr(args, "warmup", 100)
         print(f"Running synthetic benchmarks ({iters} iterations, {warm} warmup)...")
@@ -722,6 +781,20 @@ def main() -> None:
     if output:
         Path(output).write_text(json.dumps(json_data, indent=2))
         print(f"Results written to {output}")
+
+    # Regression check
+    if args.command == "check" and synthetic_results:
+        failures = check_regression(synthetic_results)
+        if failures:
+            print(f"\n{'='*60}")
+            print(f"PERFORMANCE REGRESSION DETECTED ({len(failures)} failures)")
+            print(f"{'='*60}")
+            for f in failures:
+                print(f"  {f}")
+            print()
+            sys.exit(1)
+        else:
+            print(f"\nPerformance check passed (all ratios within thresholds)")
 
 
 if __name__ == "__main__":

@@ -23,10 +23,12 @@ impl Encoder {
         }
     }
 
+    #[inline]
     fn write_u8(&mut self, b: u8) {
         self.buf.push(b);
     }
 
+    #[inline]
     fn write_bytes(&mut self, data: &[u8]) {
         self.buf.extend_from_slice(data);
     }
@@ -200,6 +202,7 @@ impl Encoder {
         Ok(())
     }
 
+    #[inline]
     fn encode_int(&mut self, val: i64) {
         if val >= 0 && val < 256 {
             self.write_u8(BININT1);

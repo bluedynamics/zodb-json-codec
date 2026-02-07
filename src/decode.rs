@@ -3,13 +3,6 @@ use crate::opcodes::*;
 use crate::types::PickleValue;
 use num_bigint::BigInt;
 
-/// A marker value used on the stack to delimit sequences (MARK opcode).
-#[derive(Debug, Clone)]
-enum StackItem {
-    Mark,
-    Value(PickleValue),
-}
-
 /// Decode pickle bytes into a PickleValue AST.
 ///
 /// This implements a subset of the pickle virtual machine sufficient
@@ -23,10 +16,10 @@ pub fn decode_pickle(data: &[u8]) -> Result<PickleValue, CodecError> {
 struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
-    stack: Vec<StackItem>,
+    stack: Vec<PickleValue>,
     memo: Vec<PickleValue>,
-    /// Metastack for MARK-based operations
-    metastack: Vec<Vec<StackItem>>,
+    /// Metastack for MARK-based operations (saves/restores stack at MARK)
+    metastack: Vec<Vec<PickleValue>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -34,9 +27,9 @@ impl<'a> Decoder<'a> {
         Self {
             data,
             pos: 0,
-            stack: Vec::new(),
-            memo: Vec::new(),
-            metastack: Vec::new(),
+            stack: Vec::with_capacity(16),
+            memo: Vec::with_capacity(16),
+            metastack: Vec::with_capacity(4),
         }
     }
 
@@ -360,46 +353,50 @@ impl<'a> Decoder<'a> {
                 REDUCE => {
                     let args = self.pop_value()?;
                     let callable = self.pop_value()?;
-                    // Recognize set/frozenset REDUCE pattern (protocol 3)
-                    match (&callable, &args) {
-                        (
-                            PickleValue::Global { module, name },
-                            PickleValue::Tuple(tuple_items),
-                        ) if module == "builtins"
-                            && name == "set"
-                            && tuple_items.len() == 1 =>
-                        {
-                            if let PickleValue::List(items) = &tuple_items[0] {
-                                self.push(PickleValue::Set(items.clone()));
-                            } else {
+                    // Recognize set/frozenset REDUCE pattern (protocol 3).
+                    // Uses two-step check: borrow callable first, then consume
+                    // args by value to move list items instead of cloning.
+                    let set_variant = match &callable {
+                        PickleValue::Global { module, name } if module == "builtins" => {
+                            match name.as_str() {
+                                "set" => Some(true),
+                                "frozenset" => Some(false),
+                                _ => None,
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(is_set) = set_variant {
+                        match args {
+                            PickleValue::Tuple(mut tuple_items) if tuple_items.len() == 1 => {
+                                match tuple_items.swap_remove(0) {
+                                    PickleValue::List(items) => {
+                                        self.push(if is_set {
+                                            PickleValue::Set(items)
+                                        } else {
+                                            PickleValue::FrozenSet(items)
+                                        });
+                                    }
+                                    other => {
+                                        self.push(PickleValue::Reduce {
+                                            callable: Box::new(callable),
+                                            args: Box::new(PickleValue::Tuple(vec![other])),
+                                        });
+                                    }
+                                }
+                            }
+                            args => {
                                 self.push(PickleValue::Reduce {
                                     callable: Box::new(callable),
                                     args: Box::new(args),
                                 });
                             }
                         }
-                        (
-                            PickleValue::Global { module, name },
-                            PickleValue::Tuple(tuple_items),
-                        ) if module == "builtins"
-                            && name == "frozenset"
-                            && tuple_items.len() == 1 =>
-                        {
-                            if let PickleValue::List(items) = &tuple_items[0] {
-                                self.push(PickleValue::FrozenSet(items.clone()));
-                            } else {
-                                self.push(PickleValue::Reduce {
-                                    callable: Box::new(callable),
-                                    args: Box::new(args),
-                                });
-                            }
-                        }
-                        _ => {
-                            self.push(PickleValue::Reduce {
-                                callable: Box::new(callable),
-                                args: Box::new(args),
-                            });
-                        }
+                    } else {
+                        self.push(PickleValue::Reduce {
+                            callable: Box::new(callable),
+                            args: Box::new(args),
+                        });
                     }
                 }
                 BUILD => {
@@ -653,63 +650,36 @@ impl<'a> Decoder<'a> {
 
     // -- Stack operations --
 
+    #[inline]
     fn push(&mut self, val: PickleValue) {
-        self.stack.push(StackItem::Value(val));
+        self.stack.push(val);
     }
 
+    #[inline]
     fn pop_value(&mut self) -> Result<PickleValue, CodecError> {
-        match self.stack.pop() {
-            Some(StackItem::Value(v)) => Ok(v),
-            Some(StackItem::Mark) => Err(CodecError::StackUnderflow),
-            None => {
-                // Check metastack
-                if let Some(mut old_stack) = self.metastack.pop() {
-                    std::mem::swap(&mut self.stack, &mut old_stack);
-                    // old_stack now has what was in current stack (empty or mark items)
-                    // This shouldn't happen normally
-                    Err(CodecError::StackUnderflow)
-                } else {
-                    Err(CodecError::StackUnderflow)
-                }
-            }
-        }
+        self.stack.pop().ok_or(CodecError::StackUnderflow)
     }
 
+    #[inline]
     fn peek_value(&self) -> Result<&PickleValue, CodecError> {
-        for item in self.stack.iter().rev() {
-            if let StackItem::Value(v) = item {
-                return Ok(v);
-            }
-        }
-        Err(CodecError::StackUnderflow)
+        self.stack.last().ok_or(CodecError::StackUnderflow)
     }
 
+    #[inline]
     fn top_value_mut(&mut self) -> Result<&mut PickleValue, CodecError> {
-        for item in self.stack.iter_mut().rev() {
-            if let StackItem::Value(ref mut v) = item {
-                return Ok(v);
-            }
-        }
-        Err(CodecError::StackUnderflow)
+        self.stack.last_mut().ok_or(CodecError::StackUnderflow)
     }
 
     /// Pop all items above the last MARK from the stack.
     fn pop_mark(&mut self) -> Result<Vec<PickleValue>, CodecError> {
-        // Everything in self.stack since the last MARK push is our items
-        let items: Vec<PickleValue> = self
-            .stack
-            .drain(..)
-            .map(|item| match item {
-                StackItem::Value(v) => v,
-                StackItem::Mark => unreachable!("marks should not be on stack"),
-            })
-            .collect();
+        // Take the current stack (everything since MARK) as the result.
+        // This is a pointer swap — no element-by-element drain needed.
+        let items = std::mem::take(&mut self.stack);
 
         // Restore the previous stack from metastack
         if let Some(old_stack) = self.metastack.pop() {
             self.stack = old_stack;
         }
-        // else: stack is empty, which is fine for the first mark
 
         Ok(items)
     }

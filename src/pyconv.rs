@@ -10,6 +10,7 @@
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use pyo3::prelude::*;
+use pyo3::intern;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::btrees;
@@ -36,14 +37,14 @@ pub fn pickle_value_to_pyobject(
         PickleValue::Int(i) => Ok(i.into_pyobject(py)?.into_any().unbind()),
         PickleValue::BigInt(bi) => {
             let dict = PyDict::new(py);
-            dict.set_item("@bi", bi.to_string())?;
+            dict.set_item(intern!(py, "@bi"), bi.to_string())?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::Float(f) => Ok(f.into_pyobject(py)?.into_any().unbind()),
         PickleValue::String(s) => Ok(s.into_pyobject(py)?.into_any().unbind()),
         PickleValue::Bytes(b) => {
             let dict = PyDict::new(py);
-            dict.set_item("@b", BASE64.encode(b))?;
+            dict.set_item(intern!(py, "@b"), BASE64.encode(b))?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::List(items) => {
@@ -61,37 +62,35 @@ pub fn pickle_value_to_pyobject(
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
-            dict.set_item("@t", list)?;
+            dict.set_item(intern!(py, "@t"), list)?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::Dict(pairs) => {
-            let all_string_keys = pairs
-                .iter()
-                .all(|(k, _)| matches!(k, PickleValue::String(_)));
-            if all_string_keys {
-                let dict = PyDict::new(py);
-                for (k, v) in pairs {
-                    if let PickleValue::String(key) = k {
-                        dict.set_item(key, pickle_value_to_pyobject(py, v, compact_refs)?)?;
-                    }
+            // Single-pass: optimistically build string-key PyDict.
+            // >99% of ZODB dicts have all string keys — skip the pre-scan.
+            let dict = PyDict::new(py);
+            for (k, v) in pairs {
+                if let PickleValue::String(key) = k {
+                    dict.set_item(key, pickle_value_to_pyobject(py, v, compact_refs)?)?;
+                } else {
+                    // Rare: non-string key found — fall back to @d format.
+                    // Re-process all pairs (this path is almost never hit).
+                    let py_pairs: PyResult<Vec<PyObject>> = pairs
+                        .iter()
+                        .map(|(k, v)| {
+                            let pk = pickle_value_to_pyobject(py, k, compact_refs)?;
+                            let pv = pickle_value_to_pyobject(py, v, compact_refs)?;
+                            let pair = PyList::new(py, [pk, pv])?;
+                            Ok(pair.into_any().unbind())
+                        })
+                        .collect();
+                    let arr = PyList::new(py, py_pairs?)?;
+                    let d = PyDict::new(py);
+                    d.set_item(intern!(py, "@d"), arr)?;
+                    return Ok(d.into_any().unbind());
                 }
-                Ok(dict.into_any().unbind())
-            } else {
-                // Non-string keys: @d marker
-                let py_pairs: PyResult<Vec<PyObject>> = pairs
-                    .iter()
-                    .map(|(k, v)| {
-                        let pk = pickle_value_to_pyobject(py, k, compact_refs)?;
-                        let pv = pickle_value_to_pyobject(py, v, compact_refs)?;
-                        let pair = PyList::new(py, [pk, pv])?;
-                        Ok(pair.into_any().unbind())
-                    })
-                    .collect();
-                let arr = PyList::new(py, py_pairs?)?;
-                let dict = PyDict::new(py);
-                dict.set_item("@d", arr)?;
-                Ok(dict.into_any().unbind())
             }
+            Ok(dict.into_any().unbind())
         }
         PickleValue::Set(items) => {
             let py_items: PyResult<Vec<PyObject>> = items
@@ -100,7 +99,7 @@ pub fn pickle_value_to_pyobject(
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
-            dict.set_item("@set", list)?;
+            dict.set_item(intern!(py, "@set"), list)?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::FrozenSet(items) => {
@@ -110,13 +109,13 @@ pub fn pickle_value_to_pyobject(
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
-            dict.set_item("@fset", list)?;
+            dict.set_item(intern!(py, "@fset"), list)?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::Global { module, name } => {
             let cls_list = PyList::new(py, [module.as_str(), name.as_str()])?;
             let dict = PyDict::new(py);
-            dict.set_item("@cls", cls_list)?;
+            dict.set_item(intern!(py, "@cls"), cls_list)?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::Instance { module, name, state } => {
@@ -135,13 +134,13 @@ pub fn pickle_value_to_pyobject(
             if module.is_empty() && name.is_empty() {
                 // Anonymous instance
                 let dict = PyDict::new(py);
-                dict.set_item("@inst", state_obj)?;
+                dict.set_item(intern!(py, "@inst"), state_obj)?;
                 Ok(dict.into_any().unbind())
             } else {
                 let cls_list = PyList::new(py, [module.as_str(), name.as_str()])?;
                 let dict = PyDict::new(py);
-                dict.set_item("@cls", cls_list)?;
-                dict.set_item("@s", state_obj)?;
+                dict.set_item(intern!(py, "@cls"), cls_list)?;
+                dict.set_item(intern!(py, "@s"), state_obj)?;
                 Ok(dict.into_any().unbind())
             }
         }
@@ -151,7 +150,7 @@ pub fn pickle_value_to_pyobject(
             } else {
                 let inner_obj = pickle_value_to_pyobject(py, inner, compact_refs)?;
                 let dict = PyDict::new(py);
-                dict.set_item("@ref", inner_obj)?;
+                dict.set_item(intern!(py, "@ref"), inner_obj)?;
                 Ok(dict.into_any().unbind())
             }
         }
@@ -166,15 +165,15 @@ pub fn pickle_value_to_pyobject(
             let callable_obj = pickle_value_to_pyobject(py, callable, compact_refs)?;
             let args_obj = pickle_value_to_pyobject(py, args, compact_refs)?;
             let inner_dict = PyDict::new(py);
-            inner_dict.set_item("callable", callable_obj)?;
-            inner_dict.set_item("args", args_obj)?;
+            inner_dict.set_item(intern!(py, "callable"), callable_obj)?;
+            inner_dict.set_item(intern!(py, "args"), args_obj)?;
             let dict = PyDict::new(py);
-            dict.set_item("@reduce", inner_dict)?;
+            dict.set_item(intern!(py, "@reduce"), inner_dict)?;
             Ok(dict.into_any().unbind())
         }
         PickleValue::RawPickle(data) => {
             let dict = PyDict::new(py);
-            dict.set_item("@pkl", BASE64.encode(data))?;
+            dict.set_item(intern!(py, "@pkl"), BASE64.encode(data))?;
             Ok(dict.into_any().unbind())
         }
     }
@@ -198,7 +197,7 @@ fn compact_ref_to_pyobject(
                 let dict = PyDict::new(py);
                 match &items[1] {
                     PickleValue::None => {
-                        dict.set_item("@ref", &hex)?;
+                        dict.set_item(intern!(py, "@ref"), &hex)?;
                         return Ok(dict.into_any().unbind());
                     }
                     PickleValue::Global { module, name } => {
@@ -208,7 +207,7 @@ fn compact_ref_to_pyobject(
                             format!("{module}.{name}")
                         };
                         let ref_list = PyList::new(py, [hex.as_str(), class_path.as_str()])?;
-                        dict.set_item("@ref", ref_list)?;
+                        dict.set_item(intern!(py, "@ref"), ref_list)?;
                         return Ok(dict.into_any().unbind());
                     }
                     _ => {}
@@ -219,7 +218,7 @@ fn compact_ref_to_pyobject(
     // Fallback: generic ref
     let inner_obj = pickle_value_to_pyobject(py, inner, compact_refs)?;
     let dict = PyDict::new(py);
-    dict.set_item("@ref", inner_obj)?;
+    dict.set_item(intern!(py, "@ref"), inner_obj)?;
     Ok(dict.into_any().unbind())
 }
 
@@ -274,7 +273,7 @@ fn encode_datetime_pyobject(
     let dict = PyDict::new(py);
     if tuple_items.len() == 1 {
         // Naive datetime
-        dict.set_item("@dt", &iso)?;
+        dict.set_item(intern!(py, "@dt"), &iso)?;
         Ok(Some(dict.into_any().unbind()))
     } else if tuple_items.len() == 2 {
         // We need a to_json callback for extract_tz_info — use a dummy that
@@ -292,32 +291,31 @@ fn encode_datetime_pyobject(
         match known_types::extract_tz_info(&tuple_items[1], &to_json_dummy)? {
             Some(known_types::TzInfo::FixedOffset(secs)) => {
                 let offset = known_types::format_offset(secs);
-                dict.set_item("@dt", format!("{iso}{offset}"))?;
+                dict.set_item(intern!(py, "@dt"), format!("{iso}{offset}"))?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::PytzUtc) => {
-                dict.set_item("@dt", format!("{iso}+00:00"))?;
+                dict.set_item(intern!(py, "@dt"), format!("{iso}+00:00"))?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::Pytz { name, args: tz_args }) => {
-                dict.set_item("@dt", &iso)?;
-                // Build @tz dict with pytz args as a Python list
+                dict.set_item(intern!(py, "@dt"), &iso)?;
                 let tz_dict = PyDict::new(py);
                 let py_args: PyResult<Vec<PyObject>> = tz_args
                     .iter()
                     .map(|a| json_value_to_simple_pyobject(py, a))
                     .collect();
                 let py_list = PyList::new(py, py_args?)?;
-                tz_dict.set_item("pytz", py_list)?;
-                tz_dict.set_item("name", &name)?;
-                dict.set_item("@tz", tz_dict)?;
+                tz_dict.set_item(intern!(py, "pytz"), py_list)?;
+                tz_dict.set_item(intern!(py, "name"), &name)?;
+                dict.set_item(intern!(py, "@tz"), tz_dict)?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::ZoneInfo(key)) => {
-                dict.set_item("@dt", &iso)?;
+                dict.set_item(intern!(py, "@dt"), &iso)?;
                 let tz_dict = PyDict::new(py);
-                tz_dict.set_item("zoneinfo", &key)?;
-                dict.set_item("@tz", tz_dict)?;
+                tz_dict.set_item(intern!(py, "zoneinfo"), &key)?;
+                dict.set_item(intern!(py, "@tz"), tz_dict)?;
                 Ok(Some(dict.into_any().unbind()))
             }
             None => {
@@ -369,7 +367,7 @@ fn encode_date_pyobject(
     let month = bytes[2];
     let day = bytes[3];
     let dict = PyDict::new(py);
-    dict.set_item("@date", format!("{year:04}-{month:02}-{day:02}"))?;
+    dict.set_item(intern!(py, "@date"), format!("{year:04}-{month:02}-{day:02}"))?;
     Ok(Some(dict.into_any().unbind()))
 }
 
@@ -398,7 +396,7 @@ fn encode_time_pyobject(
 
     let dict = PyDict::new(py);
     if tuple_items.len() == 1 {
-        dict.set_item("@time", &time_str)?;
+        dict.set_item(intern!(py, "@time"), &time_str)?;
         Ok(Some(dict.into_any().unbind()))
     } else if tuple_items.len() == 2 {
         let to_json_dummy =
@@ -412,31 +410,31 @@ fn encode_time_pyobject(
         match known_types::extract_tz_info(&tuple_items[1], &to_json_dummy)? {
             Some(known_types::TzInfo::FixedOffset(secs)) => {
                 let offset = known_types::format_offset(secs);
-                dict.set_item("@time", format!("{time_str}{offset}"))?;
+                dict.set_item(intern!(py, "@time"), format!("{time_str}{offset}"))?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::PytzUtc) => {
-                dict.set_item("@time", format!("{time_str}+00:00"))?;
+                dict.set_item(intern!(py, "@time"), format!("{time_str}+00:00"))?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::Pytz { name, args: tz_args }) => {
-                dict.set_item("@time", &time_str)?;
+                dict.set_item(intern!(py, "@time"), &time_str)?;
                 let tz_dict = PyDict::new(py);
                 let py_args: PyResult<Vec<PyObject>> = tz_args
                     .iter()
                     .map(|a| json_value_to_simple_pyobject(py, a))
                     .collect();
                 let py_list = PyList::new(py, py_args?)?;
-                tz_dict.set_item("pytz", py_list)?;
-                tz_dict.set_item("name", &name)?;
-                dict.set_item("@tz", tz_dict)?;
+                tz_dict.set_item(intern!(py, "pytz"), py_list)?;
+                tz_dict.set_item(intern!(py, "name"), &name)?;
+                dict.set_item(intern!(py, "@tz"), tz_dict)?;
                 Ok(Some(dict.into_any().unbind()))
             }
             Some(known_types::TzInfo::ZoneInfo(key)) => {
-                dict.set_item("@time", &time_str)?;
+                dict.set_item(intern!(py, "@time"), &time_str)?;
                 let tz_dict = PyDict::new(py);
-                tz_dict.set_item("zoneinfo", &key)?;
-                dict.set_item("@tz", tz_dict)?;
+                tz_dict.set_item(intern!(py, "zoneinfo"), &key)?;
+                dict.set_item(intern!(py, "@tz"), tz_dict)?;
                 Ok(Some(dict.into_any().unbind()))
             }
             None => {
@@ -471,7 +469,7 @@ fn encode_timedelta_pyobject(
     };
     let list = PyList::new(py, [days, secs, us])?;
     let dict = PyDict::new(py);
-    dict.set_item("@td", list)?;
+    dict.set_item(intern!(py, "@td"), list)?;
     Ok(Some(dict.into_any().unbind()))
 }
 
@@ -488,7 +486,7 @@ fn encode_decimal_pyobject(
         _ => return Ok(None),
     };
     let dict = PyDict::new(py);
-    dict.set_item("@dec", s.as_str())?;
+    dict.set_item(intern!(py, "@dec"), s.as_str())?;
     Ok(Some(dict.into_any().unbind()))
 }
 
@@ -511,7 +509,7 @@ fn encode_set_pyobject(
         .collect();
     let list = PyList::new(py, py_items?)?;
     let dict = PyDict::new(py);
-    dict.set_item("@set", list)?;
+    dict.set_item(intern!(py, "@set"), list)?;
     Ok(Some(dict.into_any().unbind()))
 }
 
@@ -534,7 +532,7 @@ fn encode_frozenset_pyobject(
         .collect();
     let list = PyList::new(py, py_items?)?;
     let dict = PyDict::new(py);
-    dict.set_item("@fset", list)?;
+    dict.set_item(intern!(py, "@fset"), list)?;
     Ok(Some(dict.into_any().unbind()))
 }
 
@@ -585,7 +583,7 @@ fn encode_uuid_pyobject(
                     &hex[20..32]
                 );
                 let dict = PyDict::new(py);
-                dict.set_item("@uuid", &uuid_str)?;
+                dict.set_item(intern!(py, "@uuid"), &uuid_str)?;
                 return Ok(Some(dict.into_any().unbind()));
             }
         }
@@ -649,8 +647,8 @@ fn btree_node_to_pyobject(
                 let children_list = PyList::new(py, py_children?)?;
                 let first_obj = pickle_value_to_pyobject(py, &outer[1], compact_refs)?;
                 let dict = PyDict::new(py);
-                dict.set_item("@children", children_list)?;
-                dict.set_item("@first", first_obj)?;
+                dict.set_item(intern!(py, "@children"), children_list)?;
+                dict.set_item(intern!(py, "@first"), first_obj)?;
                 return Ok(dict.into_any().unbind());
             }
         }
@@ -694,17 +692,17 @@ fn bucket_to_pyobject(
                     i += 2;
                 }
                 let kv_list = PyList::new(py, pairs)?;
-                dict.set_item("@kv", kv_list)?;
+                dict.set_item(intern!(py, "@kv"), kv_list)?;
             } else {
                 let py_keys: PyResult<Vec<PyObject>> = flat_data
                     .iter()
                     .map(|item| pickle_value_to_pyobject(py, item, compact_refs))
                     .collect();
                 let ks_list = PyList::new(py, py_keys?)?;
-                dict.set_item("@ks", ks_list)?;
+                dict.set_item(intern!(py, "@ks"), ks_list)?;
             }
             let next_obj = pickle_value_to_pyobject(py, &outer[1], compact_refs)?;
-            dict.set_item("@next", next_obj)?;
+            dict.set_item(intern!(py, "@next"), next_obj)?;
             return Ok(dict.into_any().unbind());
         }
         return pickle_value_to_pyobject(py, state, compact_refs);
@@ -721,7 +719,7 @@ fn format_flat_data_pyobject(
 ) -> PyResult<PyObject> {
     let dict = PyDict::new(py);
     if info.is_map {
-        let mut pairs = Vec::new();
+        let mut pairs = Vec::with_capacity(items.len() / 2);
         let mut i = 0;
         while i + 1 < items.len() {
             let k = pickle_value_to_pyobject(py, &items[i], compact_refs)?;
@@ -731,14 +729,14 @@ fn format_flat_data_pyobject(
             i += 2;
         }
         let kv_list = PyList::new(py, pairs)?;
-        dict.set_item("@kv", kv_list)?;
+        dict.set_item(intern!(py, "@kv"), kv_list)?;
     } else {
         let py_keys: PyResult<Vec<PyObject>> = items
             .iter()
             .map(|item| pickle_value_to_pyobject(py, item, compact_refs))
             .collect();
         let ks_list = PyList::new(py, py_keys?)?;
-        dict.set_item("@ks", ks_list)?;
+        dict.set_item(intern!(py, "@ks"), ks_list)?;
     }
     Ok(dict.into_any().unbind())
 }
@@ -754,6 +752,15 @@ pub fn pyobject_to_pickle_value(
     obj: &Bound<'_, pyo3::PyAny>,
     expand_refs: bool,
 ) -> PyResult<PickleValue> {
+    // Ordered by frequency in ZODB data: string > dict > int > none > float > list > bool
+    if obj.is_instance_of::<PyString>() {
+        let s: String = obj.extract()?;
+        return Ok(PickleValue::String(s));
+    }
+    if obj.is_instance_of::<PyDict>() {
+        let dict = obj.downcast::<PyDict>()?;
+        return pydict_to_pickle_value(dict, expand_refs);
+    }
     if obj.is_none() {
         return Ok(PickleValue::None);
     }
@@ -770,10 +777,6 @@ pub fn pyobject_to_pickle_value(
         let f: f64 = obj.extract()?;
         return Ok(PickleValue::Float(f));
     }
-    if obj.is_instance_of::<PyString>() {
-        let s: String = obj.extract()?;
-        return Ok(PickleValue::String(s));
-    }
     if obj.is_instance_of::<PyList>() {
         let list = obj.downcast::<PyList>()?;
         let items: PyResult<Vec<PickleValue>> = list
@@ -781,10 +784,6 @@ pub fn pyobject_to_pickle_value(
             .map(|item| pyobject_to_pickle_value(&item, expand_refs))
             .collect();
         return Ok(PickleValue::List(items?));
-    }
-    if obj.is_instance_of::<PyDict>() {
-        let dict = obj.downcast::<PyDict>()?;
-        return pydict_to_pickle_value(dict, expand_refs);
     }
     // Fallback: try str() representation
     let s = obj.str()?.to_string();
@@ -796,10 +795,55 @@ fn pydict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
     expand_refs: bool,
 ) -> PyResult<PickleValue> {
-    // Check for markers in priority order
+    let py = dict.py();
+    let len = dict.len();
+
+    // Fast path: no JSON marker dict has more than 4 keys.
+    // Skip all marker checks for large plain dicts.
+    if len > 4 {
+        let mut pairs = Vec::with_capacity(len);
+        for (k, v) in dict {
+            let key: String = k.extract()?;
+            pairs.push((
+                PickleValue::String(key),
+                pyobject_to_pickle_value(&v, expand_refs)?,
+            ));
+        }
+        return Ok(PickleValue::Dict(pairs));
+    }
+
+    // Fast path: if no key starts with '@', skip all marker checks.
+    // This saves up to 15 hash-based get_item lookups per small data dict.
+    // For deep_nesting (10 levels × 15 lookups = 150 wasted C API calls), this is huge.
+    {
+        let mut has_marker_key = false;
+        for (k, _) in dict {
+            if let Ok(s) = k.downcast::<PyString>() {
+                if let Ok(key_str) = s.to_str() {
+                    if key_str.starts_with('@') {
+                        has_marker_key = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if !has_marker_key {
+            let mut pairs = Vec::with_capacity(len);
+            for (k, v) in dict {
+                let key: String = k.extract()?;
+                pairs.push((
+                    PickleValue::String(key),
+                    pyobject_to_pickle_value(&v, expand_refs)?,
+                ));
+            }
+            return Ok(PickleValue::Dict(pairs));
+        }
+    }
+
+    // Check for markers in priority order (using interned strings)
 
     // @t — Tuple
-    if let Some(v) = dict.get_item("@t")? {
+    if let Some(v) = dict.get_item(intern!(py, "@t"))? {
         if let Ok(list) = v.downcast::<PyList>() {
             let items: PyResult<Vec<PickleValue>> = list
                 .iter()
@@ -810,7 +854,7 @@ fn pydict_to_pickle_value(
     }
 
     // @b — Bytes
-    if let Some(v) = dict.get_item("@b")? {
+    if let Some(v) = dict.get_item(intern!(py, "@b"))? {
         if let Ok(s) = v.extract::<String>() {
             let bytes = BASE64
                 .decode(&s)
@@ -820,7 +864,7 @@ fn pydict_to_pickle_value(
     }
 
     // @bi — BigInt
-    if let Some(v) = dict.get_item("@bi")? {
+    if let Some(v) = dict.get_item(intern!(py, "@bi"))? {
         if let Ok(s) = v.extract::<String>() {
             let bi: num_bigint::BigInt = s
                 .parse()
@@ -830,9 +874,9 @@ fn pydict_to_pickle_value(
     }
 
     // @d — Dict with non-string keys
-    if let Some(v) = dict.get_item("@d")? {
+    if let Some(v) = dict.get_item(intern!(py, "@d"))? {
         if let Ok(list) = v.downcast::<PyList>() {
-            let mut pairs = Vec::new();
+            let mut pairs = Vec::with_capacity(list.len());
             for pair_obj in list.iter() {
                 if let Ok(pair_list) = pair_obj.downcast::<PyList>() {
                     if pair_list.len() == 2 {
@@ -847,7 +891,7 @@ fn pydict_to_pickle_value(
     }
 
     // @set — Set
-    if let Some(v) = dict.get_item("@set")? {
+    if let Some(v) = dict.get_item(intern!(py, "@set"))? {
         if let Ok(list) = v.downcast::<PyList>() {
             let items: PyResult<Vec<PickleValue>> = list
                 .iter()
@@ -858,7 +902,7 @@ fn pydict_to_pickle_value(
     }
 
     // @fset — FrozenSet
-    if let Some(v) = dict.get_item("@fset")? {
+    if let Some(v) = dict.get_item(intern!(py, "@fset"))? {
         if let Ok(list) = v.downcast::<PyList>() {
             let items: PyResult<Vec<PickleValue>> = list
                 .iter()
@@ -869,7 +913,7 @@ fn pydict_to_pickle_value(
     }
 
     // @ref — Persistent reference
-    if let Some(v) = dict.get_item("@ref")? {
+    if let Some(v) = dict.get_item(intern!(py, "@ref"))? {
         if expand_refs {
             return expand_compact_ref(&v);
         } else {
@@ -879,7 +923,7 @@ fn pydict_to_pickle_value(
     }
 
     // @pkl — Raw pickle
-    if let Some(v) = dict.get_item("@pkl")? {
+    if let Some(v) = dict.get_item(intern!(py, "@pkl"))? {
         if let Ok(s) = v.extract::<String>() {
             let bytes = BASE64
                 .decode(&s)
@@ -893,49 +937,40 @@ fn pydict_to_pickle_value(
         return Ok(pv);
     }
 
-    // @cls + @s — Instance
-    if let (Some(cls_val), Some(state_val)) = (dict.get_item("@cls")?, dict.get_item("@s")?) {
+    // @cls — Instance or Global (combined check to avoid double lookup)
+    if let Some(cls_val) = dict.get_item(intern!(py, "@cls"))? {
         if let Ok(cls_list) = cls_val.downcast::<PyList>() {
             if cls_list.len() == 2 {
                 let module: String = cls_list.get_item(0)?.extract()?;
                 let name: String = cls_list.get_item(1)?.extract()?;
-                // BTree-specific state decoding
-                let state = if let Some(info) = btrees::classify_btree(&module, &name) {
-                    btree_state_from_pyobject(&info, &state_val, expand_refs)?
-                } else {
-                    pyobject_to_pickle_value(&state_val, expand_refs)?
-                };
-                return Ok(PickleValue::Instance {
-                    module,
-                    name,
-                    state: Box::new(state),
-                });
-            }
-        }
-    }
-
-    // @cls alone — Global reference
-    if let Some(cls_val) = dict.get_item("@cls")? {
-        if dict.get_item("@s")?.is_none() {
-            if let Ok(cls_list) = cls_val.downcast::<PyList>() {
-                if cls_list.len() == 2 {
-                    let module: String = cls_list.get_item(0)?.extract()?;
-                    let name: String = cls_list.get_item(1)?.extract()?;
-                    return Ok(PickleValue::Global { module, name });
+                // @cls + @s — Instance
+                if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
+                    let state = if let Some(info) = btrees::classify_btree(&module, &name) {
+                        btree_state_from_pyobject(&info, &state_val, expand_refs)?
+                    } else {
+                        pyobject_to_pickle_value(&state_val, expand_refs)?
+                    };
+                    return Ok(PickleValue::Instance {
+                        module,
+                        name,
+                        state: Box::new(state),
+                    });
                 }
+                // @cls alone — Global reference
+                return Ok(PickleValue::Global { module, name });
             }
         }
     }
 
     // @reduce — Generic reduce
-    if let Some(v) = dict.get_item("@reduce")? {
+    if let Some(v) = dict.get_item(intern!(py, "@reduce"))? {
         if let Ok(reduce_dict) = v.downcast::<PyDict>() {
             let callable_obj = reduce_dict
-                .get_item("callable")?
-                .unwrap_or_else(|| v.py().None().into_bound(v.py()));
+                .get_item(intern!(py, "callable"))?
+                .unwrap_or_else(|| py.None().into_bound(py));
             let args_obj = reduce_dict
-                .get_item("args")?
-                .unwrap_or_else(|| v.py().None().into_bound(v.py()));
+                .get_item(intern!(py, "args"))?
+                .unwrap_or_else(|| py.None().into_bound(py));
             let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
             let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
             return Ok(PickleValue::Reduce {
@@ -946,7 +981,7 @@ fn pydict_to_pickle_value(
     }
 
     // Regular dict with string keys
-    let mut pairs = Vec::new();
+    let mut pairs = Vec::with_capacity(len);
     for (k, v) in dict {
         let key: String = k.extract()?;
         pairs.push((
@@ -1012,31 +1047,33 @@ fn try_typed_pydict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
     expand_refs: bool,
 ) -> PyResult<Option<PickleValue>> {
+    let py = dict.py();
+
     // @dt — datetime
-    if let Some(v) = dict.get_item("@dt")? {
+    if let Some(v) = dict.get_item(intern!(py, "@dt"))? {
         if let Ok(iso) = v.extract::<String>() {
-            let tz_obj = dict.get_item("@tz")?;
+            let tz_obj = dict.get_item(intern!(py, "@tz"))?;
             return decode_datetime_from_pyobject(&iso, tz_obj.as_ref(), expand_refs).map(Some);
         }
     }
 
     // @date — date
-    if let Some(v) = dict.get_item("@date")? {
+    if let Some(v) = dict.get_item(intern!(py, "@date"))? {
         if let Ok(s) = v.extract::<String>() {
             return decode_date_from_str(&s).map(Some);
         }
     }
 
     // @time — time
-    if let Some(v) = dict.get_item("@time")? {
+    if let Some(v) = dict.get_item(intern!(py, "@time"))? {
         if let Ok(s) = v.extract::<String>() {
-            let tz_obj = dict.get_item("@tz")?;
+            let tz_obj = dict.get_item(intern!(py, "@tz"))?;
             return decode_time_from_pyobject(&s, tz_obj.as_ref(), expand_refs).map(Some);
         }
     }
 
     // @td — timedelta
-    if let Some(v) = dict.get_item("@td")? {
+    if let Some(v) = dict.get_item(intern!(py, "@td"))? {
         if let Ok(list) = v.downcast::<PyList>() {
             if list.len() == 3 {
                 let days: i64 = list.get_item(0)?.extract()?;
@@ -1058,7 +1095,7 @@ fn try_typed_pydict_to_pickle_value(
     }
 
     // @dec — Decimal
-    if let Some(v) = dict.get_item("@dec")? {
+    if let Some(v) = dict.get_item(intern!(py, "@dec"))? {
         if let Ok(s) = v.extract::<String>() {
             return Ok(Some(PickleValue::Reduce {
                 callable: Box::new(PickleValue::Global {
@@ -1071,7 +1108,7 @@ fn try_typed_pydict_to_pickle_value(
     }
 
     // @uuid — UUID
-    if let Some(v) = dict.get_item("@uuid")? {
+    if let Some(v) = dict.get_item(intern!(py, "@uuid"))? {
         if let Ok(s) = v.extract::<String>() {
             return decode_uuid_from_str(&s).map(Some);
         }
@@ -1201,8 +1238,9 @@ fn decode_uuid_from_str(s: &str) -> PyResult<PickleValue> {
 /// Decode @tz PyObject back to a timezone PickleValue.
 fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue> {
     if let Ok(tz_dict) = tz_val.downcast::<PyDict>() {
+        let py = tz_dict.py();
         // pytz: {"pytz": [...args], "name": "US/Eastern"}
-        if let Some(pytz_args) = tz_dict.get_item("pytz")? {
+        if let Some(pytz_args) = tz_dict.get_item(intern!(py, "pytz"))? {
             if let Ok(args_list) = pytz_args.downcast::<PyList>() {
                 let pickle_args: PyResult<Vec<PickleValue>> = args_list
                     .iter()
@@ -1227,7 +1265,7 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
         }
 
         // zoneinfo: {"zoneinfo": "US/Eastern"}
-        if let Some(key_val) = tz_dict.get_item("zoneinfo")? {
+        if let Some(key_val) = tz_dict.get_item(intern!(py, "zoneinfo"))? {
             if let Ok(key) = key_val.extract::<String>() {
                 let inner_reduce = PickleValue::Reduce {
                     callable: Box::new(PickleValue::Global {
@@ -1277,10 +1315,12 @@ pub fn btree_state_from_pyobject(
         Err(_) => return pyobject_to_pickle_value(state_obj, expand_refs),
     };
 
+    let py = dict.py();
+
     // @kv — map data
-    if let Some(kv_val) = dict.get_item("@kv")? {
+    if let Some(kv_val) = dict.get_item(intern!(py, "@kv"))? {
         let flat_data = decode_kv_from_pyobject(&kv_val, expand_refs)?;
-        let next_ref = if let Some(next_val) = dict.get_item("@next")? {
+        let next_ref = if let Some(next_val) = dict.get_item(intern!(py, "@next"))? {
             Some(pyobject_to_pickle_value(&next_val, expand_refs)?)
         } else {
             None
@@ -1289,9 +1329,9 @@ pub fn btree_state_from_pyobject(
     }
 
     // @ks — set data
-    if let Some(ks_val) = dict.get_item("@ks")? {
+    if let Some(ks_val) = dict.get_item(intern!(py, "@ks"))? {
         let flat_data = decode_keys_from_pyobject(&ks_val, expand_refs)?;
-        let next_ref = if let Some(next_val) = dict.get_item("@next")? {
+        let next_ref = if let Some(next_val) = dict.get_item(intern!(py, "@next"))? {
             Some(pyobject_to_pickle_value(&next_val, expand_refs)?)
         } else {
             None
@@ -1300,9 +1340,9 @@ pub fn btree_state_from_pyobject(
     }
 
     // @children + @first — large BTree
-    if let Some(children_val) = dict.get_item("@children")? {
+    if let Some(children_val) = dict.get_item(intern!(py, "@children"))? {
         let first_val = dict
-            .get_item("@first")?
+            .get_item(intern!(py, "@first"))?
             .ok_or_else(|| CodecError::InvalidData("@children without @first".into()))?;
         if let Ok(children_list) = children_val.downcast::<PyList>() {
             let children: PyResult<Vec<PickleValue>> = children_list
