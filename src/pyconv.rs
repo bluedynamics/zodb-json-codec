@@ -790,6 +790,11 @@ pub fn pyobject_to_pickle_value(
 }
 
 /// Convert a PyDict to PickleValue, checking for marker keys.
+///
+/// Optimized dispatch:
+/// - len > 4: skip marker checks (no marker dict has >4 keys)
+/// - len == 1: direct key match (avoids all hash-based get_item lookups)
+/// - len 2-4: single-pass '@' scan, then targeted marker checks
 fn pydict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
     expand_refs: bool,
@@ -798,48 +803,101 @@ fn pydict_to_pickle_value(
     let len = dict.len();
 
     // Fast path: no JSON marker dict has more than 4 keys.
-    // Skip all marker checks for large plain dicts.
     if len > 4 {
-        let mut pairs = Vec::with_capacity(len);
-        for (k, v) in dict {
-            let key: String = k.extract()?;
-            pairs.push((
-                PickleValue::String(key),
-                pyobject_to_pickle_value(&v, expand_refs)?,
-            ));
-        }
-        return Ok(PickleValue::Dict(pairs));
+        return plain_dict_to_pickle_value(dict, expand_refs);
     }
 
-    // Fast path: if no key starts with '@', skip all marker checks.
-    // This saves up to 15 hash-based get_item lookups per small data dict.
-    // For deep_nesting (10 levels × 15 lookups = 150 wasted C API calls), this is huge.
-    {
-        let mut has_marker_key = false;
-        for (k, _) in dict {
-            if let Ok(s) = k.downcast::<PyString>() {
-                if let Ok(key_str) = s.to_str() {
-                    if key_str.starts_with('@') {
-                        has_marker_key = true;
-                        break;
+    if len == 0 {
+        return Ok(PickleValue::Dict(vec![]));
+    }
+
+    // Fast path for single-key dicts: extract the key and match directly.
+    // Avoids up to 15 hash-based get_item lookups for marker detection.
+    // Common markers like @ref, @dt, @b are all single-key dicts.
+    if len == 1 {
+        let (k, v) = dict.iter().next().unwrap();
+        if let Ok(s) = k.downcast::<PyString>() {
+            if let Ok(key) = s.to_str() {
+                if key.starts_with('@') {
+                    if let Some(pv) = try_decode_single_key_marker(py, key, &v, expand_refs)? {
+                        return Ok(pv);
                     }
                 }
+                // Non-marker key, or marker with unrecognized value type
+                return Ok(PickleValue::Dict(vec![(
+                    PickleValue::String(key.to_owned()),
+                    pyobject_to_pickle_value(&v, expand_refs)?,
+                )]));
             }
         }
-        if !has_marker_key {
-            let mut pairs = Vec::with_capacity(len);
-            for (k, v) in dict {
-                let key: String = k.extract()?;
+        let k_str: String = k.extract()?;
+        return Ok(PickleValue::Dict(vec![(
+            PickleValue::String(k_str),
+            pyobject_to_pickle_value(&v, expand_refs)?,
+        )]));
+    }
+
+    // For 2-4 key dicts: single-pass scan for '@' prefix.
+    // Builds pairs inline — if no '@' found, the dict is already constructed.
+    // If '@' found, breaks early and falls through to targeted marker checks.
+    let mut pairs = Vec::with_capacity(len);
+    let mut found_marker = false;
+    for (k, v) in dict {
+        if let Ok(s) = k.downcast::<PyString>() {
+            if let Ok(key_str) = s.to_str() {
+                if key_str.starts_with('@') {
+                    found_marker = true;
+                    break;
+                }
                 pairs.push((
-                    PickleValue::String(key),
+                    PickleValue::String(key_str.to_owned()),
                     pyobject_to_pickle_value(&v, expand_refs)?,
                 ));
+                continue;
             }
-            return Ok(PickleValue::Dict(pairs));
+        }
+        let key: String = k.extract()?;
+        pairs.push((
+            PickleValue::String(key),
+            pyobject_to_pickle_value(&v, expand_refs)?,
+        ));
+    }
+    if !found_marker {
+        return Ok(PickleValue::Dict(pairs));
+    }
+    drop(pairs);
+
+    // Multi-key marker dict — targeted checks, ordered by frequency.
+
+    // @cls (+@s) is the most common multi-key marker pattern
+    if let Some(cls_val) = dict.get_item(intern!(py, "@cls"))? {
+        if let Ok(cls_list) = cls_val.downcast::<PyList>() {
+            if cls_list.len() == 2 {
+                let module: String = cls_list.get_item(0)?.extract()?;
+                let name: String = cls_list.get_item(1)?.extract()?;
+                if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
+                    let state = if let Some(info) = btrees::classify_btree(&module, &name) {
+                        btree_state_from_pyobject(&info, &state_val, expand_refs)?
+                    } else {
+                        pyobject_to_pickle_value(&state_val, expand_refs)?
+                    };
+                    return Ok(PickleValue::Instance {
+                        module,
+                        name,
+                        state: Box::new(state),
+                    });
+                }
+                return Ok(PickleValue::Global { module, name });
+            }
         }
     }
 
-    // Check for markers in priority order (using interned strings)
+    // Known type markers: @dt (+@tz), @date, @time (+@tz), @td, @dec, @uuid
+    if let Some(pv) = try_typed_pydict_to_pickle_value(dict, expand_refs)? {
+        return Ok(pv);
+    }
+
+    // Remaining markers (rare in multi-key context)
 
     // @t — Tuple
     if let Some(v) = dict.get_item(intern!(py, "@t"))? {
@@ -931,36 +989,6 @@ fn pydict_to_pickle_value(
         }
     }
 
-    // Known type markers: @dt, @date, @time, @td, @dec, @uuid
-    if let Some(pv) = try_typed_pydict_to_pickle_value(dict, expand_refs)? {
-        return Ok(pv);
-    }
-
-    // @cls — Instance or Global (combined check to avoid double lookup)
-    if let Some(cls_val) = dict.get_item(intern!(py, "@cls"))? {
-        if let Ok(cls_list) = cls_val.downcast::<PyList>() {
-            if cls_list.len() == 2 {
-                let module: String = cls_list.get_item(0)?.extract()?;
-                let name: String = cls_list.get_item(1)?.extract()?;
-                // @cls + @s — Instance
-                if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
-                    let state = if let Some(info) = btrees::classify_btree(&module, &name) {
-                        btree_state_from_pyobject(&info, &state_val, expand_refs)?
-                    } else {
-                        pyobject_to_pickle_value(&state_val, expand_refs)?
-                    };
-                    return Ok(PickleValue::Instance {
-                        module,
-                        name,
-                        state: Box::new(state),
-                    });
-                }
-                // @cls alone — Global reference
-                return Ok(PickleValue::Global { module, name });
-            }
-        }
-    }
-
     // @reduce — Generic reduce
     if let Some(v) = dict.get_item(intern!(py, "@reduce"))? {
         if let Ok(reduce_dict) = v.downcast::<PyDict>() {
@@ -979,8 +1007,17 @@ fn pydict_to_pickle_value(
         }
     }
 
-    // Regular dict with string keys
-    let mut pairs = Vec::with_capacity(len);
+    // Fallback: regular dict with string keys
+    plain_dict_to_pickle_value(dict, expand_refs)
+}
+
+/// Build a plain dict PickleValue from a PyDict (no marker checking).
+#[inline]
+fn plain_dict_to_pickle_value(
+    dict: &Bound<'_, PyDict>,
+    expand_refs: bool,
+) -> PyResult<PickleValue> {
+    let mut pairs = Vec::with_capacity(dict.len());
     for (k, v) in dict {
         let key: String = k.extract()?;
         pairs.push((
@@ -989,6 +1026,172 @@ fn pydict_to_pickle_value(
         ));
     }
     Ok(PickleValue::Dict(pairs))
+}
+
+/// Fast path for single-key marker dicts.
+/// Returns Some(PickleValue) if the marker was recognized and value type matched.
+fn try_decode_single_key_marker(
+    py: Python<'_>,
+    key: &str,
+    v: &Bound<'_, pyo3::PyAny>,
+    expand_refs: bool,
+) -> PyResult<Option<PickleValue>> {
+    match key {
+        "@t" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                let items: PyResult<Vec<PickleValue>> = list
+                    .iter()
+                    .map(|item| pyobject_to_pickle_value(&item, expand_refs))
+                    .collect();
+                return Ok(Some(PickleValue::Tuple(items?)));
+            }
+        }
+        "@b" => {
+            if let Ok(s) = v.extract::<String>() {
+                let bytes = BASE64
+                    .decode(&s)
+                    .map_err(|e| CodecError::Json(format!("base64 decode: {e}")))?;
+                return Ok(Some(PickleValue::Bytes(bytes)));
+            }
+        }
+        "@bi" => {
+            if let Ok(s) = v.extract::<String>() {
+                let bi: num_bigint::BigInt = s
+                    .parse()
+                    .map_err(|e| CodecError::Json(format!("bigint parse: {e}")))?;
+                return Ok(Some(PickleValue::BigInt(bi)));
+            }
+        }
+        "@d" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                let mut pairs = Vec::with_capacity(list.len());
+                for pair_obj in list.iter() {
+                    if let Ok(pair_list) = pair_obj.downcast::<PyList>() {
+                        if pair_list.len() == 2 {
+                            let k =
+                                pyobject_to_pickle_value(&pair_list.get_item(0)?, expand_refs)?;
+                            let v =
+                                pyobject_to_pickle_value(&pair_list.get_item(1)?, expand_refs)?;
+                            pairs.push((k, v));
+                        }
+                    }
+                }
+                return Ok(Some(PickleValue::Dict(pairs)));
+            }
+        }
+        "@set" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                let items: PyResult<Vec<PickleValue>> = list
+                    .iter()
+                    .map(|item| pyobject_to_pickle_value(&item, expand_refs))
+                    .collect();
+                return Ok(Some(PickleValue::Set(items?)));
+            }
+        }
+        "@fset" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                let items: PyResult<Vec<PickleValue>> = list
+                    .iter()
+                    .map(|item| pyobject_to_pickle_value(&item, expand_refs))
+                    .collect();
+                return Ok(Some(PickleValue::FrozenSet(items?)));
+            }
+        }
+        "@ref" => {
+            if expand_refs {
+                return Ok(Some(expand_compact_ref(v)?));
+            } else {
+                let inner = pyobject_to_pickle_value(v, expand_refs)?;
+                return Ok(Some(PickleValue::PersistentRef(Box::new(inner))));
+            }
+        }
+        "@pkl" => {
+            if let Ok(s) = v.extract::<String>() {
+                let bytes = BASE64
+                    .decode(&s)
+                    .map_err(|e| CodecError::Json(format!("base64 decode: {e}")))?;
+                return Ok(Some(PickleValue::RawPickle(bytes)));
+            }
+        }
+        "@dt" => {
+            if let Ok(iso) = v.extract::<String>() {
+                return Ok(Some(decode_datetime_from_pyobject(&iso, None, expand_refs)?));
+            }
+        }
+        "@date" => {
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(decode_date_from_str(&s)?));
+            }
+        }
+        "@time" => {
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(decode_time_from_pyobject(&s, None, expand_refs)?));
+            }
+        }
+        "@td" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                if list.len() == 3 {
+                    let days: i64 = list.get_item(0)?.extract()?;
+                    let secs: i64 = list.get_item(1)?.extract()?;
+                    let us: i64 = list.get_item(2)?.extract()?;
+                    return Ok(Some(PickleValue::Reduce {
+                        callable: Box::new(PickleValue::Global {
+                            module: "datetime".into(),
+                            name: "timedelta".into(),
+                        }),
+                        args: Box::new(PickleValue::Tuple(vec![
+                            PickleValue::Int(days),
+                            PickleValue::Int(secs),
+                            PickleValue::Int(us),
+                        ])),
+                    }));
+                }
+            }
+        }
+        "@dec" => {
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(PickleValue::Reduce {
+                    callable: Box::new(PickleValue::Global {
+                        module: "decimal".into(),
+                        name: "Decimal".into(),
+                    }),
+                    args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
+                }));
+            }
+        }
+        "@uuid" => {
+            if let Ok(s) = v.extract::<String>() {
+                return Ok(Some(decode_uuid_from_str(&s)?));
+            }
+        }
+        "@cls" => {
+            if let Ok(cls_list) = v.downcast::<PyList>() {
+                if cls_list.len() == 2 {
+                    let module: String = cls_list.get_item(0)?.extract()?;
+                    let name: String = cls_list.get_item(1)?.extract()?;
+                    return Ok(Some(PickleValue::Global { module, name }));
+                }
+            }
+        }
+        "@reduce" => {
+            if let Ok(reduce_dict) = v.downcast::<PyDict>() {
+                let callable_obj = reduce_dict
+                    .get_item(intern!(py, "callable"))?
+                    .unwrap_or_else(|| py.None().into_bound(py));
+                let args_obj = reduce_dict
+                    .get_item(intern!(py, "args"))?
+                    .unwrap_or_else(|| py.None().into_bound(py));
+                let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
+                let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
+                return Ok(Some(PickleValue::Reduce {
+                    callable: Box::new(callable),
+                    args: Box::new(args),
+                }));
+            }
+        }
+        _ => {}
+    }
+    Ok(None)
 }
 
 // ---------------------------------------------------------------------------

@@ -127,6 +127,7 @@ class FileStorageResult:
     encode_codec: TimingStats = field(default_factory=TimingStats)
     roundtrip_codec: TimingStats = field(default_factory=TimingStats)
     by_class: dict[str, int] = field(default_factory=dict)
+    python_failed_classes: dict[str, int] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -220,14 +221,16 @@ def generate_synthetic_data() -> dict[str, bytes]:
 
 
 def python_decode_zodb_record(data: bytes) -> tuple:
-    """Decode a ZODB record using pure Python pickle."""
+    """Decode a ZODB record using pure Python pickle.
+
+    Uses a single Unpickler with two load() calls, matching how ZODB
+    actually unpickles records (the two pickles share the memo table).
+    """
     f = io.BytesIO(data)
     up = pickle.Unpickler(f)
     up.persistent_load = lambda ref: ref
     class_info = up.load()
-    up2 = pickle.Unpickler(f)
-    up2.persistent_load = lambda ref: ref
-    state = up2.load()
+    state = up.load()
     return class_info, state
 
 
@@ -418,7 +421,9 @@ def run_filestorage_benchmark(
                 result.decode_python.samples.append(python_decode_us)
                 result.encode_python.samples.append(python_encode_us)
             except Exception:
-                pass
+                result.python_failed_classes[class_path] = (
+                    result.python_failed_classes.get(class_path, 0) + 1
+                )
 
             # --- Codec encode ---
             try:
@@ -520,7 +525,10 @@ def print_synthetic_results(results: list[BenchmarkResult]) -> None:
     print()
 
 
-def print_filestorage_results(result: FileStorageResult) -> None:
+def print_filestorage_results(
+    result: FileStorageResult,
+    show_python_failures: bool = False,
+) -> None:
     print(f"\n{HEADER}{'='*72}")
     print(f" FileStorage Scan: {result.path}")
     print(f"{'='*72}{RESET}\n")
@@ -566,26 +574,37 @@ def print_filestorage_results(result: FileStorageResult) -> None:
         )
         print()
 
-    # Speedup summary (note: Python only works on records with importable classes)
+    # Speedup summary
     if result.decode_python.samples and result.decode_codec.samples:
         py_count = len(result.decode_python.samples)
         total = len(result.decode_codec.samples)
-        pct = py_count / total * 100 if total else 0
-        print(
-            f"  {DIM}Note: Python pickle only decoded {py_count:,} of "
-            f"{total:,} records ({pct:.0f}%) — classes not installed "
-            f"for the rest.{RESET}"
-        )
-        print(
-            f"  {DIM}Speedup is NOT comparable (different record sets). "
-            f"Use synthetic benchmarks for fair comparison.{RESET}"
-        )
+        if py_count < total:
+            pct = py_count / total * 100 if total else 0
+            print(
+                f"  {DIM}Note: Python pickle only decoded {py_count:,} of "
+                f"{total:,} records ({pct:.0f}%) — classes not installed "
+                f"for the rest.{RESET}"
+            )
+            print(
+                f"  {DIM}Speedup is NOT comparable (different record sets). "
+                f"Use synthetic benchmarks for fair comparison.{RESET}"
+            )
         sp = _speedup(result.decode_python.mean, result.decode_codec.mean)
-        print(f"  Decode speedup (crude): {sp}")
+        print(f"  Decode speedup: {sp}")
     if result.encode_python.samples and result.encode_codec.samples:
         sp = _speedup(result.encode_python.mean, result.encode_codec.mean)
-        print(f"  Encode speedup (crude): {sp}")
+        print(f"  Encode speedup: {sp}")
     print()
+
+    # Python decode failures by class
+    if show_python_failures and result.python_failed_classes:
+        print(f"  {HEADER}Python pickle failed to decode ({len(result.python_failed_classes)} classes){RESET}")
+        sorted_fails = sorted(
+            result.python_failed_classes.items(), key=lambda x: x[1], reverse=True
+        )
+        for cls, cnt in sorted_fails:
+            print(f"    {cls:<55} {cnt:>6}")
+        print()
 
     # Top record types
     if result.by_class:
@@ -735,6 +754,11 @@ def main() -> None:
     fs = sub.add_parser("filestorage", help="Scan a FileStorage file")
     fs.add_argument("path", help="Path to Data.fs")
     fs.add_argument("--max-records", type=int, default=None)
+    fs.add_argument(
+        "--show-python-failures",
+        action="store_true",
+        help="Show classes that Python pickle failed to decode",
+    )
 
     # all
     both = sub.add_parser("all", help="Run synthetic + filestorage benchmarks")
@@ -742,6 +766,11 @@ def main() -> None:
     both.add_argument("--iterations", type=int, default=1000)
     both.add_argument("--warmup", type=int, default=100)
     both.add_argument("--max-records", type=int, default=None)
+    both.add_argument(
+        "--show-python-failures",
+        action="store_true",
+        help="Show classes that Python pickle failed to decode",
+    )
 
     # check (CI regression detection)
     chk = sub.add_parser(
@@ -801,7 +830,8 @@ def main() -> None:
         if synthetic_results:
             print_synthetic_results(synthetic_results)
         if fs_result:
-            print_filestorage_results(fs_result)
+            show_pf = getattr(args, "show_python_failures", False)
+            print_filestorage_results(fs_result, show_python_failures=show_pf)
 
     json_data = results_to_json(synthetic_results, fs_result)
     if fmt in ("json", "both"):
