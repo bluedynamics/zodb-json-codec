@@ -8,6 +8,30 @@ dynamic = ["version"]
 description = "Fast pickle to JSON transcoder for ZODB, implemented in Rust"
 requires-python = ">=3.10"
 license = "MIT"
+readme = "README.md"
+authors = [
+    { name = "Jens W. Klein", email = "jk@kleinundpartner.at" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Framework :: ZODB",
+    "Topic :: Database",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+[project.urls]
+Homepage = "https://github.com/bluedynamics/zodb-json-codec"
+Repository = "https://github.com/bluedynamics/zodb-json-codec"
+Changelog = "https://github.com/bluedynamics/zodb-json-codec/blob/main/CHANGES.md"
+Issues = "https://github.com/bluedynamics/zodb-json-codec/issues"
 
 [project.optional-dependencies]
 test = [

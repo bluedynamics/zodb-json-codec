@@ -2,11 +2,12 @@ use crate::error::CodecError;
 use crate::opcodes::*;
 use crate::types::PickleValue;
 
-/// Encode a PickleValue AST into pickle bytes (protocol 2).
+/// Encode a PickleValue AST into pickle bytes (protocol 3).
+/// We target protocol 3 because ZODB uses zodbpickle which only supports up to protocol 3.
 pub fn encode_pickle(val: &PickleValue) -> Result<Vec<u8>, CodecError> {
     let mut encoder = Encoder::new();
     encoder.write_u8(PROTO);
-    encoder.write_u8(2); // protocol 2
+    encoder.write_u8(3); // protocol 3 (required by zodbpickle)
     encoder.encode_value(val)?;
     encoder.write_u8(STOP);
     Ok(encoder.buf)
@@ -31,13 +32,10 @@ pub fn encode_value_into(val: &PickleValue, buf: &mut Vec<u8>) -> Result<(), Cod
 pub fn write_string(buf: &mut Vec<u8>, s: &str) {
     let bytes = s.as_bytes();
     let n = bytes.len();
-    if n < 256 {
-        buf.push(SHORT_BINUNICODE);
-        buf.push(n as u8);
-    } else {
-        buf.push(BINUNICODE);
-        buf.extend_from_slice(&(n as u32).to_le_bytes());
-    }
+    // Always use BINUNICODE (protocol 1+), not SHORT_BINUNICODE (protocol 4)
+    // because ZODB uses zodbpickle which only supports up to protocol 3.
+    buf.push(BINUNICODE);
+    buf.extend_from_slice(&(n as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
 }
 
@@ -137,13 +135,10 @@ impl Encoder {
             PickleValue::String(s) => {
                 let bytes = s.as_bytes();
                 let n = bytes.len();
-                if n < 256 {
-                    self.write_u8(SHORT_BINUNICODE);
-                    self.write_u8(n as u8);
-                } else {
-                    self.write_u8(BINUNICODE);
-                    self.write_bytes(&(n as u32).to_le_bytes());
-                }
+                // Always use BINUNICODE (protocol 1+), not SHORT_BINUNICODE (protocol 4)
+                // because ZODB uses zodbpickle which only supports up to protocol 3.
+                self.write_u8(BINUNICODE);
+                self.write_bytes(&(n as u32).to_le_bytes());
                 self.write_bytes(bytes);
             }
             PickleValue::Bytes(b) => {
@@ -206,22 +201,34 @@ impl Encoder {
                 }
             }
             PickleValue::Set(items) => {
-                // Protocol 4 set. For protocol 2 compat, use REDUCE with builtins.set
-                self.write_u8(EMPTY_SET);
+                // Protocol 3: GLOBAL builtins.set, list of items, TUPLE1, REDUCE
+                self.write_u8(GLOBAL);
+                self.write_bytes(b"builtins\nset\n");
+                self.write_u8(EMPTY_LIST);
                 if !items.is_empty() {
                     self.write_u8(MARK);
                     for item in items {
                         self.encode_value(item)?;
                     }
-                    self.write_u8(ADDITEMS);
+                    self.write_u8(APPENDS);
                 }
+                self.write_u8(TUPLE1);
+                self.write_u8(REDUCE);
             }
             PickleValue::FrozenSet(items) => {
-                self.write_u8(MARK);
-                for item in items {
-                    self.encode_value(item)?;
+                // Protocol 3: GLOBAL builtins.frozenset, list of items, TUPLE1, REDUCE
+                self.write_u8(GLOBAL);
+                self.write_bytes(b"builtins\nfrozenset\n");
+                self.write_u8(EMPTY_LIST);
+                if !items.is_empty() {
+                    self.write_u8(MARK);
+                    for item in items {
+                        self.encode_value(item)?;
+                    }
+                    self.write_u8(APPENDS);
                 }
-                self.write_u8(FROZENSET);
+                self.write_u8(TUPLE1);
+                self.write_u8(REDUCE);
             }
             PickleValue::Global { module, name } => {
                 self.write_u8(GLOBAL);

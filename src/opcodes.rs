@@ -40,7 +40,7 @@ pub const BININT2: u8 = b'M'; // push 2-byte unsigned int
 pub const BINSTRING: u8 = b'T'; // push string; counted binary string
 pub const SHORT_BINSTRING: u8 = b'U'; // push string; counted binary string <= 255 bytes
 pub const BINUNICODE: u8 = b'X'; // push Unicode string; counted UTF-8 string
-// SHORT_BINUNICODE is 0x8c — same in protocol 1+ and protocol 4
+// Note: SHORT_BINUNICODE (0x8c) is protocol 4 only. Use BINUNICODE (0x58) for protocol 3.
 pub const BINGET: u8 = b'h'; // push item from memo by 1-byte index
 pub const LONG_BINGET: u8 = b'j'; // push item from memo by 4-byte index
 pub const BINPUT: u8 = b'q'; // store stack top in memo by 1-byte index
@@ -64,7 +64,7 @@ pub const LONG4: u8 = 0x8b; // push really big long
 // (no new opcodes, just allows BINBYTES)
 
 // -- Protocol 4 --
-pub const SHORT_BINUNICODE: u8 = 0x8c; // 1-byte length unicode (protocol 1+)
+pub const SHORT_BINUNICODE: u8 = 0x8c; // 1-byte length unicode (protocol 4+ only!)
 pub const BINUNICODE8: u8 = 0x8d; // 8-byte length unicode
 pub const BINBYTES8: u8 = 0x8e; // 8-byte length bytes
 pub const EMPTY_SET: u8 = 0x8f; // push empty set
