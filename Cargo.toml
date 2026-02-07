@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 description = "Fast pickle ↔ JSON transcoder for ZODB, implemented in Rust"
 license = "MIT"
+repository = "https://github.com/bluedynamics/zodb-json-codec"
+homepage = "https://github.com/bluedynamics/zodb-json-codec"
 
 [lib]
 name = "zodb_json_codec"
