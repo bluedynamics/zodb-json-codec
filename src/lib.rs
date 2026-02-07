@@ -11,7 +11,7 @@ mod zodb;
 
 use pyo3::prelude::*;
 use pyo3::intern;
-use pyo3::types::{PyBytes, PyDict, PyList};
+use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
 use crate::decode::decode_pickle;
 use crate::encode::encode_pickle;
@@ -45,11 +45,10 @@ fn pickle_to_dict(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
     pyconv::pickle_value_to_pyobject(py, &val, false)
 }
 
-/// Convert a Python dict to pickle bytes (direct PyObject → PickleValue).
+/// Convert a Python dict to pickle bytes (direct PyObject → pickle bytes).
 #[pyfunction]
 fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
-    let pickle_val = pyconv::pyobject_to_pickle_value(obj.as_any(), false)?;
-    let bytes = encode_pickle(&pickle_val)?;
+    let bytes = pyconv::encode_pyobject_as_pickle(obj.as_any(), false)?;
     Ok(PyBytes::new(py, &bytes).into())
 }
 
@@ -78,6 +77,7 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 }
 
 /// Encode a ZODB JSON record back into two concatenated pickles.
+/// Uses the direct PyObject → pickle encoder, bypassing PickleValue allocations.
 #[pyfunction]
 fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
     let cls_val = obj
@@ -89,34 +89,24 @@ fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<Py
     if cls_list.len() != 2 {
         return Err(CodecError::InvalidData("@cls must be [module, name]".to_string()).into());
     }
-    let module: String = cls_list.get_item(0)?.extract()?;
-    let name: String = cls_list.get_item(1)?.extract()?;
 
-    // Check for BTree class
-    let btree_info = btrees::classify_btree(&module, &name);
+    // Borrow module/name as &str from Python (zero-copy)
+    let item0 = cls_list.get_item(0)?;
+    let item1 = cls_list.get_item(1)?;
+    let module = item0.downcast::<PyString>()
+        .map_err(|_| CodecError::InvalidData("@cls[0] must be a string".to_string()))?
+        .to_str()?;
+    let name = item1.downcast::<PyString>()
+        .map_err(|_| CodecError::InvalidData("@cls[1] must be a string".to_string()))?
+        .to_str()?;
 
-    // Encode class pickle
-    let class_val = types::PickleValue::Global {
-        module: module.clone(),
-        name: name.clone(),
-    };
-    let class_bytes = encode_pickle(&class_val)?;
-
-    // Get state with persistent ref expansion
+    // Get state
     let state_obj = obj
         .get_item(intern!(py, "@s"))?
         .unwrap_or_else(|| py.None().into_bound(py));
 
-    let state_val = if let Some(info) = btree_info {
-        pyconv::btree_state_from_pyobject(&info, &state_obj, true)?
-    } else {
-        pyconv::pyobject_to_pickle_value(&state_obj, true)?
-    };
-    let state_bytes = encode_pickle(&state_val)?;
-
-    // Concatenate
-    let mut result = class_bytes;
-    result.extend_from_slice(&state_bytes);
+    // Direct encode: class pickle + state pickle, no PickleValue intermediates
+    let result = pyconv::encode_zodb_record_direct(module, name, &state_obj)?;
     Ok(PyBytes::new(py, &result).into())
 }
 

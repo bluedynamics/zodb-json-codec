@@ -14,8 +14,10 @@ use pyo3::intern;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::btrees;
+use crate::encode::{encode_value_into, write_bytes_val, write_global, write_int, write_string};
 use crate::error::CodecError;
 use crate::known_types;
+use crate::opcodes::*;
 use crate::types::PickleValue;
 
 // ---------------------------------------------------------------------------
@@ -1586,4 +1588,594 @@ fn decode_keys_from_pyobject(
     list.iter()
         .map(|item| pyobject_to_pickle_value(&item, expand_refs))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Direct encoder: PyObject → pickle bytes (bypasses PickleValue allocation)
+// ---------------------------------------------------------------------------
+
+/// Encode a PyObject directly to pickle bytes with PROTO 2 framing.
+/// Used by `dict_to_pickle`.
+pub fn encode_pyobject_as_pickle(
+    obj: &Bound<'_, pyo3::PyAny>,
+    expand_refs: bool,
+) -> PyResult<Vec<u8>> {
+    let mut buf = Vec::with_capacity(256);
+    buf.push(PROTO);
+    buf.push(2);
+    encode_pyobject_to_pickle(obj, &mut buf, expand_refs)?;
+    buf.push(STOP);
+    Ok(buf)
+}
+
+/// Encode a ZODB record (class + state) directly to concatenated pickle bytes.
+/// Writes both the class pickle and state pickle directly, skipping
+/// all PickleValue intermediate allocations.
+pub fn encode_zodb_record_direct(
+    module: &str,
+    name: &str,
+    state_obj: &Bound<'_, pyo3::PyAny>,
+) -> PyResult<Vec<u8>> {
+    let btree_info = btrees::classify_btree(module, name);
+
+    let mut result = Vec::with_capacity(256);
+
+    // Class pickle: PROTO 2 + GLOBAL module\nname\n + STOP
+    result.extend_from_slice(&[PROTO, 2]);
+    write_global(&mut result, module, name);
+    result.push(STOP);
+
+    // State pickle: PROTO 2 + state opcodes + STOP
+    result.extend_from_slice(&[PROTO, 2]);
+    if let Some(info) = btree_info {
+        encode_btree_state_to_pickle(&info, state_obj, &mut result, true)?;
+    } else {
+        encode_pyobject_to_pickle(state_obj, &mut result, true)?;
+    }
+    result.push(STOP);
+
+    Ok(result)
+}
+
+/// Write a PyObject as pickle opcodes into the buffer (no PROTO/STOP framing).
+/// Handles common types directly; falls back to PickleValue for complex markers.
+pub fn encode_pyobject_to_pickle(
+    obj: &Bound<'_, pyo3::PyAny>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    // String: borrow &str from Python, write directly (zero-copy)
+    if obj.is_instance_of::<PyString>() {
+        let s = obj.downcast::<PyString>()?.to_str()?;
+        write_string(buf, s);
+        return Ok(());
+    }
+
+    // Dict: handle markers or write plain dict
+    if obj.is_instance_of::<PyDict>() {
+        let dict = obj.downcast::<PyDict>()?;
+        return encode_pydict_to_pickle(dict, buf, expand_refs);
+    }
+
+    // None
+    if obj.is_none() {
+        buf.push(NONE);
+        return Ok(());
+    }
+
+    // Bool before Int (bool is subclass of int in Python)
+    if obj.is_instance_of::<PyBool>() {
+        buf.push(if obj.extract::<bool>()? {
+            NEWTRUE
+        } else {
+            NEWFALSE
+        });
+        return Ok(());
+    }
+
+    // Int
+    if obj.is_instance_of::<PyInt>() {
+        let i: i64 = obj.extract()?;
+        write_int(buf, i);
+        return Ok(());
+    }
+
+    // Float
+    if obj.is_instance_of::<PyFloat>() {
+        let f: f64 = obj.extract()?;
+        buf.push(BINFLOAT);
+        buf.extend_from_slice(&f.to_be_bytes());
+        return Ok(());
+    }
+
+    // List
+    if obj.is_instance_of::<PyList>() {
+        let list = obj.downcast::<PyList>()?;
+        buf.push(EMPTY_LIST);
+        if !list.is_empty() {
+            buf.push(MARK);
+            for item in list.iter() {
+                encode_pyobject_to_pickle(&item, buf, expand_refs)?;
+            }
+            buf.push(APPENDS);
+        }
+        return Ok(());
+    }
+
+    // Fallback: convert to PickleValue first, then encode
+    let pv = pyobject_to_pickle_value(obj, expand_refs)?;
+    encode_value_into(&pv, buf)?;
+    Ok(())
+}
+
+/// Write a PyDict as pickle opcodes with marker detection.
+fn encode_pydict_to_pickle(
+    dict: &Bound<'_, PyDict>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    let len = dict.len();
+
+    // Fast path: no marker dict has more than 4 keys
+    if len > 4 {
+        return encode_plain_dict_to_pickle(dict, buf, expand_refs);
+    }
+
+    if len == 0 {
+        buf.push(EMPTY_DICT);
+        return Ok(());
+    }
+
+    // Single-key fast path for markers
+    if len == 1 {
+        let (k, v) = dict.iter().next().unwrap();
+        if let Ok(s) = k.downcast::<PyString>() {
+            if let Ok(key) = s.to_str() {
+                if key.starts_with('@') {
+                    if try_encode_marker_to_pickle(key, &v, buf, expand_refs)? {
+                        return Ok(());
+                    }
+                }
+                // Non-marker single key or unrecognized marker value
+                buf.push(EMPTY_DICT);
+                buf.push(MARK);
+                write_string(buf, key);
+                encode_pyobject_to_pickle(&v, buf, expand_refs)?;
+                buf.push(SETITEMS);
+                return Ok(());
+            }
+        }
+        // Non-string key: fallback
+        let pv = pydict_to_pickle_value(dict, expand_refs)?;
+        encode_value_into(&pv, buf)?;
+        return Ok(());
+    }
+
+    // 2-4 key dicts: quick scan for '@' prefix
+    let mut has_marker = false;
+    for (k, _v) in dict {
+        if let Ok(s) = k.downcast::<PyString>() {
+            if let Ok(key_str) = s.to_str() {
+                if key_str.starts_with('@') {
+                    has_marker = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    if !has_marker {
+        return encode_plain_dict_to_pickle(dict, buf, expand_refs);
+    }
+
+    // Multi-key marker dict — targeted checks
+    let py = dict.py();
+
+    // @cls (+@s) is the most common multi-key marker
+    if let Some(cls_val) = dict.get_item(intern!(py, "@cls"))? {
+        if let Ok(cls_list) = cls_val.downcast::<PyList>() {
+            if cls_list.len() == 2 {
+                let item0 = cls_list.get_item(0)?;
+                let item1 = cls_list.get_item(1)?;
+                if let (Ok(mod_py), Ok(name_py)) = (
+                    item0.downcast::<PyString>(),
+                    item1.downcast::<PyString>(),
+                ) {
+                    let module = mod_py.to_str()?;
+                    let name = name_py.to_str()?;
+
+                    if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
+                        // Instance: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
+                        write_global(buf, module, name);
+                        buf.push(EMPTY_TUPLE);
+                        buf.push(NEWOBJ);
+
+                        if let Some(info) = btrees::classify_btree(module, name) {
+                            encode_btree_state_to_pickle(&info, &state_val, buf, expand_refs)?;
+                        } else {
+                            encode_pyobject_to_pickle(&state_val, buf, expand_refs)?;
+                        }
+                        buf.push(BUILD);
+                        return Ok(());
+                    }
+                    // @cls alone → GLOBAL
+                    write_global(buf, module, name);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    // Other multi-key markers: fall back to PickleValue path
+    let pv = pydict_to_pickle_value(dict, expand_refs)?;
+    encode_value_into(&pv, buf)?;
+    Ok(())
+}
+
+/// Write a plain dict (no markers) directly to pickle buffer.
+#[inline]
+fn encode_plain_dict_to_pickle(
+    dict: &Bound<'_, PyDict>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    buf.push(EMPTY_DICT);
+    if !dict.is_empty() {
+        buf.push(MARK);
+        for (k, v) in dict {
+            // Optimistically assume string keys (>99% in ZODB)
+            if let Ok(s) = k.downcast::<PyString>() {
+                if let Ok(key_str) = s.to_str() {
+                    write_string(buf, key_str);
+                    encode_pyobject_to_pickle(&v, buf, expand_refs)?;
+                    continue;
+                }
+            }
+            // Non-string key: fallback to PickleValue for this key
+            let k_pv = pyobject_to_pickle_value(&k, expand_refs)?;
+            encode_value_into(&k_pv, buf)?;
+            encode_pyobject_to_pickle(&v, buf, expand_refs)?;
+        }
+        buf.push(SETITEMS);
+    }
+    Ok(())
+}
+
+/// Try to encode a single-key marker dict directly to pickle.
+/// Returns true if the marker was handled.
+fn try_encode_marker_to_pickle(
+    key: &str,
+    v: &Bound<'_, pyo3::PyAny>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<bool> {
+    match key {
+        "@ref" => {
+            if expand_refs {
+                // Expand compact hex ref → PersistentRef(Tuple([Bytes(oid), None/Global]))
+                if let Ok(s) = v.downcast::<PyString>() {
+                    if let Ok(hex_str) = s.to_str() {
+                        let oid = hex::decode(hex_str)
+                            .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
+                        write_bytes_val(buf, &oid);
+                        buf.push(NONE);
+                        buf.push(TUPLE2);
+                        buf.push(BINPERSID);
+                        return Ok(true);
+                    }
+                }
+                if let Ok(list) = v.downcast::<PyList>() {
+                    if list.len() == 2 {
+                        let item0 = list.get_item(0)?;
+                        let item1 = list.get_item(1)?;
+                        if let (Ok(oid_py), Ok(cls_py)) = (
+                            item0.downcast::<PyString>(),
+                            item1.downcast::<PyString>(),
+                        ) {
+                            let oid_str = oid_py.to_str()?;
+                            let cls_str = cls_py.to_str()?;
+                            let oid = hex::decode(oid_str)
+                                .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
+                            write_bytes_val(buf, &oid);
+                            let (module, name) = if let Some(dot) = cls_str.rfind('.') {
+                                (&cls_str[..dot], &cls_str[dot + 1..])
+                            } else {
+                                ("", cls_str)
+                            };
+                            write_global(buf, module, name);
+                            buf.push(TUPLE2);
+                            buf.push(BINPERSID);
+                            return Ok(true);
+                        }
+                    }
+                }
+                // Fallback for complex @ref values
+                let pv = expand_compact_ref(v)?;
+                encode_value_into(&pv, buf)?;
+                Ok(true)
+            } else {
+                // Non-expanding: encode inner value + BINPERSID
+                encode_pyobject_to_pickle(v, buf, expand_refs)?;
+                buf.push(BINPERSID);
+                Ok(true)
+            }
+        }
+        "@t" => {
+            if let Ok(list) = v.downcast::<PyList>() {
+                let n = list.len();
+                match n {
+                    0 => buf.push(EMPTY_TUPLE),
+                    1 => {
+                        encode_pyobject_to_pickle(&list.get_item(0)?, buf, expand_refs)?;
+                        buf.push(TUPLE1);
+                    }
+                    2 => {
+                        encode_pyobject_to_pickle(&list.get_item(0)?, buf, expand_refs)?;
+                        encode_pyobject_to_pickle(&list.get_item(1)?, buf, expand_refs)?;
+                        buf.push(TUPLE2);
+                    }
+                    3 => {
+                        encode_pyobject_to_pickle(&list.get_item(0)?, buf, expand_refs)?;
+                        encode_pyobject_to_pickle(&list.get_item(1)?, buf, expand_refs)?;
+                        encode_pyobject_to_pickle(&list.get_item(2)?, buf, expand_refs)?;
+                        buf.push(TUPLE3);
+                    }
+                    _ => {
+                        buf.push(MARK);
+                        for item in list.iter() {
+                            encode_pyobject_to_pickle(&item, buf, expand_refs)?;
+                        }
+                        buf.push(TUPLE);
+                    }
+                }
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        "@b" => {
+            if let Ok(s) = v.downcast::<PyString>() {
+                if let Ok(b64_str) = s.to_str() {
+                    let bytes = BASE64
+                        .decode(b64_str)
+                        .map_err(|e| CodecError::Json(format!("base64 decode: {e}")))?;
+                    write_bytes_val(buf, &bytes);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "@cls" => {
+            if let Ok(cls_list) = v.downcast::<PyList>() {
+                if cls_list.len() == 2 {
+                    let item0 = cls_list.get_item(0)?;
+                    let item1 = cls_list.get_item(1)?;
+                    if let (Ok(mod_py), Ok(name_py)) = (
+                        item0.downcast::<PyString>(),
+                        item1.downcast::<PyString>(),
+                    ) {
+                        let module = mod_py.to_str()?;
+                        let name = name_py.to_str()?;
+                        write_global(buf, module, name);
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        }
+        _ => {
+            // All other single-key markers (@dt, @date, @time, @td, @dec, @uuid,
+            // @pkl, @reduce, @bi, @d, @set, @fset, @inst):
+            // fall back to PickleValue conversion + encode
+            let py = v.py();
+            let pv =
+                if let Some(pv) = try_decode_single_key_marker(py, key, v, expand_refs)? {
+                    pv
+                } else {
+                    // Unrecognized marker: encode as plain dict
+                    let val_pv = pyobject_to_pickle_value(v, expand_refs)?;
+                    PickleValue::Dict(vec![(PickleValue::String(key.to_owned()), val_pv)])
+                };
+            encode_value_into(&pv, buf)?;
+            Ok(true)
+        }
+    }
+}
+
+/// Encode BTree state PyObject directly to pickle opcodes.
+pub fn encode_btree_state_to_pickle(
+    info: &btrees::BTreeClassInfo,
+    state_obj: &Bound<'_, pyo3::PyAny>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    // None → NONE
+    if state_obj.is_none() {
+        buf.push(NONE);
+        return Ok(());
+    }
+
+    let dict = match state_obj.downcast::<PyDict>() {
+        Ok(d) => d,
+        Err(_) => {
+            // Not a dict — generic encode (e.g., scalar for BTrees.Length)
+            encode_pyobject_to_pickle(state_obj, buf, expand_refs)?;
+            return Ok(());
+        }
+    };
+
+    let py = dict.py();
+
+    // @kv — map data
+    if let Some(kv_val) = dict.get_item(intern!(py, "@kv"))? {
+        if let Ok(kv_list) = kv_val.downcast::<PyList>() {
+            let next_val = dict.get_item(intern!(py, "@next"))?;
+
+            // Write flat data tuple: MARK k1 v1 k2 v2 ... TUPLE (or TUPLE2 etc.)
+            encode_flat_kv_tuple(kv_list, buf, expand_refs)?;
+
+            // Wrap with appropriate nesting
+            match info.kind {
+                btrees::BTreeNodeKind::BTree | btrees::BTreeNodeKind::TreeSet => {
+                    // 4-level: (((data,),),)
+                    buf.push(TUPLE1);
+                    buf.push(TUPLE1);
+                    buf.push(TUPLE1);
+                }
+                btrees::BTreeNodeKind::Bucket | btrees::BTreeNodeKind::Set => {
+                    // 2-level: (data,) or (data, next_ref)
+                    if let Some(next) = next_val {
+                        encode_pyobject_to_pickle(&next, buf, expand_refs)?;
+                        buf.push(TUPLE2);
+                    } else {
+                        buf.push(TUPLE1);
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // @ks — set data
+    if let Some(ks_val) = dict.get_item(intern!(py, "@ks"))? {
+        if let Ok(ks_list) = ks_val.downcast::<PyList>() {
+            let next_val = dict.get_item(intern!(py, "@next"))?;
+
+            encode_flat_keys_tuple(ks_list, buf, expand_refs)?;
+
+            match info.kind {
+                btrees::BTreeNodeKind::BTree | btrees::BTreeNodeKind::TreeSet => {
+                    buf.push(TUPLE1);
+                    buf.push(TUPLE1);
+                    buf.push(TUPLE1);
+                }
+                btrees::BTreeNodeKind::Bucket | btrees::BTreeNodeKind::Set => {
+                    if let Some(next) = next_val {
+                        encode_pyobject_to_pickle(&next, buf, expand_refs)?;
+                        buf.push(TUPLE2);
+                    } else {
+                        buf.push(TUPLE1);
+                    }
+                }
+            }
+            return Ok(());
+        }
+    }
+
+    // @children + @first — large BTree
+    if let Some(children_val) = dict.get_item(intern!(py, "@children"))? {
+        let first_val = dict
+            .get_item(intern!(py, "@first"))?
+            .ok_or_else(|| CodecError::InvalidData("@children without @first".into()))?;
+        if let Ok(children_list) = children_val.downcast::<PyList>() {
+            let n = children_list.len();
+            match n {
+                0 => buf.push(EMPTY_TUPLE),
+                1 => {
+                    encode_pyobject_to_pickle(&children_list.get_item(0)?, buf, expand_refs)?;
+                    buf.push(TUPLE1);
+                }
+                2 => {
+                    encode_pyobject_to_pickle(&children_list.get_item(0)?, buf, expand_refs)?;
+                    encode_pyobject_to_pickle(&children_list.get_item(1)?, buf, expand_refs)?;
+                    buf.push(TUPLE2);
+                }
+                3 => {
+                    encode_pyobject_to_pickle(&children_list.get_item(0)?, buf, expand_refs)?;
+                    encode_pyobject_to_pickle(&children_list.get_item(1)?, buf, expand_refs)?;
+                    encode_pyobject_to_pickle(&children_list.get_item(2)?, buf, expand_refs)?;
+                    buf.push(TUPLE3);
+                }
+                _ => {
+                    buf.push(MARK);
+                    for item in children_list.iter() {
+                        encode_pyobject_to_pickle(&item, buf, expand_refs)?;
+                    }
+                    buf.push(TUPLE);
+                }
+            }
+            // First bucket
+            encode_pyobject_to_pickle(&first_val, buf, expand_refs)?;
+            buf.push(TUPLE2);
+            return Ok(());
+        }
+    }
+
+    // Fallback: generic encode
+    encode_pyobject_to_pickle(state_obj, buf, expand_refs)?;
+    Ok(())
+}
+
+/// Write @kv pairs as a flat tuple: MARK k1 v1 k2 v2 ... TUPLE
+fn encode_flat_kv_tuple(
+    kv_list: &Bound<'_, PyList>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    let n_pairs = kv_list.len();
+    let n_items = n_pairs * 2;
+
+    if n_items == 0 {
+        buf.push(EMPTY_TUPLE);
+        return Ok(());
+    }
+
+    if n_items > 3 {
+        // Common path: OOBucket with many pairs
+        buf.push(MARK);
+        for pair_obj in kv_list.iter() {
+            let pair = pair_obj.downcast::<PyList>()?;
+            encode_pyobject_to_pickle(&pair.get_item(0)?, buf, expand_refs)?;
+            encode_pyobject_to_pickle(&pair.get_item(1)?, buf, expand_refs)?;
+        }
+        buf.push(TUPLE);
+    } else {
+        // 1 pair (2 items)
+        for pair_obj in kv_list.iter() {
+            let pair = pair_obj.downcast::<PyList>()?;
+            encode_pyobject_to_pickle(&pair.get_item(0)?, buf, expand_refs)?;
+            encode_pyobject_to_pickle(&pair.get_item(1)?, buf, expand_refs)?;
+        }
+        match n_items {
+            2 => buf.push(TUPLE2),
+            3 => buf.push(TUPLE3),
+            _ => {
+                // Shouldn't happen (1 pair = 2 items minimum)
+                buf.push(TUPLE1);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Write @ks keys as a flat tuple: MARK k1 k2 ... TUPLE
+fn encode_flat_keys_tuple(
+    ks_list: &Bound<'_, PyList>,
+    buf: &mut Vec<u8>,
+    expand_refs: bool,
+) -> PyResult<()> {
+    let n = ks_list.len();
+
+    if n == 0 {
+        buf.push(EMPTY_TUPLE);
+        return Ok(());
+    }
+
+    if n > 3 {
+        buf.push(MARK);
+        for item in ks_list.iter() {
+            encode_pyobject_to_pickle(&item, buf, expand_refs)?;
+        }
+        buf.push(TUPLE);
+    } else {
+        for item in ks_list.iter() {
+            encode_pyobject_to_pickle(&item, buf, expand_refs)?;
+        }
+        match n {
+            1 => buf.push(TUPLE1),
+            2 => buf.push(TUPLE2),
+            3 => buf.push(TUPLE3),
+            _ => unreachable!(),
+        }
+    }
+    Ok(())
 }

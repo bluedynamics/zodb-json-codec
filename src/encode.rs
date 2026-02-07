@@ -12,6 +12,77 @@ pub fn encode_pickle(val: &PickleValue) -> Result<Vec<u8>, CodecError> {
     Ok(encoder.buf)
 }
 
+/// Encode a PickleValue into an existing buffer (without PROTO/STOP framing).
+/// Used as a fallback when the direct PyObject→pickle encoder encounters
+/// complex types that need the PickleValue intermediate representation.
+pub fn encode_value_into(val: &PickleValue, buf: &mut Vec<u8>) -> Result<(), CodecError> {
+    let mut encoder = Encoder {
+        buf: std::mem::take(buf),
+    };
+    encoder.encode_value(val)?;
+    *buf = encoder.buf;
+    Ok(())
+}
+
+// --- Public inline helpers for direct pickle writing ---
+// Used by pyconv.rs to write pickle opcodes without PickleValue intermediates.
+
+#[inline]
+pub fn write_string(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    if n < 256 {
+        buf.push(SHORT_BINUNICODE);
+        buf.push(n as u8);
+    } else {
+        buf.push(BINUNICODE);
+        buf.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    buf.extend_from_slice(bytes);
+}
+
+#[inline]
+pub fn write_int(buf: &mut Vec<u8>, val: i64) {
+    if val >= 0 && val < 256 {
+        buf.push(BININT1);
+        buf.push(val as u8);
+    } else if val >= 0 && val < 65536 {
+        buf.push(BININT2);
+        buf.extend_from_slice(&(val as u16).to_le_bytes());
+    } else if val >= i32::MIN as i64 && val <= i32::MAX as i64 {
+        buf.push(BININT);
+        buf.extend_from_slice(&(val as i32).to_le_bytes());
+    } else {
+        let bi = num_bigint::BigInt::from(val);
+        let bytes = bi.to_signed_bytes_le();
+        buf.push(LONG1);
+        buf.push(bytes.len() as u8);
+        buf.extend_from_slice(&bytes);
+    }
+}
+
+#[inline]
+pub fn write_bytes_val(buf: &mut Vec<u8>, data: &[u8]) {
+    let n = data.len();
+    if n < 256 {
+        buf.push(SHORT_BINBYTES);
+        buf.push(n as u8);
+    } else {
+        buf.push(BINBYTES);
+        buf.extend_from_slice(&(n as u32).to_le_bytes());
+    }
+    buf.extend_from_slice(data);
+}
+
+#[inline]
+pub fn write_global(buf: &mut Vec<u8>, module: &str, name: &str) {
+    buf.push(GLOBAL);
+    buf.extend_from_slice(module.as_bytes());
+    buf.push(b'\n');
+    buf.extend_from_slice(name.as_bytes());
+    buf.push(b'\n');
+}
+
 struct Encoder {
     buf: Vec<u8>,
 }
