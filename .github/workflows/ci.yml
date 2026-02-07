@@ -29,13 +29,12 @@ jobs:
       - name: Create venv and install dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest persistent
+          .venv/bin/pip install maturin
+          .venv/bin/maturin develop --release
+          .venv/bin/pip install ".[test]"
 
       - name: Rust tests
         run: cargo test
-
-      - name: Build Python extension
-        run: .venv/bin/maturin develop --release
 
       - name: Python tests
         run: .venv/bin/pytest tests/ -v
@@ -60,10 +59,8 @@ jobs:
       - name: Create venv and install dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest
-
-      - name: Build Python extension (release)
-        run: .venv/bin/maturin develop --release
+          .venv/bin/pip install maturin
+          .venv/bin/maturin develop --release
 
       - name: Performance regression check
         run: .venv/bin/python benchmarks/bench.py check --iterations 500
