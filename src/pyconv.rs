@@ -1620,9 +1620,15 @@ pub fn encode_zodb_record_direct(
 
     let mut result = Vec::with_capacity(256);
 
-    // Class pickle: PROTO 2 + GLOBAL module\nname\n + STOP
+    // Class pickle: PROTO 2 + ((module, name), None) as tuple + STOP
+    // This is the format produced by ZODB's PersistentPickler and expected
+    // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
     result.extend_from_slice(&[PROTO, 2]);
-    write_global(&mut result, module, name);
+    write_string(&mut result, module);
+    write_string(&mut result, name);
+    result.push(TUPLE2);  // inner tuple: (module, name)
+    result.push(NONE);
+    result.push(TUPLE2);  // outer tuple: ((module, name), None)
     result.push(STOP);
 
     // State pickle: PROTO 2 + state opcodes + STOP

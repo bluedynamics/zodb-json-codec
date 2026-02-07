@@ -137,15 +137,20 @@ class TestEncodeZodbRecord:
         assert decoded2["@s"]["y"] == "hello"
         assert decoded2["@s"]["z"] == [True, None, 3.14]
 
-    def test_class_pickle_uses_global(self):
-        """Verify encoder produces GLOBAL opcode (like real ZODB), not tuple."""
+    def test_class_pickle_uses_tuple_format(self):
+        """Verify encoder produces tuple format ((module, name), None).
+
+        This matches what ZODB's PersistentPickler produces and what
+        zodb_unpickle() expects.
+        """
         record = make_zodb_record("myapp", "Doc", {"x": 1})
         decoded = zodb_json_codec.decode_zodb_record(record)
         re_encoded = zodb_json_codec.encode_zodb_record(decoded)
 
-        # The re-encoded record should start with PROTO + GLOBAL
-        assert re_encoded[0:1] == b"\x80"  # PROTO
-        assert re_encoded[2:3] == b"c"  # GLOBAL opcode
+        # The re-encoded class pickle should start with PROTO 2
+        assert re_encoded[0:2] == b"\x80\x02"  # PROTO 2
+        # Next byte should be BINUNICODE (0x58 = 'X') for the module string
+        assert re_encoded[2:3] == b"X"  # BINUNICODE (module string)
 
 
 class TestRealZODB:

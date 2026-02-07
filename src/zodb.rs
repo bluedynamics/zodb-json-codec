@@ -185,8 +185,16 @@ fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     // Check for BTree class before moving module/name into Global
     let btree_info = btrees::classify_btree(&module, &name);
 
-    // Encode class pickle: ZODB uses GLOBAL opcode, not a tuple
-    let class_val = PickleValue::Global { module, name };
+    // Encode class pickle as tuple: ((module, name), None)
+    // This is the format produced by ZODB's PersistentPickler and expected
+    // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
+    let class_val = PickleValue::Tuple(vec![
+        PickleValue::Tuple(vec![
+            PickleValue::String(module),
+            PickleValue::String(name),
+        ]),
+        PickleValue::None,
+    ]);
     let class_bytes = encode_pickle(&class_val)?;
 
     // Take ownership of @s to avoid cloning, then restore persistent refs
@@ -342,20 +350,39 @@ fn try_expand_ref(ref_val: &Value) -> Option<Value> {
 }
 
 /// Extract (module, name) from a class pickle value.
+///
+/// ZODB class pickles come in several formats:
+///   1. GLOBAL opcode: `PickleValue::Global { module, name }`
+///   2. Nested tuple: `((module, name), None_or_args)` — from PersistentPickler
+///   3. Flat tuple: `(module, name)` — legacy/simplified
 pub fn extract_class_info(val: &PickleValue) -> (String, String) {
     match val {
-        PickleValue::Tuple(items) if items.len() == 2 => {
-            let module = match &items[0] {
-                PickleValue::String(s) => s.clone(),
-                _ => String::new(),
-            };
-            let name = match &items[1] {
-                PickleValue::String(s) => s.clone(),
-                _ => String::new(),
-            };
-            (module, name)
-        }
         PickleValue::Global { module, name } => (module.clone(), name.clone()),
+        PickleValue::Tuple(items) if items.len() == 2 => {
+            match &items[0] {
+                // Nested tuple: ((module, name), None_or_args)
+                PickleValue::Tuple(inner) if inner.len() == 2 => {
+                    let module = match &inner[0] {
+                        PickleValue::String(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    let name = match &inner[1] {
+                        PickleValue::String(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    (module, name)
+                }
+                // Flat tuple: (module_str, name_str)
+                PickleValue::String(module) => {
+                    let name = match &items[1] {
+                        PickleValue::String(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    (module.clone(), name)
+                }
+                _ => (String::new(), String::new()),
+            }
+        }
         _ => (String::new(), String::new()),
     }
 }
