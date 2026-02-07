@@ -82,9 +82,9 @@ transformation) yet beats pickle on most categories:
 
 | Operation | Best | Worst | Typical ZODB |
 |---|---|---|---|
-| Decode | **2.3x faster** | 1.1x slower | 1.5x faster |
-| Encode | **4.1x faster** | 1.6x slower | 2.2x faster |
-| Roundtrip | **2.8x faster** | 1.2x slower | 1.5x faster |
+| Decode | **1.9x faster** | 1.2x slower | 1.4x faster |
+| Encode | **7.4x faster** | 1.4x faster | 3.8x faster |
+| Roundtrip | **3.1x faster** | 1.0x slower | 2.0x faster |
 
 On a real Plone 6 database (8,400+ records, 182 distinct types, 0 errors):
 decode is **1.4x faster** (median) with **14.6x faster** mean due to
