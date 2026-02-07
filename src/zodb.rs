@@ -6,8 +6,6 @@ use base64::Engine as _;
 #[cfg(test)]
 use crate::btrees;
 #[cfg(test)]
-use crate::decode::decode_pickle;
-#[cfg(test)]
 use crate::encode::encode_pickle;
 #[cfg(test)]
 use crate::json::{json_to_pickle_value, pickle_value_to_json};
@@ -141,10 +139,7 @@ fn find_pickle_end(data: &[u8]) -> Result<usize, CodecError> {
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[cfg(test)]
 fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
-    let (class_pickle, state_pickle) = split_zodb_record(data)?;
-
-    let class_val = decode_pickle(class_pickle)?;
-    let state_val = decode_pickle(state_pickle)?;
+    let (class_val, state_val) = crate::decode::decode_zodb_pickles(data)?;
 
     // Extract class info
     let (module, name) = extract_class_info(&class_val);

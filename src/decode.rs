@@ -13,6 +13,18 @@ pub fn decode_pickle(data: &[u8]) -> Result<PickleValue, CodecError> {
     decoder.run()
 }
 
+/// Decode a ZODB record (two concatenated pickles) with shared memo.
+/// ZODB shares the pickler memo between the class and state pickles,
+/// so state pickles can reference memo entries from the class pickle.
+/// Returns (class_value, state_value).
+pub fn decode_zodb_pickles(data: &[u8]) -> Result<(PickleValue, PickleValue), CodecError> {
+    let mut decoder = Decoder::new(data);
+    let class_val = decoder.run()?;
+    // Continue with same memo — ZODB shares memo between both pickles
+    let state_val = decoder.run()?;
+    Ok((class_val, state_val))
+}
+
 struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,

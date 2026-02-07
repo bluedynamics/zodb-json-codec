@@ -13,7 +13,7 @@ use pyo3::prelude::*;
 use pyo3::intern;
 use pyo3::types::{PyBytes, PyDict, PyList, PyString};
 
-use crate::decode::decode_pickle;
+use crate::decode::{decode_pickle, decode_zodb_pickles};
 use crate::encode::encode_pickle;
 use crate::error::CodecError;
 use crate::json::{json_to_pickle_value, pickle_value_to_json};
@@ -56,9 +56,7 @@ fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyByte
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[pyfunction]
 fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
-    let (class_data, state_data) = zodb::split_zodb_record(data)?;
-    let class_val = decode_pickle(class_data).map_err(CodecError::from)?;
-    let state_val = decode_pickle(state_data).map_err(CodecError::from)?;
+    let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
     let (module, name) = zodb::extract_class_info(&class_val);
 
     // BTree-aware state conversion with inline persistent ref compaction
