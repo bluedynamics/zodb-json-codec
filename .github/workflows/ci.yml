@@ -26,18 +26,19 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install dependencies
+      - name: Create venv and install dependencies
         run: |
-          pip install maturin pytest
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest
 
       - name: Rust tests
         run: cargo test
 
       - name: Build Python extension
-        run: maturin develop --release
+        run: .venv/bin/maturin develop --release
 
       - name: Python tests
-        run: pytest tests/ -v
+        run: .venv/bin/pytest tests/ -v
 
   perf-check:
     runs-on: ubuntu-latest
@@ -56,12 +57,13 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install dependencies
+      - name: Create venv and install dependencies
         run: |
-          pip install maturin pytest
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest
 
       - name: Build Python extension (release)
-        run: maturin develop --release
+        run: .venv/bin/maturin develop --release
 
       - name: Performance regression check
-        run: python benchmarks/bench.py check --iterations 500
+        run: .venv/bin/python benchmarks/bench.py check --iterations 500
