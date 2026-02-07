@@ -20,12 +20,11 @@ use crate::json::{json_to_pickle_value, pickle_value_to_json};
 
 /// Convert pickle bytes to a JSON string.
 #[pyfunction]
-fn pickle_to_json(py: Python<'_>, data: &[u8]) -> PyResult<String> {
+fn pickle_to_json(data: &[u8]) -> PyResult<String> {
     let val = decode_pickle(data).map_err(CodecError::from)?;
     let json_val = pickle_value_to_json(&val)?;
     let json_str = serde_json::to_string_pretty(&json_val)
         .map_err(|e| CodecError::Json(e.to_string()))?;
-    let _ = py; // suppress unused warning
     Ok(json_str)
 }
 

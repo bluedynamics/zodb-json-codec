@@ -140,7 +140,7 @@ fn find_pickle_end(data: &[u8]) -> Result<usize, CodecError> {
 ///
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[cfg(test)]
-pub fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
+fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
     let (class_pickle, state_pickle) = split_zodb_record(data)?;
 
     let class_val = decode_pickle(class_pickle)?;
@@ -169,7 +169,7 @@ pub fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
 /// (serde_json path — used by Rust tests; Python API uses pyconv instead)
 /// Takes ownership to avoid cloning the state tree for persistent ref restoration.
 #[cfg(test)]
-pub fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
+fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     let cls = json_val
         .get("@cls")
         .ok_or_else(|| CodecError::InvalidData("missing @cls in ZODB record".to_string()))?;

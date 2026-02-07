@@ -123,6 +123,7 @@ class FileStorageResult:
     error_details: list[str] = field(default_factory=list)
     decode_codec: TimingStats = field(default_factory=TimingStats)
     decode_python: TimingStats = field(default_factory=TimingStats)
+    encode_python: TimingStats = field(default_factory=TimingStats)
     encode_codec: TimingStats = field(default_factory=TimingStats)
     roundtrip_codec: TimingStats = field(default_factory=TimingStats)
     by_class: dict[str, int] = field(default_factory=dict)
@@ -380,12 +381,14 @@ def run_filestorage_benchmark(
                 t0 = time.perf_counter_ns()
                 decoded = zodb_json_codec.decode_zodb_record(data)
                 t1 = time.perf_counter_ns()
-                result.decode_codec.samples.append((t1 - t0) / 1000.0)
+                codec_decode_us = (t1 - t0) / 1000.0
             except Exception as exc:
                 result.errors += 1
                 oid_hex = record.oid.hex()
                 result.error_details.append(f"oid={oid_hex}: {exc}")
                 continue
+
+            result.decode_codec.samples.append(codec_decode_us)
 
             # JSON size
             result.total_json_bytes += len(json.dumps(decoded))
@@ -398,12 +401,22 @@ def run_filestorage_benchmark(
                 class_path = str(cls)
             result.by_class[class_path] = result.by_class.get(class_path, 0) + 1
 
-            # --- Python baseline decode ---
+            # --- Python baseline decode + encode ---
+            # Only count when Python succeeds, so comparisons are fair
             try:
                 t0 = time.perf_counter_ns()
-                python_decode_zodb_record(data)
+                class_info, state = python_decode_zodb_record(data)
                 t1 = time.perf_counter_ns()
-                result.decode_python.samples.append((t1 - t0) / 1000.0)
+                python_decode_us = (t1 - t0) / 1000.0
+
+                t0 = time.perf_counter_ns()
+                python_encode_zodb_record(class_info, state)
+                t1 = time.perf_counter_ns()
+                python_encode_us = (t1 - t0) / 1000.0
+
+                # Both succeeded — record paired samples
+                result.decode_python.samples.append(python_decode_us)
+                result.encode_python.samples.append(python_encode_us)
             except Exception:
                 pass
 
@@ -533,6 +546,7 @@ def print_filestorage_results(result: FileStorageResult) -> None:
         ("Decode (Codec)", result.decode_codec),
         ("Decode (Python)", result.decode_python),
         ("Encode (Codec)", result.encode_codec),
+        ("Encode (Python)", result.encode_python),
         ("Roundtrip (Codec)", result.roundtrip_codec),
     ]:
         if not stats.samples:
@@ -552,11 +566,26 @@ def print_filestorage_results(result: FileStorageResult) -> None:
         )
         print()
 
-    # Decode speedup
+    # Speedup summary (note: Python only works on records with importable classes)
     if result.decode_python.samples and result.decode_codec.samples:
+        py_count = len(result.decode_python.samples)
+        total = len(result.decode_codec.samples)
+        pct = py_count / total * 100 if total else 0
+        print(
+            f"  {DIM}Note: Python pickle only decoded {py_count:,} of "
+            f"{total:,} records ({pct:.0f}%) — classes not installed "
+            f"for the rest.{RESET}"
+        )
+        print(
+            f"  {DIM}Speedup is NOT comparable (different record sets). "
+            f"Use synthetic benchmarks for fair comparison.{RESET}"
+        )
         sp = _speedup(result.decode_python.mean, result.decode_codec.mean)
-        print(f"  Decode speedup: {HEADER}{sp}{RESET}")
-        print()
+        print(f"  Decode speedup (crude): {sp}")
+    if result.encode_python.samples and result.encode_codec.samples:
+        sp = _speedup(result.encode_python.mean, result.encode_codec.mean)
+        print(f"  Encode speedup (crude): {sp}")
+    print()
 
     # Top record types
     if result.by_class:
@@ -627,6 +656,7 @@ def results_to_json(
             "decode_codec": filestorage.decode_codec.to_dict(),
             "decode_python": filestorage.decode_python.to_dict(),
             "encode_codec": filestorage.encode_codec.to_dict(),
+            "encode_python": filestorage.encode_python.to_dict(),
             "roundtrip_codec": filestorage.roundtrip_codec.to_dict(),
             "by_class": filestorage.by_class,
         }

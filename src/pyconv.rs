@@ -253,7 +253,7 @@ fn try_reduce_to_pyobject(
 fn encode_datetime_pyobject(
     py: Python<'_>,
     args: &PickleValue,
-    compact_refs: bool,
+    _compact_refs: bool,
 ) -> PyResult<Option<PyObject>> {
     let tuple_items = match args {
         PickleValue::Tuple(items) => items,
@@ -320,7 +320,6 @@ fn encode_datetime_pyobject(
             }
             None => {
                 // Unknown tz — fall through to generic @reduce
-                let _ = compact_refs;
                 Ok(None)
             }
         }
@@ -374,7 +373,7 @@ fn encode_date_pyobject(
 fn encode_time_pyobject(
     py: Python<'_>,
     args: &PickleValue,
-    compact_refs: bool,
+    _compact_refs: bool,
 ) -> PyResult<Option<PyObject>> {
     let tuple_items = match args {
         PickleValue::Tuple(items) if !items.is_empty() => items,
@@ -438,7 +437,7 @@ fn encode_time_pyobject(
                 Ok(Some(dict.into_any().unbind()))
             }
             None => {
-                let _ = compact_refs;
+                // Unknown tz — fall through to generic @reduce
                 Ok(None)
             }
         }
