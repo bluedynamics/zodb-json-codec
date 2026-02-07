@@ -29,7 +29,7 @@ jobs:
       - name: Create venv and install dependencies
         run: |
           python -m venv .venv
-          .venv/bin/pip install maturin pytest
+          .venv/bin/pip install maturin pytest persistent
 
       - name: Rust tests
         run: cargo test
