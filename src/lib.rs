@@ -38,14 +38,14 @@ fn json_to_pickle(py: Python<'_>, json_str: &str) -> PyResult<Py<PyBytes>> {
     Ok(PyBytes::new(py, &bytes).into())
 }
 
-/// Convert pickle bytes to a Python dict (direct PickleValue → PyObject).
+/// Convert pickle bytes to a Python dict (direct PickleValue → Py<PyAny>).
 #[pyfunction]
-fn pickle_to_dict(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn pickle_to_dict(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     let val = decode_pickle(data).map_err(CodecError::from)?;
     pyconv::pickle_value_to_pyobject(py, &val, false)
 }
 
-/// Convert a Python dict to pickle bytes (direct PyObject → pickle bytes).
+/// Convert a Python dict to pickle bytes (direct Py<PyAny> → pickle bytes).
 #[pyfunction]
 fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
     let bytes = pyconv::encode_pyobject_as_pickle(obj.as_any(), false)?;
@@ -55,7 +55,7 @@ fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyByte
 /// Decode a ZODB record (two concatenated pickles) into a Python dict.
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[pyfunction]
-fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
+fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     let (class_data, state_data) = zodb::split_zodb_record(data)?;
     let class_val = decode_pickle(class_data).map_err(CodecError::from)?;
     let state_val = decode_pickle(state_data).map_err(CodecError::from)?;
@@ -77,13 +77,13 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<PyObject> {
 }
 
 /// Encode a ZODB JSON record back into two concatenated pickles.
-/// Uses the direct PyObject → pickle encoder, bypassing PickleValue allocations.
+/// Uses the direct Py<PyAny> → pickle encoder, bypassing PickleValue allocations.
 #[pyfunction]
 fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyBytes>> {
     let cls_val = obj
         .get_item(intern!(py, "@cls"))?
         .ok_or_else(|| CodecError::InvalidData("missing @cls in ZODB record".to_string()))?;
-    let cls_list = cls_val.downcast::<PyList>().map_err(|_| {
+    let cls_list = cls_val.cast::<PyList>().map_err(|_| {
         CodecError::InvalidData("@cls must be a list".to_string())
     })?;
     if cls_list.len() != 2 {
@@ -93,10 +93,10 @@ fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<Py
     // Borrow module/name as &str from Python (zero-copy)
     let item0 = cls_list.get_item(0)?;
     let item1 = cls_list.get_item(1)?;
-    let module = item0.downcast::<PyString>()
+    let module = item0.cast::<PyString>()
         .map_err(|_| CodecError::InvalidData("@cls[0] must be a string".to_string()))?
         .to_str()?;
-    let name = item1.downcast::<PyString>()
+    let name = item1.cast::<PyString>()
         .map_err(|_| CodecError::InvalidData("@cls[1] must be a string".to_string()))?
         .to_str()?;
 
