@@ -18,6 +18,7 @@ Initial beta release.
 - Full roundtrip fidelity: encode to JSON and decode back produces identical pickle bytes
 - Direct PickleValue to PyObject conversion (bypasses serde_json intermediate layer)
 - Direct PyObject to pickle bytes encoder (bypasses PickleValue AST for encode)
+- Python 3.10-3.14 support, wheels for Linux/macOS/Windows
 
 ### Performance (release build)
 
