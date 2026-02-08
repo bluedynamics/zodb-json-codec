@@ -77,18 +77,19 @@ For the complete type mapping reference, see [TYPE_MAPPING.md](TYPE_MAPPING.md).
 ## Performance
 
 Benchmarked against CPython's `pickle` module (C extension) on synthetic
-ZODB records. The codec does fundamentally more work (2 conversions + type
-transformation) yet beats pickle on most categories:
+ZODB records (`maturin develop --release`). The codec does fundamentally
+more work (2 conversions + type transformation) yet beats pickle on most
+categories:
 
 | Operation | Best | Worst | Typical ZODB |
 |---|---|---|---|
-| Decode | **1.9x faster** | 1.2x slower | 1.4x faster |
-| Encode | **7.4x faster** | 1.4x faster | 3.8x faster |
-| Roundtrip | **3.1x faster** | 1.0x slower | 2.0x faster |
+| Decode | **1.8x faster** | 1.1x slower | 1.3x faster |
+| Encode | **7.0x faster** | 1.4x faster | 4.0x faster |
+| Roundtrip | **2.9x faster** | 1.3x slower | 2.0x faster |
 
 On a real Plone 6 database (8,400+ records, 182 distinct types, 0 errors):
-decode is **1.4x faster** (median) with **14.6x faster** mean due to
-eliminating Python pickle's extreme outliers.
+decode is **1.3x faster** (median), **18.7x faster** mean; encode is
+**3.5x faster** (median). Python pickle's extreme outliers are eliminated.
 
 For detailed numbers and optimization history, see [BENCHMARKS.md](BENCHMARKS.md).
 

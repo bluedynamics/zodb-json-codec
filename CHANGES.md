@@ -19,9 +19,9 @@ Initial beta release.
 - Direct PickleValue to PyObject conversion (bypasses serde_json intermediate layer)
 - Direct PyObject to pickle bytes encoder (bypasses PickleValue AST for encode)
 
-### Performance
+### Performance (release build)
 
-- Decode: up to 1.9x faster than CPython pickle, 1.4x typical ZODB
-- Encode: up to 7.4x faster than CPython pickle, 3.8x typical ZODB
-- On real Plone 6 database (8,400+ records): 1.4x faster decode (median),
-  14.6x faster mean, 0 errors across 182 distinct types
+- Decode: up to 1.8x faster than CPython pickle, 1.3x typical ZODB
+- Encode: up to 7.0x faster than CPython pickle, 4.0x typical ZODB
+- On real Plone 6 database (8,400+ records): 1.3x faster decode (median),
+  18.7x faster mean; 3.5x faster encode, 0 errors across 182 distinct types
