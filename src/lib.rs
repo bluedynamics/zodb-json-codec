@@ -74,6 +74,42 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     Ok(dict.into_any().unbind())
 }
 
+/// Decode a ZODB record for PostgreSQL JSONB storage.
+///
+/// Combines decode + ref extraction + null-byte sanitization in a single pass.
+/// Returns: `(class_mod: str, class_name: str, state: dict, refs: list[int])`
+///
+/// - `state` has null-byte strings replaced with `{"@ns": base64}` markers
+///   (PostgreSQL JSONB cannot store `\u0000`)
+/// - `refs` contains all persistent reference OIDs as integers (for the
+///   `refs` column used by pure-SQL pack)
+#[pyfunction]
+fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
+    let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
+    let (module, name) = zodb::extract_class_info(&class_val);
+
+    // Collect persistent reference OIDs from the PickleValue tree
+    let mut refs = Vec::new();
+    pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
+
+    // BTree-aware state conversion with null-byte sanitization + ref compaction
+    let state_obj = if let Some(info) = btrees::classify_btree(&module, &name) {
+        pyconv::btree_state_to_pyobject_pg(py, &info, &state_val, true)?
+    } else {
+        pyconv::pickle_value_to_pyobject_pg(py, &state_val, true)?
+    };
+
+    // Build result tuple: (class_mod, class_name, state, refs)
+    let refs_list = PyList::new(py, &refs)?;
+    let result = (
+        module.into_pyobject(py)?,
+        name.into_pyobject(py)?,
+        state_obj.into_bound(py),
+        refs_list.into_any(),
+    );
+    Ok(result.into_pyobject(py)?.into_any().unbind())
+}
+
 /// Encode a ZODB JSON record back into two concatenated pickles.
 /// Uses the direct Py<PyAny> → pickle encoder, bypassing PickleValue allocations.
 #[pyfunction]
@@ -116,6 +152,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pickle_to_dict, m)?)?;
     m.add_function(wrap_pyfunction!(dict_to_pickle, m)?)?;
     m.add_function(wrap_pyfunction!(decode_zodb_record, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_zodb_record_for_pg, m)?)?;
     m.add_function(wrap_pyfunction!(encode_zodb_record, m)?)?;
     Ok(())
 }

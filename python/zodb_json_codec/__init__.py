@@ -2,6 +2,7 @@
 
 from zodb_json_codec._rust import (
     decode_zodb_record,
+    decode_zodb_record_for_pg,
     encode_zodb_record,
     pickle_to_dict,
     pickle_to_json,
@@ -15,5 +16,6 @@ __all__ = [
     "pickle_to_dict",
     "dict_to_pickle",
     "decode_zodb_record",
+    "decode_zodb_record_for_pg",
     "encode_zodb_record",
 ]

@@ -299,3 +299,95 @@ class TestRealZODB:
         re_encoded = zodb_json_codec.encode_zodb_record(result)
         result2 = zodb_json_codec.decode_zodb_record(re_encoded)
         assert result == result2
+
+
+class TestDecodeZodbRecordForPg:
+    """Test decode_zodb_record_for_pg: single-pass decode + refs + null sanitize."""
+
+    def test_returns_tuple_of_four(self):
+        record = make_zodb_record("myapp", "Doc", {"title": "Hello"})
+        result = zodb_json_codec.decode_zodb_record_for_pg(record)
+        assert isinstance(result, tuple)
+        assert len(result) == 4
+
+    def test_class_info_extracted(self):
+        record = make_zodb_record("myapp.models", "Document", {"x": 1})
+        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(record)
+        assert mod == "myapp.models"
+        assert name == "Document"
+        assert state == {"x": 1}
+
+    def test_no_refs_empty_list(self):
+        record = make_zodb_record("myapp", "Obj", {"title": "test"})
+        _, _, _, refs = zodb_json_codec.decode_zodb_record_for_pg(record)
+        assert refs == []
+
+    def test_persistent_ref_collected(self):
+        """Persistent references in state are collected as integer OIDs."""
+        # Build a state with a persistent ref (OID = 3)
+        record_dict = {
+            "@cls": ["myapp", "Doc"],
+            "@s": {"parent": {"@ref": "0000000000000003"}},
+        }
+        pickle_data = zodb_json_codec.encode_zodb_record(record_dict)
+        _, _, state, refs = zodb_json_codec.decode_zodb_record_for_pg(pickle_data)
+        assert 3 in refs
+        # State should contain the compacted ref
+        assert state["parent"] == {"@ref": "0000000000000003"}
+
+    def test_multiple_refs(self):
+        """Multiple persistent refs are all collected."""
+        record_dict = {
+            "@cls": ["myapp", "Container"],
+            "@s": {
+                "child1": {"@ref": "0000000000000001"},
+                "child2": {"@ref": "0000000000000002"},
+                "nested": {"deep": {"@ref": "000000000000000a"}},
+            },
+        }
+        pickle_data = zodb_json_codec.encode_zodb_record(record_dict)
+        _, _, _, refs = zodb_json_codec.decode_zodb_record_for_pg(pickle_data)
+        assert sorted(refs) == [1, 2, 10]
+
+    def test_null_byte_sanitized(self):
+        """Strings with null bytes get @ns markers for PG JSONB compat."""
+        import base64
+        record = make_zodb_record("myapp", "Obj", {"data": "hello\x00world"})
+        _, _, state, _ = zodb_json_codec.decode_zodb_record_for_pg(record)
+        # Should be replaced with @ns marker
+        assert "@ns" in state["data"]
+        # Verify the base64 decodes back correctly
+        decoded = base64.b64decode(state["data"]["@ns"]).decode("utf-8")
+        assert decoded == "hello\x00world"
+
+    def test_no_null_bytes_unchanged(self):
+        """Strings without null bytes are left as plain strings."""
+        record = make_zodb_record("myapp", "Obj", {"title": "normal string"})
+        _, _, state, _ = zodb_json_codec.decode_zodb_record_for_pg(record)
+        assert state["title"] == "normal string"
+
+    def test_matches_decode_zodb_record_structure(self):
+        """For normal data, state matches what decode_zodb_record returns."""
+        record = make_zodb_record(
+            "myapp", "Doc",
+            {"title": "Hello", "count": 42, "items": [1, 2, 3]},
+        )
+        # Regular decode
+        regular = zodb_json_codec.decode_zodb_record(record)
+        # PG decode
+        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(record)
+        assert mod == regular["@cls"][0]
+        assert name == regular["@cls"][1]
+        assert state == regular["@s"]
+
+    def test_roundtrip_with_encode(self):
+        """State from for_pg can be wrapped and re-encoded."""
+        original = make_zodb_record("myapp", "Doc", {"title": "Test", "n": 99})
+        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(original)
+        # Re-wrap for encoding
+        wrapped = {"@cls": [mod, name], "@s": state}
+        re_encoded = zodb_json_codec.encode_zodb_record(wrapped)
+        # Decode again and verify
+        result = zodb_json_codec.decode_zodb_record(re_encoded)
+        assert result["@cls"] == ["myapp", "Doc"]
+        assert result["@s"]["title"] == "Test"
