@@ -1,8 +1,10 @@
 # Changelog
 
-## 0.1.0b1 (unreleased)
+## 1.1.0
 
-Initial beta release.
+- Add builds for Python 3.14
+
+## 1.0.0
 
 ### Features
 
