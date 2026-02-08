@@ -2,6 +2,8 @@
 
 ## 1.1.0
 
+- Update docs
+- Add `decode_zodb_record_for_pg` for single-pass PG optimization
 - Add builds for Python 3.14
 
 ## 1.0.0
