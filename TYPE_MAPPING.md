@@ -99,6 +99,10 @@ Python: `datetime(2025, 6, 15, 12, 30, 45)`
 
 **Timezone handling:**
 
+Fixed-offset timezones are embedded directly in the ISO 8601 string. Named
+timezones (pytz, zoneinfo) use a separate `@tz` key to preserve the zone
+name for exact roundtrip fidelity. These two forms are mutually exclusive.
+
 | Timezone Source | JSON Form |
 |---|---|
 | Naive (no tz) | `{"@dt": "2025-01-01T00:00:00"}` |
@@ -303,14 +307,6 @@ callable and arguments for roundtripping.
 }
 ```
 
-### `@inst` — Anonymous instance
-
-For BUILD operations where the class couldn't be identified.
-
-```json
-{"@inst": {"@state": ...}}
-```
-
 ### `@pkl` — Raw pickle escape hatch
 
 Base64-encoded pickle fragment for types that can't be represented in JSON.
@@ -323,25 +319,21 @@ this marker.
 
 ## Marker Priority
 
-When decoding JSON back to pickle, markers are checked in this order:
+When decoding JSON back to pickle, single-key marker dicts are checked first,
+then multi-key patterns:
 
-1. `@t` (tuple)
-2. `@b` (bytes)
-3. `@bi` (bigint)
-4. `@d` (non-string-key dict)
-5. `@set` (set)
-6. `@fset` (frozenset)
-7. `@ref` (persistent reference)
-8. `@pkl` (raw pickle)
-9. `@dt`, `@date`, `@time`, `@td`, `@dec`, `@uuid` (known types)
-10. `@cls` + `@s` (instance)
-11. `@cls` alone (global reference)
-12. `@reduce` (generic reduce)
-13. Plain JSON object → Python dict
+**Single-key markers:**
+`@t`, `@b`, `@bi`, `@d`, `@set`, `@fset`, `@ref`, `@pkl`,
+`@dt`, `@date`, `@time`, `@td`, `@dec`, `@uuid`, `@reduce`
+
+**Multi-key markers:**
+`@cls` + `@s` (instance with BTree detection), `@dt` + `@tz` (tz-aware datetime)
+
+**Fallback:** Plain JSON object → Python dict
 
 ## Backward Compatibility
 
 If JSON data was stored using the generic `@reduce` format for types that now
-have dedicated markers (e.g., datetime stored as `@reduce` before Phase 3),
-the decoder still handles `@reduce` correctly. The new markers only affect the
-forward direction (pickle → JSON).
+have dedicated markers (e.g., datetime stored as `@reduce` before the known
+type handlers were added), the decoder still handles `@reduce` correctly.
+The new markers only affect the forward direction (pickle → JSON).
