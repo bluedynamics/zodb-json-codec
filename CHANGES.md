@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 (unreleased)
+
+- nothing yet
+
 ## 1.2.0 (2026-02-10)
 
 - Release GIL during pure-Rust pickle decoding phases, allowing other
