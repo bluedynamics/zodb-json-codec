@@ -20,12 +20,15 @@ use crate::json::{json_to_pickle_value, pickle_value_to_json};
 
 /// Convert pickle bytes to a JSON string.
 #[pyfunction]
-fn pickle_to_json(data: &[u8]) -> PyResult<String> {
-    let val = decode_pickle(data).map_err(CodecError::from)?;
-    let json_val = pickle_value_to_json(&val)?;
-    let json_str = serde_json::to_string_pretty(&json_val)
-        .map_err(|e| CodecError::Json(e.to_string()))?;
-    Ok(json_str)
+fn pickle_to_json(py: Python<'_>, data: &[u8]) -> PyResult<String> {
+    // Entire function is pure Rust — release GIL for the full duration
+    py.detach(|| {
+        let val = decode_pickle(data).map_err(CodecError::from)?;
+        let json_val = pickle_value_to_json(&val)?;
+        let json_str = serde_json::to_string_pretty(&json_val)
+            .map_err(|e| CodecError::Json(e.to_string()))?;
+        Ok(json_str)
+    })
 }
 
 /// Convert a JSON string to pickle bytes.
@@ -41,7 +44,7 @@ fn json_to_pickle(py: Python<'_>, json_str: &str) -> PyResult<Py<PyBytes>> {
 /// Convert pickle bytes to a Python dict (direct PickleValue → Py<PyAny>).
 #[pyfunction]
 fn pickle_to_dict(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
-    let val = decode_pickle(data).map_err(CodecError::from)?;
+    let val = py.detach(|| decode_pickle(data).map_err(CodecError::from))?;
     pyconv::pickle_value_to_pyobject(py, &val, false)
 }
 
@@ -56,8 +59,12 @@ fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyByte
 /// Returns: `{"@cls": ["module", "name"], "@s": { ... state ... }}`
 #[pyfunction]
 fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
-    let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
-    let (module, name) = zodb::extract_class_info(&class_val);
+    // Release GIL during pure-Rust pickle parsing
+    let (class_val, state_val, module, name) = py.detach(|| {
+        let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
+        let (module, name) = zodb::extract_class_info(&class_val);
+        Ok::<_, PyErr>((class_val, state_val, module, name))
+    })?;
 
     // BTree-aware state conversion with inline persistent ref compaction
     let state_obj = if let Some(info) = btrees::classify_btree(&module, &name) {
@@ -85,12 +92,15 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
 ///   `refs` column used by pure-SQL pack)
 #[pyfunction]
 fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
-    let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
-    let (module, name) = zodb::extract_class_info(&class_val);
-
-    // Collect persistent reference OIDs from the PickleValue tree
-    let mut refs = Vec::new();
-    pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
+    // Release GIL during pure-Rust pickle parsing + ref extraction.
+    // This allows other Python threads to run during the CPU-bound phase.
+    let (class_val, state_val, module, name, refs) = py.detach(|| {
+        let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
+        let (module, name) = zodb::extract_class_info(&class_val);
+        let mut refs = Vec::new();
+        pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
+        Ok::<_, PyErr>((class_val, state_val, module, name, refs))
+    })?;
 
     // BTree-aware state conversion with null-byte sanitization + ref compaction
     let state_obj = if let Some(info) = btrees::classify_btree(&module, &name) {
