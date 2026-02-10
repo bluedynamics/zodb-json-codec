@@ -37,6 +37,9 @@ record: dict = zodb_json_codec.decode_zodb_record(data)
 # -> {"@cls": ["myapp.models", "Document"], "@s": {"title": "Hello", ...}}
 data: bytes = zodb_json_codec.encode_zodb_record(record)
 
+# Single-pass decode for PostgreSQL storage (decode + refs + null-byte sanitization)
+class_mod, class_name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(data)
+
 # Standalone pickle <-> Python dict
 result: dict = zodb_json_codec.pickle_to_dict(pickle_bytes)
 pickle_bytes: bytes = zodb_json_codec.dict_to_pickle(result)
