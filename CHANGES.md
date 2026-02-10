@@ -1,11 +1,14 @@
 # Changelog
 
-## 1.1.0
+## 1.2.0 (2026-02-10)
 
-- Add `decode_zodb_record_for_pg` for single-pass PG optimization
-  (combines decode + ref extraction + null-byte sanitization)
 - Release GIL during pure-Rust pickle decoding phases, allowing other
   Python threads to run during the CPU-bound parse
+- Add `decode_zodb_record_for_pg` for single-pass PG optimization
+  (combines decode + ref extraction + null-byte sanitization)
+
+## 1.1.0
+
 - Add builds for Python 3.14
 
 ## 1.0.0
