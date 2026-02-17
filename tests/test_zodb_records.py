@@ -301,6 +301,76 @@ class TestRealZODB:
         assert result == result2
 
 
+class SharedRefHelper:
+    """Non-Persistent helper class for testing shared-reference pickling.
+
+    When the same instance appears in two dict values, pickle uses a memo
+    backreference (BINGET) for the second occurrence. The codec must preserve
+    state for both occurrences.
+    """
+
+    def __init__(self, name="<undefined>"):
+        self.name = name
+
+
+class TestSharedReferences:
+    """Test that objects referenced multiple times via pickle memo preserve state."""
+
+    def test_shared_object_in_dict_values(self):
+        """Same object in two dict values: both should have full state."""
+        obj = SharedRefHelper("acl_users")
+        state = {"first": obj, "second": obj}
+        data = pickle.dumps(state, protocol=3)
+
+        result = zodb_json_codec.pickle_to_dict(data)
+
+        first = result["first"]
+        second = result["second"]
+
+        assert "@cls" in first, (
+            "first occurrence should be Instance (@cls), got: %s" % first
+        )
+        assert "@cls" in second, (
+            "second occurrence should be Instance (@cls), not @reduce. "
+            "This fails when memo is not updated after BUILD. Got: %s" % second
+        )
+        assert first["@s"]["name"] == "acl_users"
+        assert second["@s"]["name"] == "acl_users"
+
+    def test_shared_object_roundtrip(self):
+        """Shared reference round-trips through JSON correctly."""
+        obj = SharedRefHelper("test_hook")
+        state = {"a": obj, "b": obj}
+        data = pickle.dumps(state, protocol=3)
+
+        json_str = zodb_json_codec.pickle_to_json(data)
+        parsed = json.loads(json_str)
+
+        assert parsed["a"]["@cls"] == [__name__, "SharedRefHelper"]
+        assert parsed["b"]["@cls"] == [__name__, "SharedRefHelper"]
+        assert parsed["a"]["@s"]["name"] == "test_hook"
+        assert parsed["b"]["@s"]["name"] == "test_hook"
+
+    def test_shared_object_in_zodb_record(self):
+        """Shared references inside a ZODB record state are preserved."""
+        obj = SharedRefHelper("hook_name")
+        record = make_zodb_record(
+            "myapp", "Container",
+            {"hook_a": obj, "hook_b": obj},
+        )
+        result = zodb_json_codec.decode_zodb_record(record)
+
+        hook_a = result["@s"]["hook_a"]
+        hook_b = result["@s"]["hook_b"]
+
+        assert "@cls" in hook_a, "hook_a should be Instance"
+        assert "@cls" in hook_b, (
+            "hook_b (shared ref) should be Instance, not @reduce"
+        )
+        assert hook_a["@s"]["name"] == "hook_name"
+        assert hook_b["@s"]["name"] == "hook_name"
+
+
 class TestDecodeZodbRecordForPg:
     """Test decode_zodb_record_for_pg: single-pass decode + refs + null sanitize."""
 

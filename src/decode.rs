@@ -414,6 +414,13 @@ impl<'a> Decoder<'a> {
                 BUILD => {
                     let state = self.pop_value()?;
                     let obj = self.pop_value()?;
+                    // Save pre-BUILD value so we can update stale memo entries.
+                    // BINPUT clones the stack top into memo *before* BUILD runs,
+                    // so memo entries still reference the old (e.g. Reduce) value.
+                    // After BUILD transforms it (e.g. to Instance), we must
+                    // propagate the change to memo — mirroring how CPython's
+                    // pickle VM uses object identity (shared references).
+                    let old_obj = obj.clone();
                     match obj {
                         PickleValue::Global { module, name } => {
                             self.push(PickleValue::Instance {
@@ -495,24 +502,24 @@ impl<'a> Decoder<'a> {
                             });
                         }
                     }
+                    // Update memo: replace stale pre-BUILD entries with the
+                    // new post-BUILD value so BINGET returns the correct form.
+                    let new_val = self.peek_value()?.clone();
+                    if old_obj != new_val {
+                        for entry in self.memo.iter_mut() {
+                            if *entry == old_obj {
+                                *entry = new_val.clone();
+                            }
+                        }
+                    }
                 }
                 NEWOBJ => {
                     let args = self.pop_value()?;
                     let cls = self.pop_value()?;
-                    match cls {
-                        PickleValue::Global { module, name } => {
-                            self.push(PickleValue::Reduce {
-                                callable: Box::new(PickleValue::Global { module, name }),
-                                args: Box::new(args),
-                            });
-                        }
-                        _ => {
-                            self.push(PickleValue::Reduce {
-                                callable: Box::new(cls),
-                                args: Box::new(args),
-                            });
-                        }
-                    }
+                    self.push(PickleValue::Reduce {
+                        callable: Box::new(cls),
+                        args: Box::new(args),
+                    });
                 }
                 NEWOBJ_EX => {
                     let kwargs = self.pop_value()?;
@@ -808,5 +815,70 @@ mod tests {
                 PickleValue::Int(1)
             )])
         );
+    }
+
+    #[test]
+    fn test_memo_updated_after_build() {
+        // Reproduces the shared-reference bug: NEWOBJ + BINPUT creates a
+        // Reduce in memo, BUILD transforms the stack top to Instance, but
+        // memo was stale. After the fix, BINGET should return Instance.
+        //
+        // Pickle VM sequence:
+        //   PROTO 3
+        //   GLOBAL "mymod\nMyClass\n"
+        //   EMPTY_TUPLE
+        //   NEWOBJ           -> Reduce{Global{mymod,MyClass}, ()}
+        //   BINPUT 0         -> memo[0] = clone of Reduce
+        //   EMPTY_DICT
+        //   SHORT_BINUNICODE "name"
+        //   SHORT_BINUNICODE "test"
+        //   SETITEM          -> {"name": "test"}
+        //   BUILD            -> Instance{mymod, MyClass, {"name": "test"}}
+        //   BINGET 0         -> should be Instance (was stale Reduce before fix)
+        //   TUPLE2           -> (Instance_from_build, memo_copy)
+        //   STOP
+        let data: &[u8] = &[
+            0x80, 0x03,                                     // PROTO 3
+            b'c', b'm', b'y', b'm', b'o', b'd', b'\n',     // GLOBAL module="mymod"
+            b'M', b'y', b'C', b'l', b's', b'\n',            // GLOBAL name="MyCls"
+            b')',                                            // EMPTY_TUPLE
+            0x81,                                            // NEWOBJ
+            b'q', 0x00,                                      // BINPUT 0
+            b'}',                                            // EMPTY_DICT
+            0x8c, 0x04, b'n', b'a', b'm', b'e',             // SHORT_BINUNICODE "name"
+            0x8c, 0x04, b't', b'e', b's', b't',             // SHORT_BINUNICODE "test"
+            b's',                                            // SETITEM
+            b'b',                                            // BUILD
+            b'h', 0x00,                                      // BINGET 0
+            0x86,                                            // TUPLE2
+            b'.',                                            // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+
+        // Result should be a tuple of two elements
+        if let PickleValue::Tuple(items) = &result {
+            assert_eq!(items.len(), 2, "expected 2-tuple");
+
+            let expected = PickleValue::Instance {
+                module: "mymod".to_string(),
+                name: "MyCls".to_string(),
+                state: Box::new(PickleValue::Dict(vec![(
+                    PickleValue::String("name".to_string()),
+                    PickleValue::String("test".to_string()),
+                )])),
+            };
+
+            // First element: the Instance from BUILD (stack top)
+            assert_eq!(items[0], expected, "BUILD result should be Instance");
+
+            // Second element: the memo copy from BINGET — must also be
+            // Instance after the fix (was stale Reduce before)
+            assert_eq!(
+                items[1], expected,
+                "BINGET after BUILD should return updated Instance, not stale Reduce"
+            );
+        } else {
+            panic!("expected Tuple, got {:?}", result);
+        }
     }
 }
