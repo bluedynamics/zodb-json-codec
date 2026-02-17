@@ -2,7 +2,7 @@
 
 ## 1.2.1 (unreleased)
 
-- nothing yet
+- Fix shared reference data loss: update memo after BUILD
 
 ## 1.2.0 (2026-02-10)
 
