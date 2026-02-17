@@ -1,8 +1,8 @@
 # Changelog
 
-## 1.2.1 (unreleased)
+## 1.2.1 (2026-02-17)
 
-- Fix shared reference data loss: update memo after BUILD
+- Fix shared reference data loss: update memo after BUILD [#2]
 
 ## 1.2.0 (2026-02-10)
 
