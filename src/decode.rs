@@ -3,6 +3,9 @@ use crate::opcodes::*;
 use crate::types::PickleValue;
 use num_bigint::BigInt;
 
+const MAX_MEMO_SIZE: usize = 100_000;
+const MAX_BINARY_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
+
 /// Decode pickle bytes into a PickleValue AST.
 ///
 /// This implements a subset of the pickle virtual machine sufficient
@@ -99,6 +102,9 @@ impl<'a> Decoder<'a> {
                     let line = self.read_line()?;
                     let s = std::str::from_utf8(line).map_err(|_| CodecError::InvalidUtf8)?;
                     let s = s.trim().trim_end_matches('L');
+                    if s.len() > 10_000 {
+                        return Err(CodecError::InvalidData("LONG value too large".to_string()));
+                    }
                     let val: BigInt = s
                         .parse()
                         .map_err(|e| CodecError::InvalidData(format!("LONG parse: {e}")))?;
@@ -120,7 +126,11 @@ impl<'a> Decoder<'a> {
                     }
                 }
                 LONG4 => {
-                    let n = self.read_i32()? as usize;
+                    let n = self.read_i32()?;
+                    if n < 0 {
+                        return Err(CodecError::InvalidData("negative length in LONG4".to_string()));
+                    }
+                    let n = n as usize;
                     let bytes = self.read_bytes(n)?;
                     let val = BigInt::from_signed_bytes_le(bytes);
                     if let Ok(v) = i64::try_from(&val) {
@@ -148,7 +158,11 @@ impl<'a> Decoder<'a> {
 
                 // -- Strings (Python 2 str / bytes) --
                 BINSTRING => {
-                    let n = self.read_i32()? as usize;
+                    let n = self.read_i32()?;
+                    if n < 0 {
+                        return Err(CodecError::InvalidData("negative length in BINSTRING".to_string()));
+                    }
+                    let n = n as usize;
                     let bytes = self.read_bytes(n)?.to_vec();
                     self.push(PickleValue::Bytes(bytes));
                 }
@@ -193,7 +207,11 @@ impl<'a> Decoder<'a> {
                     self.push(PickleValue::String(s.to_string()));
                 }
                 BINUNICODE8 => {
-                    let n = self.read_u64()? as usize;
+                    let n = self.read_u64()?;
+                    if n > MAX_BINARY_SIZE {
+                        return Err(CodecError::InvalidData("BINUNICODE8 data too large".to_string()));
+                    }
+                    let n = n as usize;
                     let bytes = self.read_bytes(n)?;
                     let s =
                         std::str::from_utf8(bytes).map_err(|_| CodecError::InvalidUtf8)?;
@@ -212,7 +230,11 @@ impl<'a> Decoder<'a> {
                     self.push(PickleValue::Bytes(bytes));
                 }
                 BINBYTES8 => {
-                    let n = self.read_u64()? as usize;
+                    let n = self.read_u64()?;
+                    if n > MAX_BINARY_SIZE {
+                        return Err(CodecError::InvalidData("BINBYTES8 data too large".to_string()));
+                    }
+                    let n = n as usize;
                     let bytes = self.read_bytes(n)?.to_vec();
                     self.push(PickleValue::Bytes(bytes));
                 }
@@ -555,17 +577,17 @@ impl<'a> Decoder<'a> {
                 BINPUT => {
                     let idx = self.read_u8()? as usize;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val);
+                    self.memo_put(idx, val)?;
                 }
                 LONG_BINPUT => {
                     let idx = self.read_u32()? as usize;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val);
+                    self.memo_put(idx, val)?;
                 }
                 MEMOIZE => {
                     let val = self.peek_value()?.clone();
                     let idx = self.memo.len();
-                    self.memo_put(idx, val);
+                    self.memo_put(idx, val)?;
                 }
                 BINGET => {
                     let idx = self.read_u8()? as usize;
@@ -585,7 +607,7 @@ impl<'a> Decoder<'a> {
                         .parse()
                         .map_err(|e| CodecError::InvalidData(format!("PUT index: {e}")))?;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val);
+                    self.memo_put(idx, val)?;
                 }
                 GET => {
                     let line = self.read_line()?;
@@ -705,11 +727,15 @@ impl<'a> Decoder<'a> {
 
     // -- Memo operations --
 
-    fn memo_put(&mut self, idx: usize, val: PickleValue) {
+    fn memo_put(&mut self, idx: usize, val: PickleValue) -> Result<(), CodecError> {
+        if idx >= MAX_MEMO_SIZE {
+            return Err(CodecError::InvalidData(format!("memo index {idx} exceeds maximum {MAX_MEMO_SIZE}")));
+        }
         if idx >= self.memo.len() {
             self.memo.resize(idx + 1, PickleValue::None);
         }
         self.memo[idx] = val;
+        Ok(())
     }
 
     fn memo_get(&self, idx: usize) -> Result<PickleValue, CodecError> {
@@ -880,5 +906,62 @@ mod tests {
         } else {
             panic!("expected Tuple, got {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_long4_negative_length() {
+        // PROTO 2, LONG4 with length=-1 (0xFFFFFFFF as i32)
+        let data = b"\x80\x02\x8b\xff\xff\xff\xff";
+        let err = decode_pickle(data).unwrap_err();
+        assert!(err.to_string().contains("negative length"));
+    }
+
+    #[test]
+    fn test_binstring_negative_length() {
+        // PROTO 2, BINSTRING with length=-1
+        let data = b"\x80\x02T\xff\xff\xff\xff";
+        let err = decode_pickle(data).unwrap_err();
+        assert!(err.to_string().contains("negative length"));
+    }
+
+    #[test]
+    fn test_memo_index_too_large() {
+        // PROTO 2, NONE, LONG_BINPUT with index=4_000_000_000
+        let idx_bytes = 4_000_000_000u32.to_le_bytes();
+        let mut data = vec![0x80, 0x02, b'N', b'r'];
+        data.extend_from_slice(&idx_bytes);
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("memo index"));
+    }
+
+    #[test]
+    fn test_long_value_too_large() {
+        // PROTO 2, LONG with huge text representation
+        let mut data = vec![0x80, 0x02, b'L'];
+        data.extend_from_slice(&vec![b'9'; 20_000]);
+        data.push(b'\n');
+        data.push(b'.');
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_binunicode8_too_large() {
+        // PROTO 4, BINUNICODE8 with huge length
+        let mut data = vec![0x80, 0x04];
+        data.push(0x8d); // BINUNICODE8
+        data.extend_from_slice(&(1u64 << 40).to_le_bytes()); // 1 TB
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_binbytes8_too_large() {
+        // PROTO 4, BINBYTES8 with huge length
+        let mut data = vec![0x80, 0x04];
+        data.push(0x8e); // BINBYTES8
+        data.extend_from_slice(&(1u64 << 40).to_le_bytes()); // 1 TB
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("too large"));
     }
 }
