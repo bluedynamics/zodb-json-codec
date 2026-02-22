@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.2
+
+Security review fixes (addresses #3):
+
+- **CODEC-C1:** Validate non-negative length in LONG4 and BINSTRING opcodes.
+- **CODEC-C2:** Cap memo size at 100,000 entries to prevent OOM via LONG_BINPUT.
+- **CODEC-H1:** Add recursion depth limit (1,000) to encoder and PyObject converter.
+- **CODEC-H2:** Pre-scan dict keys to avoid quadratic re-processing of mixed-key dicts.
+- **CODEC-M1:** Limit LONG opcode text representation to 10,000 characters.
+- **CODEC-M2:** Reject odd-length item lists in BTree bucket `format_flat_data()`.
+- **CODEC-M3:** Cap BINUNICODE8/BINBYTES8 length at 256 MB before allocation.
+
+
 ## 1.2.1 (2026-02-17)
 
 - Fix shared reference data loss: update memo after BUILD [#2]

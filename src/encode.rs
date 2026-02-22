@@ -2,13 +2,15 @@ use crate::error::CodecError;
 use crate::opcodes::*;
 use crate::types::PickleValue;
 
+const MAX_DEPTH: usize = 1000;
+
 /// Encode a PickleValue AST into pickle bytes (protocol 3).
 /// We target protocol 3 because ZODB uses zodbpickle which only supports up to protocol 3.
 pub fn encode_pickle(val: &PickleValue) -> Result<Vec<u8>, CodecError> {
     let mut encoder = Encoder::new();
     encoder.write_u8(PROTO);
     encoder.write_u8(3); // protocol 3 (required by zodbpickle)
-    encoder.encode_value(val)?;
+    encoder.encode_value(val, 0)?;
     encoder.write_u8(STOP);
     Ok(encoder.buf)
 }
@@ -20,7 +22,7 @@ pub fn encode_value_into(val: &PickleValue, buf: &mut Vec<u8>) -> Result<(), Cod
     let mut encoder = Encoder {
         buf: std::mem::take(buf),
     };
-    encoder.encode_value(val)?;
+    encoder.encode_value(val, 0)?;
     *buf = encoder.buf;
     Ok(())
 }
@@ -102,7 +104,10 @@ impl Encoder {
         self.buf.extend_from_slice(data);
     }
 
-    fn encode_value(&mut self, val: &PickleValue) -> Result<(), CodecError> {
+    fn encode_value(&mut self, val: &PickleValue, depth: usize) -> Result<(), CodecError> {
+        if depth > MAX_DEPTH {
+            return Err(CodecError::InvalidData("maximum nesting depth exceeded".to_string()));
+        }
         match val {
             PickleValue::None => {
                 self.write_u8(NONE);
@@ -157,7 +162,7 @@ impl Encoder {
                 if !items.is_empty() {
                     self.write_u8(MARK);
                     for item in items {
-                        self.encode_value(item)?;
+                        self.encode_value(item, depth + 1)?;
                     }
                     self.write_u8(APPENDS);
                 }
@@ -166,24 +171,24 @@ impl Encoder {
                 match items.len() {
                     0 => self.write_u8(EMPTY_TUPLE),
                     1 => {
-                        self.encode_value(&items[0])?;
+                        self.encode_value(&items[0], depth + 1)?;
                         self.write_u8(TUPLE1);
                     }
                     2 => {
-                        self.encode_value(&items[0])?;
-                        self.encode_value(&items[1])?;
+                        self.encode_value(&items[0], depth + 1)?;
+                        self.encode_value(&items[1], depth + 1)?;
                         self.write_u8(TUPLE2);
                     }
                     3 => {
-                        self.encode_value(&items[0])?;
-                        self.encode_value(&items[1])?;
-                        self.encode_value(&items[2])?;
+                        self.encode_value(&items[0], depth + 1)?;
+                        self.encode_value(&items[1], depth + 1)?;
+                        self.encode_value(&items[2], depth + 1)?;
                         self.write_u8(TUPLE3);
                     }
                     _ => {
                         self.write_u8(MARK);
                         for item in items {
-                            self.encode_value(item)?;
+                            self.encode_value(item, depth + 1)?;
                         }
                         self.write_u8(TUPLE);
                     }
@@ -194,8 +199,8 @@ impl Encoder {
                 if !pairs.is_empty() {
                     self.write_u8(MARK);
                     for (k, v) in pairs {
-                        self.encode_value(k)?;
-                        self.encode_value(v)?;
+                        self.encode_value(k, depth + 1)?;
+                        self.encode_value(v, depth + 1)?;
                     }
                     self.write_u8(SETITEMS);
                 }
@@ -208,7 +213,7 @@ impl Encoder {
                 if !items.is_empty() {
                     self.write_u8(MARK);
                     for item in items {
-                        self.encode_value(item)?;
+                        self.encode_value(item, depth + 1)?;
                     }
                     self.write_u8(APPENDS);
                 }
@@ -223,7 +228,7 @@ impl Encoder {
                 if !items.is_empty() {
                     self.write_u8(MARK);
                     for item in items {
-                        self.encode_value(item)?;
+                        self.encode_value(item, depth + 1)?;
                     }
                     self.write_u8(APPENDS);
                 }
@@ -247,16 +252,16 @@ impl Encoder {
                 self.write_u8(b'\n');
                 self.write_u8(EMPTY_TUPLE);
                 self.write_u8(NEWOBJ);
-                self.encode_value(state)?;
+                self.encode_value(state, depth + 1)?;
                 self.write_u8(BUILD);
             }
             PickleValue::PersistentRef(inner) => {
-                self.encode_value(inner)?;
+                self.encode_value(inner, depth + 1)?;
                 self.write_u8(BINPERSID);
             }
             PickleValue::Reduce { callable, args } => {
-                self.encode_value(callable)?;
-                self.encode_value(args)?;
+                self.encode_value(callable, depth + 1)?;
+                self.encode_value(args, depth + 1)?;
                 self.write_u8(REDUCE);
             }
             PickleValue::RawPickle(data) => {
@@ -406,5 +411,25 @@ mod tests {
             let decoded = decode_pickle(&bytes).unwrap();
             assert_eq!(val, decoded, "failed for tuple size {n}");
         }
+    }
+
+    #[test]
+    fn test_encode_max_depth_exceeded() {
+        // Build a deeply nested list that exceeds MAX_DEPTH (1000).
+        // We use a separate thread with a larger stack to avoid stack overflow
+        // during construction/teardown of the deeply nested PickleValue.
+        let result = std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024) // 16 MB stack
+            .spawn(|| {
+                let mut val = PickleValue::Int(42);
+                for _ in 0..1500 {
+                    val = PickleValue::List(vec![val]);
+                }
+                let err = encode_pickle(&val).unwrap_err();
+                assert!(err.to_string().contains("nesting depth"));
+            })
+            .unwrap()
+            .join();
+        assert!(result.is_ok(), "test thread panicked");
     }
 }

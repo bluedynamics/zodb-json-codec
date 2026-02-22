@@ -153,9 +153,10 @@ fields, persistent refs) where the codec is **1.1-1.8x faster** decode and
 8. **Pre-allocated decoder vectors** — stack, memo, and metastack start with
    `Vec::with_capacity` instead of empty, reducing reallocations during parsing.
 
-9. **Single-pass Dict decode** — removed the O(n) `all_string_keys` pre-scan.
-   Optimistically builds string-key PyDict in one pass; falls back to `@d`
-   format only if a non-string key is encountered (extremely rare in ZODB).
+9. **Pre-scan Dict decode** — checks `all_string_keys` with a cheap enum
+   discriminant scan before processing values. Builds string-key PyDict if
+   all keys are strings (>99% of ZODB dicts); otherwise uses `@d` format.
+   Avoids quadratic re-processing when mixed-key dicts are encountered.
 
 10. **Set/frozenset move** — REDUCE handler for `builtins.set`/`frozenset`
     moves the list items by value instead of cloning the entire Vec.

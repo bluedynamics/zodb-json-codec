@@ -182,6 +182,11 @@ fn format_flat_data(
 
     if info.is_map {
         // Map type: alternating key-value pairs → @kv: [[k, v], ...]
+        if items.len() % 2 != 0 {
+            return Err(CodecError::InvalidData(
+                "BTree bucket has odd number of items for key-value pairs".to_string(),
+            ));
+        }
         let mut pairs = Vec::new();
         let mut i = 0;
         while i + 1 < items.len() {
@@ -241,6 +246,11 @@ fn bucket_state_to_json(
             let mut result_map = Map::new();
 
             if info.is_map {
+                if flat_data.len() % 2 != 0 {
+                    return Err(CodecError::InvalidData(
+                        "BTree bucket has odd number of items for key-value pairs".to_string(),
+                    ));
+                }
                 let mut pairs = Vec::new();
                 let mut i = 0;
                 while i + 1 < flat_data.len() {
@@ -750,5 +760,29 @@ mod tests {
         )])]);
         let json = btree_state_to_json(&info, &state, &pickle_value_to_json).unwrap();
         assert_eq!(json, json!({"@kv": []}));
+    }
+
+    #[test]
+    fn test_format_flat_data_odd_items_error() {
+        let info = BTreeClassInfo {
+            kind: BTreeNodeKind::Bucket,
+            is_map: true,
+        };
+        // 3 items — odd number for key-value pairs
+        let items = vec![
+            PickleValue::Int(1),
+            PickleValue::String("one".to_string()),
+            PickleValue::Int(2),
+        ];
+        let to_json = |v: &PickleValue| -> Result<serde_json::Value, CodecError> {
+            match v {
+                PickleValue::Int(i) => Ok(serde_json::json!(*i)),
+                PickleValue::String(s) => Ok(serde_json::json!(s)),
+                _ => Err(CodecError::InvalidData("unexpected".to_string())),
+            }
+        };
+        let result = format_flat_data(&info, &items, &to_json);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("odd number"));
     }
 }

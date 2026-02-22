@@ -20,6 +20,8 @@ use crate::known_types;
 use crate::opcodes::*;
 use crate::types::PickleValue;
 
+const MAX_DEPTH: usize = 1000;
+
 // ---------------------------------------------------------------------------
 // Forward direction: PickleValue → Py<PyAny>
 // ---------------------------------------------------------------------------
@@ -33,7 +35,7 @@ pub fn pickle_value_to_pyobject(
     val: &PickleValue,
     compact_refs: bool,
 ) -> PyResult<Py<PyAny>> {
-    pickle_value_to_pyobject_impl(py, val, compact_refs, false)
+    pickle_value_to_pyobject_impl(py, val, compact_refs, false, 0)
 }
 
 /// Like `pickle_value_to_pyobject` but sanitizes strings containing null bytes
@@ -43,7 +45,7 @@ pub fn pickle_value_to_pyobject_pg(
     val: &PickleValue,
     compact_refs: bool,
 ) -> PyResult<Py<PyAny>> {
-    pickle_value_to_pyobject_impl(py, val, compact_refs, true)
+    pickle_value_to_pyobject_impl(py, val, compact_refs, true, 0)
 }
 
 /// Collect all persistent reference OIDs from a PickleValue tree.
@@ -94,7 +96,11 @@ fn pickle_value_to_pyobject_impl(
     val: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
+    if depth > MAX_DEPTH {
+        return Err(pyo3::exceptions::PyValueError::new_err("maximum nesting depth exceeded"));
+    }
     match val {
         PickleValue::None => Ok(py.None()),
         PickleValue::Bool(b) => Ok(b.into_pyobject(py)?.to_owned().into_any().unbind()),
@@ -123,7 +129,7 @@ fn pickle_value_to_pyobject_impl(
         PickleValue::List(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> = items
                 .iter()
-                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                 .collect();
             let list = PyList::new(py, py_items?)?;
             Ok(list.into_any().unbind())
@@ -131,7 +137,7 @@ fn pickle_value_to_pyobject_impl(
         PickleValue::Tuple(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> = items
                 .iter()
-                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
@@ -139,43 +145,44 @@ fn pickle_value_to_pyobject_impl(
             Ok(dict.into_any().unbind())
         }
         PickleValue::Dict(pairs) => {
-            // Single-pass: optimistically build string-key PyDict.
-            // >99% of ZODB dicts have all string keys — skip the pre-scan.
-            let dict = PyDict::new(py);
-            for (k, v) in pairs {
-                if let PickleValue::String(key) = k {
-                    let py_key = if sanitize_nulls && key.contains('\0') {
-                        let marker = PyDict::new(py);
-                        marker.set_item(intern!(py, "@ns"), BASE64.encode(key.as_bytes()))?;
-                        marker.into_any().unbind()
-                    } else {
-                        key.into_pyobject(py)?.into_any().unbind()
-                    };
-                    dict.set_item(py_key, pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls)?)?;
-                } else {
-                    // Rare: non-string key found — fall back to @d format.
-                    // Re-process all pairs (this path is almost never hit).
-                    let py_pairs: PyResult<Vec<Py<PyAny>>> = pairs
-                        .iter()
-                        .map(|(k, v)| {
-                            let pk = pickle_value_to_pyobject_impl(py, k, compact_refs, sanitize_nulls)?;
-                            let pv = pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls)?;
-                            let pair = PyList::new(py, [pk, pv])?;
-                            Ok(pair.into_any().unbind())
-                        })
-                        .collect();
-                    let arr = PyList::new(py, py_pairs?)?;
-                    let d = PyDict::new(py);
-                    d.set_item(intern!(py, "@d"), arr)?;
-                    return Ok(d.into_any().unbind());
+            // Pre-scan: check if all keys are strings to avoid double processing
+            let all_string_keys = pairs.iter().all(|(k, _)| matches!(k, PickleValue::String(_)));
+            if all_string_keys {
+                let dict = PyDict::new(py);
+                for (k, v) in pairs {
+                    if let PickleValue::String(key) = k {
+                        let py_key = if sanitize_nulls && key.contains('\0') {
+                            let marker = PyDict::new(py);
+                            marker.set_item(intern!(py, "@ns"), BASE64.encode(key.as_bytes()))?;
+                            marker.into_any().unbind()
+                        } else {
+                            key.into_pyobject(py)?.into_any().unbind()
+                        };
+                        dict.set_item(py_key, pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls, depth + 1)?)?;
+                    }
                 }
+                Ok(dict.into_any().unbind())
+            } else {
+                // Non-string keys: use @d format
+                let py_pairs: PyResult<Vec<Py<PyAny>>> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let pk = pickle_value_to_pyobject_impl(py, k, compact_refs, sanitize_nulls, depth + 1)?;
+                        let pv = pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls, depth + 1)?;
+                        let pair = PyList::new(py, [pk, pv])?;
+                        Ok(pair.into_any().unbind())
+                    })
+                    .collect();
+                let arr = PyList::new(py, py_pairs?)?;
+                let d = PyDict::new(py);
+                d.set_item(intern!(py, "@d"), arr)?;
+                Ok(d.into_any().unbind())
             }
-            Ok(dict.into_any().unbind())
         }
         PickleValue::Set(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> = items
                 .iter()
-                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
@@ -185,7 +192,7 @@ fn pickle_value_to_pyobject_impl(
         PickleValue::FrozenSet(items) => {
             let py_items: PyResult<Vec<Py<PyAny>>> = items
                 .iter()
-                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                 .collect();
             let list = PyList::new(py, py_items?)?;
             let dict = PyDict::new(py);
@@ -207,9 +214,9 @@ fn pickle_value_to_pyobject_impl(
             }
             // Try BTree state flattening
             let state_obj = if let Some(info) = btrees::classify_btree(module, name) {
-                btree_state_to_pyobject_impl(py, &info, state, compact_refs, sanitize_nulls)?
+                btree_state_to_pyobject_impl(py, &info, state, compact_refs, sanitize_nulls, depth + 1)?
             } else {
-                pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls)?
+                pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth + 1)?
             };
             if module.is_empty() && name.is_empty() {
                 // Anonymous instance
@@ -226,9 +233,9 @@ fn pickle_value_to_pyobject_impl(
         }
         PickleValue::PersistentRef(inner) => {
             if compact_refs {
-                compact_ref_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls)
+                compact_ref_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls, depth + 1)
             } else {
-                let inner_obj = pickle_value_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls)?;
+                let inner_obj = pickle_value_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls, depth + 1)?;
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@ref"), inner_obj)?;
                 Ok(dict.into_any().unbind())
@@ -237,13 +244,13 @@ fn pickle_value_to_pyobject_impl(
         PickleValue::Reduce { callable, args } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(obj) =
-                try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls)?
+                try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
             {
                 return Ok(obj);
             }
             // Fall back to generic @reduce
-            let callable_obj = pickle_value_to_pyobject_impl(py, callable, compact_refs, sanitize_nulls)?;
-            let args_obj = pickle_value_to_pyobject_impl(py, args, compact_refs, sanitize_nulls)?;
+            let callable_obj = pickle_value_to_pyobject_impl(py, callable, compact_refs, sanitize_nulls, depth + 1)?;
+            let args_obj = pickle_value_to_pyobject_impl(py, args, compact_refs, sanitize_nulls, depth + 1)?;
             let inner_dict = PyDict::new(py);
             inner_dict.set_item(intern!(py, "callable"), callable_obj)?;
             inner_dict.set_item(intern!(py, "args"), args_obj)?;
@@ -270,6 +277,7 @@ fn compact_ref_to_pyobject_impl(
     inner: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
     if let PickleValue::Tuple(items) = inner {
         if items.len() == 2 {
@@ -297,7 +305,7 @@ fn compact_ref_to_pyobject_impl(
         }
     }
     // Fallback: generic ref
-    let inner_obj = pickle_value_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls)?;
+    let inner_obj = pickle_value_to_pyobject_impl(py, inner, compact_refs, sanitize_nulls, depth)?;
     let dict = PyDict::new(py);
     dict.set_item(intern!(py, "@ref"), inner_obj)?;
     Ok(dict.into_any().unbind())
@@ -314,6 +322,7 @@ fn try_reduce_to_pyobject_impl(
     args: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let (module, name) = match callable {
         PickleValue::Global { module, name } => (module.as_str(), name.as_str()),
@@ -326,8 +335,8 @@ fn try_reduce_to_pyobject_impl(
         ("datetime", "time") => encode_time_pyobject(py, args, compact_refs),
         ("datetime", "timedelta") => encode_timedelta_pyobject(py, args),
         ("decimal", "Decimal") => encode_decimal_pyobject(py, args),
-        ("builtins", "set") => encode_set_pyobject_impl(py, args, compact_refs, sanitize_nulls),
-        ("builtins", "frozenset") => encode_frozenset_pyobject_impl(py, args, compact_refs, sanitize_nulls),
+        ("builtins", "set") => encode_set_pyobject_impl(py, args, compact_refs, sanitize_nulls, depth + 1),
+        ("builtins", "frozenset") => encode_frozenset_pyobject_impl(py, args, compact_refs, sanitize_nulls, depth + 1),
         _ => Ok(None),
     }
 }
@@ -576,6 +585,7 @@ fn encode_set_pyobject_impl(
     args: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let tuple_items = match args {
         PickleValue::Tuple(items) if items.len() == 1 => items,
@@ -587,7 +597,7 @@ fn encode_set_pyobject_impl(
     };
     let py_items: PyResult<Vec<Py<PyAny>>> = list_items
         .iter()
-        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls))
+        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls, depth))
         .collect();
     let list = PyList::new(py, py_items?)?;
     let dict = PyDict::new(py);
@@ -600,6 +610,7 @@ fn encode_frozenset_pyobject_impl(
     args: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     let tuple_items = match args {
         PickleValue::Tuple(items) if items.len() == 1 => items,
@@ -611,7 +622,7 @@ fn encode_frozenset_pyobject_impl(
     };
     let py_items: PyResult<Vec<Py<PyAny>>> = list_items
         .iter()
-        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls))
+        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls, depth))
         .collect();
     let list = PyList::new(py, py_items?)?;
     let dict = PyDict::new(py);
@@ -685,7 +696,7 @@ pub fn btree_state_to_pyobject(
     state: &PickleValue,
     compact_refs: bool,
 ) -> PyResult<Py<PyAny>> {
-    btree_state_to_pyobject_impl(py, info, state, compact_refs, false)
+    btree_state_to_pyobject_impl(py, info, state, compact_refs, false, 0)
 }
 
 /// Like `btree_state_to_pyobject` but with null-byte sanitization for PG JSONB.
@@ -695,7 +706,7 @@ pub fn btree_state_to_pyobject_pg(
     state: &PickleValue,
     compact_refs: bool,
 ) -> PyResult<Py<PyAny>> {
-    btree_state_to_pyobject_impl(py, info, state, compact_refs, true)
+    btree_state_to_pyobject_impl(py, info, state, compact_refs, true, 0)
 }
 
 /// Core BTree state conversion with optional null-byte sanitization.
@@ -705,6 +716,7 @@ fn btree_state_to_pyobject_impl(
     state: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
     // Empty BTree: state is None
     if *state == PickleValue::None {
@@ -713,10 +725,10 @@ fn btree_state_to_pyobject_impl(
 
     match info.kind {
         btrees::BTreeNodeKind::BTree | btrees::BTreeNodeKind::TreeSet => {
-            btree_node_to_pyobject_impl(py, info, state, compact_refs, sanitize_nulls)
+            btree_node_to_pyobject_impl(py, info, state, compact_refs, sanitize_nulls, depth)
         }
         btrees::BTreeNodeKind::Bucket | btrees::BTreeNodeKind::Set => {
-            bucket_to_pyobject_impl(py, info, state, compact_refs, sanitize_nulls)
+            bucket_to_pyobject_impl(py, info, state, compact_refs, sanitize_nulls, depth)
         }
     }
 }
@@ -727,18 +739,19 @@ fn btree_node_to_pyobject_impl(
     state: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
     let outer = match state {
         PickleValue::Tuple(items) => items,
-        _ => return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls),
+        _ => return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth),
     };
 
     // Small inline BTree — 1-tuple
     if outer.len() == 1 {
         if let Some(flat_data) = btrees::unwrap_inline_btree(&outer[0]) {
-            return format_flat_data_pyobject_impl(py, info, flat_data, compact_refs, sanitize_nulls);
+            return format_flat_data_pyobject_impl(py, info, flat_data, compact_refs, sanitize_nulls, depth);
         }
-        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls);
+        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth);
     }
 
     // Large BTree with persistent refs — 2-tuple
@@ -747,20 +760,20 @@ fn btree_node_to_pyobject_impl(
             if btrees::children_has_refs(children) {
                 let py_children: PyResult<Vec<Py<PyAny>>> = children
                     .iter()
-                    .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                    .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                     .collect();
                 let children_list = PyList::new(py, py_children?)?;
-                let first_obj = pickle_value_to_pyobject_impl(py, &outer[1], compact_refs, sanitize_nulls)?;
+                let first_obj = pickle_value_to_pyobject_impl(py, &outer[1], compact_refs, sanitize_nulls, depth + 1)?;
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@children"), children_list)?;
                 dict.set_item(intern!(py, "@first"), first_obj)?;
                 return Ok(dict.into_any().unbind());
             }
         }
-        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls);
+        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth);
     }
 
-    pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls)
+    pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth)
 }
 
 fn bucket_to_pyobject_impl(
@@ -769,18 +782,19 @@ fn bucket_to_pyobject_impl(
     state: &PickleValue,
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
     let outer = match state {
         PickleValue::Tuple(items) => items,
-        _ => return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls),
+        _ => return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth),
     };
 
     // Standalone bucket — 1-tuple
     if outer.len() == 1 {
         if let PickleValue::Tuple(flat_data) = &outer[0] {
-            return format_flat_data_pyobject_impl(py, info, flat_data, compact_refs, sanitize_nulls);
+            return format_flat_data_pyobject_impl(py, info, flat_data, compact_refs, sanitize_nulls, depth);
         }
-        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls);
+        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth);
     }
 
     // Linked bucket — 2-tuple: (flat_data, next_ref)
@@ -791,8 +805,8 @@ fn bucket_to_pyobject_impl(
                 let mut pairs = Vec::new();
                 let mut i = 0;
                 while i + 1 < flat_data.len() {
-                    let k = pickle_value_to_pyobject_impl(py, &flat_data[i], compact_refs, sanitize_nulls)?;
-                    let v = pickle_value_to_pyobject_impl(py, &flat_data[i + 1], compact_refs, sanitize_nulls)?;
+                    let k = pickle_value_to_pyobject_impl(py, &flat_data[i], compact_refs, sanitize_nulls, depth + 1)?;
+                    let v = pickle_value_to_pyobject_impl(py, &flat_data[i + 1], compact_refs, sanitize_nulls, depth + 1)?;
                     let pair = PyList::new(py, [k, v])?;
                     pairs.push(pair.into_any().unbind());
                     i += 2;
@@ -802,19 +816,19 @@ fn bucket_to_pyobject_impl(
             } else {
                 let py_keys: PyResult<Vec<Py<PyAny>>> = flat_data
                     .iter()
-                    .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+                    .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
                     .collect();
                 let ks_list = PyList::new(py, py_keys?)?;
                 dict.set_item(intern!(py, "@ks"), ks_list)?;
             }
-            let next_obj = pickle_value_to_pyobject_impl(py, &outer[1], compact_refs, sanitize_nulls)?;
+            let next_obj = pickle_value_to_pyobject_impl(py, &outer[1], compact_refs, sanitize_nulls, depth + 1)?;
             dict.set_item(intern!(py, "@next"), next_obj)?;
             return Ok(dict.into_any().unbind());
         }
-        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls);
+        return pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth);
     }
 
-    pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls)
+    pickle_value_to_pyobject_impl(py, state, compact_refs, sanitize_nulls, depth)
 }
 
 fn format_flat_data_pyobject_impl(
@@ -823,14 +837,15 @@ fn format_flat_data_pyobject_impl(
     items: &[PickleValue],
     compact_refs: bool,
     sanitize_nulls: bool,
+    depth: usize,
 ) -> PyResult<Py<PyAny>> {
     let dict = PyDict::new(py);
     if info.is_map {
         let mut pairs = Vec::with_capacity(items.len() / 2);
         let mut i = 0;
         while i + 1 < items.len() {
-            let k = pickle_value_to_pyobject_impl(py, &items[i], compact_refs, sanitize_nulls)?;
-            let v = pickle_value_to_pyobject_impl(py, &items[i + 1], compact_refs, sanitize_nulls)?;
+            let k = pickle_value_to_pyobject_impl(py, &items[i], compact_refs, sanitize_nulls, depth + 1)?;
+            let v = pickle_value_to_pyobject_impl(py, &items[i + 1], compact_refs, sanitize_nulls, depth + 1)?;
             let pair = PyList::new(py, [k, v])?;
             pairs.push(pair.into_any().unbind());
             i += 2;
@@ -840,7 +855,7 @@ fn format_flat_data_pyobject_impl(
     } else {
         let py_keys: PyResult<Vec<Py<PyAny>>> = items
             .iter()
-            .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls))
+            .map(|item| pickle_value_to_pyobject_impl(py, item, compact_refs, sanitize_nulls, depth + 1))
             .collect();
         let ks_list = PyList::new(py, py_keys?)?;
         dict.set_item(intern!(py, "@ks"), ks_list)?;
