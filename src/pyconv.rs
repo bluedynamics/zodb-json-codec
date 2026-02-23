@@ -18,7 +18,7 @@ use crate::encode::{encode_value_into, write_bytes_val, write_global, write_int,
 use crate::error::CodecError;
 use crate::known_types;
 use crate::opcodes::*;
-use crate::types::PickleValue;
+use crate::types::{InstanceData, PickleValue};
 
 const MAX_DEPTH: usize = 1000;
 
@@ -80,11 +80,33 @@ pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
                 collect_refs_from_pickle_value(v, refs);
             }
         }
-        PickleValue::Instance { state, .. } => {
-            collect_refs_from_pickle_value(state, refs);
+        PickleValue::Instance(inst) => {
+            collect_refs_from_pickle_value(&inst.state, refs);
+            if let Some(pairs) = &inst.dict_items {
+                for (k, v) in pairs.iter() {
+                    collect_refs_from_pickle_value(k, refs);
+                    collect_refs_from_pickle_value(v, refs);
+                }
+            }
+            if let Some(items) = &inst.list_items {
+                for item in items.iter() {
+                    collect_refs_from_pickle_value(item, refs);
+                }
+            }
         }
-        PickleValue::Reduce { args, .. } => {
+        PickleValue::Reduce { args, dict_items, list_items, .. } => {
             collect_refs_from_pickle_value(args, refs);
+            if let Some(pairs) = dict_items {
+                for (k, v) in pairs.iter() {
+                    collect_refs_from_pickle_value(k, refs);
+                    collect_refs_from_pickle_value(v, refs);
+                }
+            }
+            if let Some(items) = list_items {
+                for item in items.iter() {
+                    collect_refs_from_pickle_value(item, refs);
+                }
+            }
         }
         _ => {}
     }
@@ -205,7 +227,8 @@ fn pickle_value_to_pyobject_impl(
             dict.set_item(intern!(py, "@cls"), cls_list)?;
             Ok(dict.into_any().unbind())
         }
-        PickleValue::Instance { module, name, state } => {
+        PickleValue::Instance(inst) => {
+            let InstanceData { module, name, state, .. } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(obj) =
                 try_instance_to_pyobject(py, module, name, state, compact_refs)?
@@ -241,7 +264,7 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args } => {
+        PickleValue::Reduce { callable, args, .. } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(obj) =
                 try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
@@ -1004,11 +1027,13 @@ fn pydict_to_pickle_value(
                     } else {
                         pyobject_to_pickle_value(&state_val, expand_refs)?
                     };
-                    return Ok(PickleValue::Instance {
+                    return Ok(PickleValue::Instance(Box::new(InstanceData {
                         module,
                         name,
                         state: Box::new(state),
-                    });
+                        dict_items: None,
+                        list_items: None,
+                    })));
                 }
                 return Ok(PickleValue::Global { module, name });
             }
@@ -1126,6 +1151,8 @@ fn pydict_to_pickle_value(
             return Ok(PickleValue::Reduce {
                 callable: Box::new(callable),
                 args: Box::new(args),
+                dict_items: None,
+                list_items: None,
             });
         }
     }
@@ -1267,6 +1294,8 @@ fn try_decode_single_key_marker(
                             PickleValue::Int(secs),
                             PickleValue::Int(us),
                         ])),
+                        dict_items: None,
+                        list_items: None,
                     }));
                 }
             }
@@ -1279,6 +1308,8 @@ fn try_decode_single_key_marker(
                         name: "Decimal".into(),
                     }),
                     args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
+                    dict_items: None,
+                    list_items: None,
                 }));
             }
         }
@@ -1309,6 +1340,8 @@ fn try_decode_single_key_marker(
                 return Ok(Some(PickleValue::Reduce {
                     callable: Box::new(callable),
                     args: Box::new(args),
+                    dict_items: None,
+                    list_items: None,
                 }));
             }
         }
@@ -1414,6 +1447,8 @@ fn try_typed_pydict_to_pickle_value(
                         PickleValue::Int(secs),
                         PickleValue::Int(us),
                     ])),
+                    dict_items: None,
+                    list_items: None,
                 }));
             }
         }
@@ -1428,6 +1463,8 @@ fn try_typed_pydict_to_pickle_value(
                     name: "Decimal".into(),
                 }),
                 args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
+                dict_items: None,
+                list_items: None,
             }));
         }
     }
@@ -1473,6 +1510,8 @@ fn decode_datetime_from_pyobject(
             name: "datetime".into(),
         }),
         args: Box::new(args),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -1496,6 +1535,8 @@ fn decode_date_from_str(s: &str) -> PyResult<PickleValue> {
             name: "date".into(),
         }),
         args: Box::new(PickleValue::Tuple(vec![PickleValue::Bytes(bytes)])),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -1535,6 +1576,8 @@ fn decode_time_from_pyobject(
             name: "time".into(),
         }),
         args: Box::new(args),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -1550,14 +1593,16 @@ fn decode_uuid_from_str(s: &str) -> PyResult<PickleValue> {
     } else {
         PickleValue::BigInt(num_bigint::BigInt::from(int_val))
     };
-    Ok(PickleValue::Instance {
+    Ok(PickleValue::Instance(Box::new(InstanceData {
         module: "uuid".into(),
         name: "UUID".into(),
         state: Box::new(PickleValue::Dict(vec![(
             PickleValue::String("int".into()),
             int_pickle,
         )])),
-    })
+        dict_items: None,
+        list_items: None,
+    })))
 }
 
 /// Decode @tz Py<PyAny> back to a timezone PickleValue.
@@ -1585,6 +1630,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                         name: "_p".into(),
                     }),
                     args: Box::new(PickleValue::Tuple(pickle_args?)),
+                    dict_items: None,
+                    list_items: None,
                 });
             }
         }
@@ -1604,6 +1651,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                         },
                         PickleValue::String("_unpickle".into()),
                     ])),
+                    dict_items: None,
+                    list_items: None,
                 };
                 return Ok(PickleValue::Reduce {
                     callable: Box::new(inner_reduce),
@@ -1611,6 +1660,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                         PickleValue::String(key),
                         PickleValue::Int(1),
                     ])),
+                    dict_items: None,
+                    list_items: None,
                 });
             }
         }
@@ -2390,13 +2441,15 @@ mod tests {
             PickleValue::Bytes(oid),
             PickleValue::None,
         ])));
-        let val = PickleValue::Instance {
+        let val = PickleValue::Instance(Box::new(InstanceData {
             module: "myapp".to_string(),
             name: "Obj".to_string(),
             state: Box::new(PickleValue::Dict(vec![
                 (PickleValue::String("ref".to_string()), pref),
             ])),
-        };
+            dict_items: None,
+            list_items: None,
+        }));
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);
         assert_eq!(refs, vec![7]);
@@ -2417,6 +2470,8 @@ mod tests {
             args: Box::new(PickleValue::Tuple(vec![
                 PickleValue::List(vec![pref]),
             ])),
+            dict_items: None,
+            list_items: None,
         };
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);

@@ -4,7 +4,7 @@ use serde_json::{json, Map, Value};
 use crate::btrees;
 use crate::error::CodecError;
 use crate::known_types;
-use crate::types::PickleValue;
+use crate::types::{InstanceData, PickleValue};
 
 /// Convert a PickleValue AST to a serde_json Value.
 pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
@@ -70,7 +70,8 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
         PickleValue::Global { module, name } => {
             Ok(json!({"@cls": [module, name]}))
         }
-        PickleValue::Instance { module, name, state } => {
+        PickleValue::Instance(inst) => {
+            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(typed) =
                 known_types::try_instance_to_typed_json(module, name, state, &pickle_value_to_json)?
@@ -87,17 +88,32 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
                 // Anonymous instance (couldn't extract class info)
                 Ok(json!({"@inst": state_json}))
             } else {
-                Ok(json!({
+                let mut obj = json!({
                     "@cls": [module, name],
                     "@s": state_json,
-                }))
+                });
+                if let Some(pairs) = dict_items {
+                    let items_json: Result<Vec<Value>, CodecError> = pairs
+                        .iter()
+                        .map(|(k, v)| {
+                            Ok(json!([pickle_value_to_json(k)?, pickle_value_to_json(v)?]))
+                        })
+                        .collect();
+                    obj.as_object_mut().unwrap().insert("@items".to_string(), json!(items_json?));
+                }
+                if let Some(items) = list_items {
+                    let appends_json: Result<Vec<Value>, _> =
+                        items.iter().map(pickle_value_to_json).collect();
+                    obj.as_object_mut().unwrap().insert("@appends".to_string(), json!(appends_json?));
+                }
+                Ok(obj)
             }
         }
         PickleValue::PersistentRef(inner) => {
             let inner_json = pickle_value_to_json(inner)?;
             Ok(json!({"@ref": inner_json}))
         }
-        PickleValue::Reduce { callable, args } => {
+        PickleValue::Reduce { callable, args, dict_items, list_items } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(typed) =
                 known_types::try_reduce_to_typed_json(callable, args, &pickle_value_to_json)?
@@ -107,12 +123,25 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
             // Fall back to generic @reduce
             let callable_json = pickle_value_to_json(callable)?;
             let args_json = pickle_value_to_json(args)?;
-            Ok(json!({
-                "@reduce": {
-                    "callable": callable_json,
-                    "args": args_json,
-                }
-            }))
+            let mut reduce_obj = json!({
+                "callable": callable_json,
+                "args": args_json,
+            });
+            if let Some(pairs) = dict_items {
+                let items_json: Result<Vec<Value>, CodecError> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        Ok(json!([pickle_value_to_json(k)?, pickle_value_to_json(v)?]))
+                    })
+                    .collect();
+                reduce_obj.as_object_mut().unwrap().insert("items".to_string(), json!(items_json?));
+            }
+            if let Some(items) = list_items {
+                let appends_json: Result<Vec<Value>, _> =
+                    items.iter().map(pickle_value_to_json).collect();
+                reduce_obj.as_object_mut().unwrap().insert("appends".to_string(), json!(appends_json?));
+            }
+            Ok(json!({"@reduce": reduce_obj}))
         }
         PickleValue::RawPickle(data) => {
             Ok(json!({"@pkl": BASE64.encode(data)}))
@@ -234,11 +263,35 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                             } else {
                                 json_to_pickle_value(state_json)?
                             };
-                        return Ok(PickleValue::Instance {
+                        let dict_items = if let Some(Value::Array(items_arr)) = map.get("@items") {
+                            let mut pairs = Vec::new();
+                            for pair in items_arr {
+                                if let Value::Array(kv) = pair {
+                                    if kv.len() == 2 {
+                                        let k = json_to_pickle_value(&kv[0])?;
+                                        let v = json_to_pickle_value(&kv[1])?;
+                                        pairs.push((k, v));
+                                    }
+                                }
+                            }
+                            Some(Box::new(pairs))
+                        } else {
+                            None
+                        };
+                        let list_items = if let Some(Value::Array(appends_arr)) = map.get("@appends") {
+                            let items: Result<Vec<PickleValue>, _> =
+                                appends_arr.iter().map(json_to_pickle_value).collect();
+                            Some(Box::new(items?))
+                        } else {
+                            None
+                        };
+                        return Ok(PickleValue::Instance(Box::new(InstanceData {
                             module,
                             name,
                             state: Box::new(state),
-                        });
+                            dict_items,
+                            list_items,
+                        })));
                     }
                 }
             }
@@ -256,9 +309,33 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                         json_to_pickle_value(reduce_map.get("callable").unwrap_or(&Value::Null))?;
                     let args =
                         json_to_pickle_value(reduce_map.get("args").unwrap_or(&Value::Null))?;
+                    let dict_items = if let Some(Value::Array(items_arr)) = reduce_map.get("items") {
+                        let mut pairs = Vec::new();
+                        for pair in items_arr {
+                            if let Value::Array(kv) = pair {
+                                if kv.len() == 2 {
+                                    let k = json_to_pickle_value(&kv[0])?;
+                                    let v = json_to_pickle_value(&kv[1])?;
+                                    pairs.push((k, v));
+                                }
+                            }
+                        }
+                        Some(Box::new(pairs))
+                    } else {
+                        None
+                    };
+                    let list_items = if let Some(Value::Array(appends_arr)) = reduce_map.get("appends") {
+                        let items: Result<Vec<PickleValue>, _> =
+                            appends_arr.iter().map(json_to_pickle_value).collect();
+                        Some(Box::new(items?))
+                    } else {
+                        None
+                    };
                     return Ok(PickleValue::Reduce {
                         callable: Box::new(callable),
                         args: Box::new(args),
+                        dict_items,
+                        list_items,
                     });
                 }
             }
@@ -278,6 +355,7 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::InstanceData;
 
     #[test]
     fn test_roundtrip_none() {
@@ -343,18 +421,107 @@ mod tests {
 
     #[test]
     fn test_instance() {
-        let val = PickleValue::Instance {
+        let val = PickleValue::Instance(Box::new(InstanceData {
             module: "myapp".to_string(),
             name: "MyClass".to_string(),
             state: Box::new(PickleValue::Dict(vec![(
                 PickleValue::String("x".to_string()),
                 PickleValue::Int(42),
             )])),
-        };
+            dict_items: None,
+            list_items: None,
+        }));
         let json = pickle_value_to_json(&val).unwrap();
         assert_eq!(json["@cls"][0], "myapp");
         assert_eq!(json["@cls"][1], "MyClass");
         assert_eq!(json["@s"]["x"], 42);
+        let back = json_to_pickle_value(&json).unwrap();
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_instance_with_dict_items() {
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "collections".to_string(),
+            name: "OrderedDict".to_string(),
+            state: Box::new(PickleValue::None),
+            dict_items: Some(Box::new(vec![
+                (PickleValue::String("a".to_string()), PickleValue::Int(1)),
+                (PickleValue::String("b".to_string()), PickleValue::Int(2)),
+            ])),
+            list_items: None,
+        }));
+        let json = pickle_value_to_json(&val).unwrap();
+        assert_eq!(json["@cls"][0], "collections");
+        assert_eq!(json["@cls"][1], "OrderedDict");
+        assert!(json.get("@items").is_some());
+        let items = json["@items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0][0], "a");
+        assert_eq!(items[0][1], 1);
+        let back = json_to_pickle_value(&json).unwrap();
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_instance_with_list_items() {
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "mymod".to_string(),
+            name: "MyList".to_string(),
+            state: Box::new(PickleValue::None),
+            dict_items: None,
+            list_items: Some(Box::new(vec![PickleValue::Int(10), PickleValue::Int(20)])),
+        }));
+        let json = pickle_value_to_json(&val).unwrap();
+        assert!(json.get("@appends").is_some());
+        let appends = json["@appends"].as_array().unwrap();
+        assert_eq!(appends.len(), 2);
+        assert_eq!(appends[0], 10);
+        assert_eq!(appends[1], 20);
+        let back = json_to_pickle_value(&json).unwrap();
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_reduce_with_dict_items() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global {
+                module: "collections".to_string(),
+                name: "OrderedDict".to_string(),
+            }),
+            args: Box::new(PickleValue::Tuple(vec![])),
+            dict_items: Some(Box::new(vec![
+                (PickleValue::String("x".to_string()), PickleValue::Int(1)),
+            ])),
+            list_items: None,
+        };
+        let json = pickle_value_to_json(&val).unwrap();
+        let reduce = json.get("@reduce").unwrap();
+        assert!(reduce.get("items").is_some());
+        let items = reduce["items"].as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0][0], "x");
+        assert_eq!(items[0][1], 1);
+        let back = json_to_pickle_value(&json).unwrap();
+        assert_eq!(val, back);
+    }
+
+    #[test]
+    fn test_reduce_with_list_items() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global {
+                module: "mymod".to_string(),
+                name: "MyList".to_string(),
+            }),
+            args: Box::new(PickleValue::Tuple(vec![])),
+            dict_items: None,
+            list_items: Some(Box::new(vec![PickleValue::Int(5), PickleValue::Int(6)])),
+        };
+        let json = pickle_value_to_json(&val).unwrap();
+        let reduce = json.get("@reduce").unwrap();
+        assert!(reduce.get("appends").is_some());
+        let appends = reduce["appends"].as_array().unwrap();
+        assert_eq!(appends.len(), 2);
         let back = json_to_pickle_value(&json).unwrap();
         assert_eq!(val, back);
     }

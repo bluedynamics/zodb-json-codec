@@ -1,6 +1,6 @@
 use crate::error::CodecError;
 use crate::opcodes::*;
-use crate::types::PickleValue;
+use crate::types::{InstanceData, PickleValue};
 use num_bigint::BigInt;
 
 const MAX_MEMO_SIZE: usize = 100_000;
@@ -278,24 +278,50 @@ impl<'a> Decoder<'a> {
                 }
                 APPEND => {
                     let val = self.pop_value()?;
-                    let list = self.top_value_mut()?;
-                    if let PickleValue::List(ref mut items) = list {
-                        items.push(val);
-                    } else {
-                        return Err(CodecError::InvalidData(
-                            "APPEND on non-list".to_string(),
-                        ));
+                    let top = self.top_value_mut()?;
+                    match top {
+                        PickleValue::List(ref mut items) => {
+                            items.push(val);
+                        }
+                        PickleValue::Reduce {
+                            ref mut list_items, ..
+                        } => match list_items {
+                            Some(ref mut existing) => existing.push(val),
+                            None => *list_items = Some(Box::new(vec![val])),
+                        },
+                        PickleValue::Instance(ref mut inst) => match inst.list_items {
+                            Some(ref mut existing) => existing.push(val),
+                            None => inst.list_items = Some(Box::new(vec![val])),
+                        },
+                        _ => {
+                            return Err(CodecError::InvalidData(
+                                "APPEND on non-list/non-object".to_string(),
+                            ));
+                        }
                     }
                 }
                 APPENDS => {
                     let items = self.pop_mark()?;
-                    let list = self.top_value_mut()?;
-                    if let PickleValue::List(ref mut list_items) = list {
-                        list_items.extend(items);
-                    } else {
-                        return Err(CodecError::InvalidData(
-                            "APPENDS on non-list".to_string(),
-                        ));
+                    let top = self.top_value_mut()?;
+                    match top {
+                        PickleValue::List(ref mut list_items) => {
+                            list_items.extend(items);
+                        }
+                        PickleValue::Reduce {
+                            ref mut list_items, ..
+                        } => match list_items {
+                            Some(ref mut existing) => existing.extend(items),
+                            None => *list_items = Some(Box::new(items)),
+                        },
+                        PickleValue::Instance(ref mut inst) => match inst.list_items {
+                            Some(ref mut existing) => existing.extend(items),
+                            None => inst.list_items = Some(Box::new(items)),
+                        },
+                        _ => {
+                            return Err(CodecError::InvalidData(
+                                "APPENDS on non-list/non-object".to_string(),
+                            ));
+                        }
                     }
                 }
 
@@ -309,25 +335,51 @@ impl<'a> Decoder<'a> {
                 SETITEM => {
                     let val = self.pop_value()?;
                     let key = self.pop_value()?;
-                    let dict = self.top_value_mut()?;
-                    if let PickleValue::Dict(ref mut pairs) = dict {
-                        pairs.push((key, val));
-                    } else {
-                        return Err(CodecError::InvalidData(
-                            "SETITEM on non-dict".to_string(),
-                        ));
+                    let top = self.top_value_mut()?;
+                    match top {
+                        PickleValue::Dict(ref mut pairs) => {
+                            pairs.push((key, val));
+                        }
+                        PickleValue::Reduce {
+                            ref mut dict_items, ..
+                        } => match dict_items {
+                            Some(ref mut existing) => existing.push((key, val)),
+                            None => *dict_items = Some(Box::new(vec![(key, val)])),
+                        },
+                        PickleValue::Instance(ref mut inst) => match inst.dict_items {
+                            Some(ref mut existing) => existing.push((key, val)),
+                            None => inst.dict_items = Some(Box::new(vec![(key, val)])),
+                        },
+                        _ => {
+                            return Err(CodecError::InvalidData(
+                                "SETITEM on non-dict/non-object".to_string(),
+                            ));
+                        }
                     }
                 }
                 SETITEMS => {
                     let items = self.pop_mark()?;
                     let new_pairs = items_to_pairs(items)?;
-                    let dict = self.top_value_mut()?;
-                    if let PickleValue::Dict(ref mut pairs) = dict {
-                        pairs.extend(new_pairs);
-                    } else {
-                        return Err(CodecError::InvalidData(
-                            "SETITEMS on non-dict".to_string(),
-                        ));
+                    let top = self.top_value_mut()?;
+                    match top {
+                        PickleValue::Dict(ref mut pairs) => {
+                            pairs.extend(new_pairs);
+                        }
+                        PickleValue::Reduce {
+                            ref mut dict_items, ..
+                        } => match dict_items {
+                            Some(ref mut existing) => existing.extend(new_pairs),
+                            None => *dict_items = Some(Box::new(new_pairs)),
+                        },
+                        PickleValue::Instance(ref mut inst) => match inst.dict_items {
+                            Some(ref mut existing) => existing.extend(new_pairs),
+                            None => inst.dict_items = Some(Box::new(new_pairs)),
+                        },
+                        _ => {
+                            return Err(CodecError::InvalidData(
+                                "SETITEMS on non-dict/non-object".to_string(),
+                            ));
+                        }
                     }
                 }
 
@@ -415,6 +467,8 @@ impl<'a> Decoder<'a> {
                                         self.push(PickleValue::Reduce {
                                             callable: Box::new(callable),
                                             args: Box::new(PickleValue::Tuple(vec![other])),
+                                            dict_items: None,
+                                            list_items: None,
                                         });
                                     }
                                 }
@@ -423,6 +477,8 @@ impl<'a> Decoder<'a> {
                                 self.push(PickleValue::Reduce {
                                     callable: Box::new(callable),
                                     args: Box::new(args),
+                                    dict_items: None,
+                                    list_items: None,
                                 });
                             }
                         }
@@ -430,6 +486,8 @@ impl<'a> Decoder<'a> {
                         self.push(PickleValue::Reduce {
                             callable: Box::new(callable),
                             args: Box::new(args),
+                            dict_items: None,
+                            list_items: None,
                         });
                     }
                 }
@@ -445,25 +503,30 @@ impl<'a> Decoder<'a> {
                     let old_obj = obj.clone();
                     match obj {
                         PickleValue::Global { module, name } => {
-                            self.push(PickleValue::Instance {
+                            self.push(PickleValue::Instance(Box::new(InstanceData {
                                 module,
                                 name,
                                 state: Box::new(state),
-                            });
+                                dict_items: None,
+                                list_items: None,
+                            })));
                         }
-                        PickleValue::Instance {
-                            module,
-                            name,
-                            state: _old_state,
-                        } => {
+                        PickleValue::Instance(inst) => {
                             // BUILD on an existing instance updates its state
-                            self.push(PickleValue::Instance {
-                                module,
-                                name,
+                            self.push(PickleValue::Instance(Box::new(InstanceData {
+                                module: inst.module,
+                                name: inst.name,
                                 state: Box::new(state),
-                            });
+                                dict_items: inst.dict_items,
+                                list_items: inst.list_items,
+                            })));
                         }
-                        PickleValue::Reduce { callable, args } => {
+                        PickleValue::Reduce {
+                            callable,
+                            args,
+                            dict_items,
+                            list_items,
+                        } => {
                             // REDUCE followed by BUILD: the common pattern.
                             // Extract class info if callable is a Global.
                             match *callable {
@@ -483,17 +546,21 @@ impl<'a> Decoder<'a> {
                                             ),
                                         ])
                                     };
-                                    self.push(PickleValue::Instance {
+                                    self.push(PickleValue::Instance(Box::new(InstanceData {
                                         module,
                                         name,
                                         state: Box::new(combined),
-                                    });
+                                        dict_items,
+                                        list_items,
+                                    })));
                                 }
                                 _ => {
                                     // Can't decompose further — wrap as-is
-                                    self.push(PickleValue::Instance {
+                                    self.push(PickleValue::Instance(Box::new(InstanceData {
                                         module: String::new(),
                                         name: String::new(),
+                                        dict_items,
+                                        list_items,
                                         state: Box::new(PickleValue::Dict(vec![
                                             (
                                                 PickleValue::String("@callable".to_string()),
@@ -508,20 +575,22 @@ impl<'a> Decoder<'a> {
                                                 state,
                                             ),
                                         ])),
-                                    });
+                                    })));
                                 }
                             }
                         }
                         _ => {
                             // BUILD on something unexpected — keep both
-                            self.push(PickleValue::Instance {
+                            self.push(PickleValue::Instance(Box::new(InstanceData {
                                 module: String::new(),
                                 name: String::new(),
                                 state: Box::new(PickleValue::Dict(vec![
                                     (PickleValue::String("@obj".to_string()), obj),
                                     (PickleValue::String("@state".to_string()), state),
                                 ])),
-                            });
+                                dict_items: None,
+                                list_items: None,
+                            })));
                         }
                     }
                     // Update memo: replace stale pre-BUILD entries with the
@@ -541,6 +610,8 @@ impl<'a> Decoder<'a> {
                     self.push(PickleValue::Reduce {
                         callable: Box::new(cls),
                         args: Box::new(args),
+                        dict_items: None,
+                        list_items: None,
                     });
                 }
                 NEWOBJ_EX => {
@@ -555,6 +626,8 @@ impl<'a> Decoder<'a> {
                     self.push(PickleValue::Reduce {
                         callable: Box::new(cls),
                         args: Box::new(combined_args),
+                        dict_items: None,
+                        list_items: None,
                     });
                 }
 
@@ -885,14 +958,16 @@ mod tests {
         if let PickleValue::Tuple(items) = &result {
             assert_eq!(items.len(), 2, "expected 2-tuple");
 
-            let expected = PickleValue::Instance {
+            let expected = PickleValue::Instance(Box::new(InstanceData {
                 module: "mymod".to_string(),
                 name: "MyCls".to_string(),
                 state: Box::new(PickleValue::Dict(vec![(
                     PickleValue::String("name".to_string()),
                     PickleValue::String("test".to_string()),
                 )])),
-            };
+                dict_items: None,
+                list_items: None,
+            }));
 
             // First element: the Instance from BUILD (stack top)
             assert_eq!(items[0], expected, "BUILD result should be Instance");
@@ -963,5 +1038,138 @@ mod tests {
         data.extend_from_slice(&(1u64 << 40).to_le_bytes()); // 1 TB
         let err = decode_pickle(&data).unwrap_err();
         assert!(err.to_string().contains("too large"));
+    }
+
+    #[test]
+    fn test_setitems_on_reduce() {
+        // Simulates dict subclass: GLOBAL + EMPTY_TUPLE + REDUCE + MARK + items + SETITEMS
+        // Pattern: collections.OrderedDict() then od["key1"] = "val1", od["key2"] = "val2"
+        let data: &[u8] = &[
+            0x80, 0x03, // PROTO 3
+            b'c', b'c', b'o', b'l', b'l', b'e', b'c', b't', b'i', b'o', b'n', b's',
+            b'\n', // GLOBAL module="collections"
+            b'O', b'r', b'd', b'e', b'r', b'e', b'd', b'D', b'i', b'c', b't',
+            b'\n', // GLOBAL name="OrderedDict"
+            b')', // EMPTY_TUPLE
+            b'R', // REDUCE
+            b'(', // MARK
+            0x8c, 0x04, b'k', b'e', b'y', b'1', // SHORT_BINUNICODE "key1"
+            0x8c, 0x04, b'v', b'a', b'l', b'1', // SHORT_BINUNICODE "val1"
+            0x8c, 0x04, b'k', b'e', b'y', b'2', // SHORT_BINUNICODE "key2"
+            0x8c, 0x04, b'v', b'a', b'l', b'2', // SHORT_BINUNICODE "val2"
+            b'u', // SETITEMS
+            b'.', // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+        match &result {
+            PickleValue::Reduce {
+                callable,
+                args,
+                dict_items,
+                list_items,
+            } => {
+                if let PickleValue::Global { module, name } = callable.as_ref() {
+                    assert_eq!(module, "collections");
+                    assert_eq!(name, "OrderedDict");
+                } else {
+                    panic!("expected Global callable");
+                }
+                assert_eq!(**args, PickleValue::Tuple(vec![]));
+                let items = dict_items.as_ref().expect("dict_items should be Some");
+                assert_eq!(items.len(), 2);
+                assert_eq!(items[0].0, PickleValue::String("key1".to_string()));
+                assert_eq!(items[0].1, PickleValue::String("val1".to_string()));
+                assert_eq!(items[1].0, PickleValue::String("key2".to_string()));
+                assert_eq!(items[1].1, PickleValue::String("val2".to_string()));
+                assert!(list_items.is_none());
+            }
+            _ => panic!("expected Reduce, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_setitem_on_reduce() {
+        // Single SETITEM on a Reduce (dict subclass with one item)
+        let data: &[u8] = &[
+            0x80, 0x03, // PROTO 3
+            b'c', b'c', b'o', b'l', b'l', b'e', b'c', b't', b'i', b'o', b'n', b's',
+            b'\n', b'O', b'r', b'd', b'e', b'r', b'e', b'd', b'D', b'i', b'c', b't',
+            b'\n', b')', b'R', // GLOBAL + EMPTY_TUPLE + REDUCE
+            0x8c, 0x03, b'k', b'e', b'y', // SHORT_BINUNICODE "key"
+            0x8c, 0x03, b'v', b'a', b'l', // SHORT_BINUNICODE "val"
+            b's', // SETITEM
+            b'.', // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+        if let PickleValue::Reduce { dict_items, .. } = &result {
+            let items = dict_items.as_ref().unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].0, PickleValue::String("key".to_string()));
+            assert_eq!(items[0].1, PickleValue::String("val".to_string()));
+        } else {
+            panic!("expected Reduce");
+        }
+    }
+
+    #[test]
+    fn test_appends_on_reduce() {
+        // List subclass: GLOBAL + EMPTY_TUPLE + REDUCE + MARK + items + APPENDS
+        let data: &[u8] = &[
+            0x80, 0x03, // PROTO 3
+            b'c', b'c', b'o', b'l', b'l', b'e', b'c', b't', b'i', b'o', b'n', b's',
+            b'\n', b'd', b'e', b'q', b'u', b'e', b'\n', // GLOBAL collections.deque
+            b')', // EMPTY_TUPLE
+            b'R', // REDUCE
+            b'(', // MARK
+            b'K', 0x01, // BININT1 1
+            b'K', 0x02, // BININT1 2
+            b'K', 0x03, // BININT1 3
+            b'e', // APPENDS
+            b'.', // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+        if let PickleValue::Reduce { list_items, .. } = &result {
+            let items = list_items.as_ref().unwrap();
+            assert_eq!(items.len(), 3);
+            assert_eq!(items[0], PickleValue::Int(1));
+            assert_eq!(items[1], PickleValue::Int(2));
+            assert_eq!(items[2], PickleValue::Int(3));
+        } else {
+            panic!("expected Reduce");
+        }
+    }
+
+    #[test]
+    fn test_setitems_on_reduce_with_build() {
+        // Dict subclass: REDUCE + SETITEMS + BUILD (all three combined)
+        // This tests that dict_items carry through from Reduce to Instance
+        let data: &[u8] = &[
+            0x80, 0x03, // PROTO 3
+            b'c', b'm', b'y', b'm', b'o', b'd', b'\n', b'M', b'y', b'D', b'i', b'c', b't',
+            b'\n', // GLOBAL mymod.MyDict
+            b')', // EMPTY_TUPLE
+            b'R', // REDUCE
+            b'(', // MARK
+            0x8c, 0x01, b'a', // "a"
+            b'K', 0x01, // 1
+            b'u', // SETITEMS
+            b'}', // EMPTY_DICT (state for BUILD)
+            0x8c, 0x05, b'e', b'x', b't', b'r', b'a', // "extra"
+            0x8c, 0x03, b'y', b'e', b's', // "yes"
+            b's', // SETITEM (on the dict, building state)
+            b'b', // BUILD
+            b'.', // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+        if let PickleValue::Instance(ref inst) = &result {
+            assert_eq!(inst.module, "mymod");
+            assert_eq!(inst.name, "MyDict");
+            let items = inst.dict_items.as_ref().expect("dict_items should carry through BUILD");
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].0, PickleValue::String("a".to_string()));
+            assert_eq!(items[0].1, PickleValue::Int(1));
+        } else {
+            panic!("expected Instance, got {:?}", result);
+        }
     }
 }

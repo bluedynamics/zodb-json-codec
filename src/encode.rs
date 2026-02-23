@@ -1,6 +1,6 @@
 use crate::error::CodecError;
 use crate::opcodes::*;
-use crate::types::PickleValue;
+use crate::types::{InstanceData, PickleValue};
 
 const MAX_DEPTH: usize = 1000;
 
@@ -242,8 +242,9 @@ impl Encoder {
                 self.write_bytes(name.as_bytes());
                 self.write_u8(b'\n');
             }
-            PickleValue::Instance { module, name, state } => {
-                // Emit as: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ BUILD
+            PickleValue::Instance(inst) => {
+                let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+                // Emit as: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
                 // This is the standard ZODB pattern.
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
@@ -254,15 +255,62 @@ impl Encoder {
                 self.write_u8(NEWOBJ);
                 self.encode_value(state, depth + 1)?;
                 self.write_u8(BUILD);
+                // Emit post-BUILD dict items (dict subclasses)
+                if let Some(pairs) = dict_items {
+                    if !pairs.is_empty() {
+                        self.write_u8(MARK);
+                        for (k, v) in pairs.iter() {
+                            self.encode_value(k, depth + 1)?;
+                            self.encode_value(v, depth + 1)?;
+                        }
+                        self.write_u8(SETITEMS);
+                    }
+                }
+                // Emit post-BUILD list items (list subclasses)
+                if let Some(items) = list_items {
+                    if !items.is_empty() {
+                        self.write_u8(MARK);
+                        for item in items.iter() {
+                            self.encode_value(item, depth + 1)?;
+                        }
+                        self.write_u8(APPENDS);
+                    }
+                }
             }
             PickleValue::PersistentRef(inner) => {
                 self.encode_value(inner, depth + 1)?;
                 self.write_u8(BINPERSID);
             }
-            PickleValue::Reduce { callable, args } => {
+            PickleValue::Reduce {
+                callable,
+                args,
+                dict_items,
+                list_items,
+            } => {
                 self.encode_value(callable, depth + 1)?;
                 self.encode_value(args, depth + 1)?;
                 self.write_u8(REDUCE);
+                // Emit post-REDUCE dict items (dict subclasses)
+                if let Some(pairs) = dict_items {
+                    if !pairs.is_empty() {
+                        self.write_u8(MARK);
+                        for (k, v) in pairs.iter() {
+                            self.encode_value(k, depth + 1)?;
+                            self.encode_value(v, depth + 1)?;
+                        }
+                        self.write_u8(SETITEMS);
+                    }
+                }
+                // Emit post-REDUCE list items (list subclasses)
+                if let Some(items) = list_items {
+                    if !items.is_empty() {
+                        self.write_u8(MARK);
+                        for item in items.iter() {
+                            self.encode_value(item, depth + 1)?;
+                        }
+                        self.write_u8(APPENDS);
+                    }
+                }
             }
             PickleValue::RawPickle(data) => {
                 // Raw pickle bytes are already valid pickle — but we can't

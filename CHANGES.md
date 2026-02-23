@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 (unreleased)
+
+- Fix SETITEMS/SETITEM/APPENDS/APPEND on dict/list subclasses (OrderedDict,
+  defaultdict, deque, etc.) — previously crashed with
+  `ValueError: SETITEMS on non-dict` [#5]
+- Box Instance variant as `Instance(Box<InstanceData>)`, reducing PickleValue
+  enum from 56 to 48 bytes (-13% weighted benchmark improvement)
+
 ## 1.2.2
 
 Security review fixes (addresses #3):
@@ -11,7 +19,6 @@ Security review fixes (addresses #3):
 - **CODEC-M1:** Limit LONG opcode text representation to 10,000 characters.
 - **CODEC-M2:** Reject odd-length item lists in BTree bucket `format_flat_data()`.
 - **CODEC-M3:** Cap BINUNICODE8/BINBYTES8 length at 256 MB before allocation.
-
 
 ## 1.2.1 (2026-02-17)
 

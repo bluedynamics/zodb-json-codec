@@ -3,7 +3,7 @@
 Comparison of `zodb-json-codec` (Rust + PyO3) vs CPython's `pickle` module
 for ZODB record encoding/decoding.
 
-Measured on: 2026-02-08
+Measured on: 2026-02-23
 Python: 3.13.9, PyO3: 0.28, 500 iterations, 100 warmup
 Build: `maturin develop --release` (optimized)
 
@@ -28,46 +28,46 @@ are 3-8x slower due to missing optimizations and inlining.
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict (120 B) | 1.9 us | 1.4 us | **1.1x faster** |
-| nested_dict (187 B) | 2.9 us | 2.2 us | **1.5x faster** |
-| large_flat_dict (2.5 KB) | 23.3 us | 21.9 us | **1.1x faster** |
-| bytes_in_state (1 KB) | 2.0 us | 2.0 us | 1.0x |
-| special_types (314 B) | 7.4 us | 5.6 us | **1.6x faster** |
-| btree_small (112 B) | 1.9 us | 1.9 us | 1.0x |
-| btree_length (44 B) | 1.0 us | 0.6 us | **1.8x faster** |
-| scalar_string (72 B) | 1.1 us | 0.6 us | **1.8x faster** |
-| wide_dict (27 KB) | 259 us | 287 us | 1.1x slower |
-| deep_nesting (379 B) | 7.4 us | 8.0 us | 1.0x slower |
+| simple_flat_dict (120 B) | 1.9 us | 1.3 us | **1.4x faster** |
+| nested_dict (187 B) | 2.6 us | 2.0 us | **1.3x faster** |
+| large_flat_dict (2.5 KB) | 23.4 us | 20.7 us | **1.1x faster** |
+| bytes_in_state (1 KB) | 2.1 us | 2.0 us | 1.0x |
+| special_types (314 B) | 6.9 us | 5.3 us | **1.3x faster** |
+| btree_small (112 B) | 1.7 us | 1.8 us | 1.0x |
+| btree_length (44 B) | 1.0 us | 0.6 us | **1.7x faster** |
+| scalar_string (72 B) | 1.1 us | 0.7 us | **1.6x faster** |
+| wide_dict (27 KB) | 268 us | 260 us | 1.0x |
+| deep_nesting (379 B) | 7.1 us | 7.4 us | 1.0x slower |
 
 ### Encode (Python dict -> pickle bytes)
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 1.5 us | 0.3 us | **5.0x faster** |
-| nested_dict | 1.6 us | 0.4 us | **4.0x faster** |
-| large_flat_dict | 6.6 us | 2.2 us | **3.3x faster** |
-| bytes_in_state | 1.3 us | 0.9 us | **1.4x faster** |
-| special_types | 5.0 us | 1.0 us | **5.4x faster** |
-| btree_small | 1.4 us | 0.3 us | **5.2x faster** |
-| btree_length | 1.0 us | 0.2 us | **7.0x faster** |
-| scalar_string | 1.0 us | 0.2 us | **5.9x faster** |
-| wide_dict | 57.2 us | 16.5 us | **3.4x faster** |
-| deep_nesting | 2.6 us | 1.7 us | **1.5x faster** |
+| simple_flat_dict | 1.4 us | 0.3 us | **4.7x faster** |
+| nested_dict | 1.5 us | 0.4 us | **3.9x faster** |
+| large_flat_dict | 5.6 us | 1.9 us | **2.9x faster** |
+| bytes_in_state | 1.4 us | 1.1 us | **1.3x faster** |
+| special_types | 4.9 us | 1.1 us | **4.6x faster** |
+| btree_small | 1.3 us | 0.2 us | **5.1x faster** |
+| btree_length | 1.0 us | 0.2 us | **6.0x faster** |
+| scalar_string | 1.0 us | 0.1 us | **7.0x faster** |
+| wide_dict | 59.6 us | 20.6 us | **2.9x faster** |
+| deep_nesting | 2.7 us | 1.6 us | **1.7x faster** |
 
 ### Full Roundtrip (decode + encode)
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 3.6 us | 1.8 us | **2.3x faster** |
-| nested_dict | 4.6 us | 2.8 us | **1.7x faster** |
-| large_flat_dict | 29.0 us | 42.0 us | 1.3x slower |
-| bytes_in_state | 3.1 us | 2.9 us | **1.0x faster** |
-| special_types | 12.4 us | 5.9 us | **2.1x faster** |
-| btree_small | 3.1 us | 2.3 us | **1.4x faster** |
-| btree_length | 2.2 us | 0.7 us | **2.9x faster** |
-| scalar_string | 2.1 us | 0.8 us | **2.7x faster** |
-| wide_dict | 335 us | 316 us | **1.0x faster** |
-| deep_nesting | 10.1 us | 9.7 us | **1.0x faster** |
+| simple_flat_dict | 3.3 us | 1.5 us | **2.1x faster** |
+| nested_dict | 4.5 us | 2.6 us | **1.7x faster** |
+| large_flat_dict | 28.7 us | 24.3 us | **1.2x faster** |
+| bytes_in_state | 3.3 us | 3.2 us | 1.0x |
+| special_types | 12.4 us | 6.1 us | **2.0x faster** |
+| btree_small | 3.2 us | 2.3 us | **1.4x faster** |
+| btree_length | 2.1 us | 0.8 us | **2.7x faster** |
+| scalar_string | 2.1 us | 0.9 us | **2.4x faster** |
+| wide_dict | 345 us | 293 us | **1.2x faster** |
+| deep_nesting | 10.6 us | 10.2 us | 1.0x |
 
 ### Size Comparison (pickle bytes vs JSON)
 
@@ -79,6 +79,8 @@ are 3-8x slower due to missing optimizations and inlining.
 | bytes_in_state | 1,087 B | 1,414 B | 1.30x |
 | special_types | 314 B | 228 B | 0.73x |
 | btree_small | 112 B | 111 B | 0.99x |
+| btree_length | 44 B | 47 B | 1.07x |
+| scalar_string | 72 B | 70 B | 0.97x |
 | wide_dict | 27,057 B | 15,818 B | **0.58x** |
 | deep_nesting | 379 B | 586 B | 1.55x |
 
@@ -111,14 +113,13 @@ The codec **beats CPython pickle** on decode for 8 of 10 synthetic categories,
 and on encode for **all 10 categories**. On real Plone data, both decode and
 encode are faster across all statistical measures.
 
-The remaining decode-slower cases:
+The remaining decode-parity cases:
 
-- **wide_dict decode**: 1000 plain string keys — large volume of PyO3
-  string allocation overhead
+- **btree_small decode**: at parity (1.0x) — small payload, minimal work
 - **deep_nesting decode**: recursive marker prefix scanning on nested dicts
 
 The sweet spot is typical ZODB objects (5-50 keys, mixed types, datetime
-fields, persistent refs) where the codec is **1.1-1.8x faster** decode and
+fields, persistent refs) where the codec is **1.3-1.7x faster** decode and
 **3-7x faster** encode while also producing queryable JSONB output.
 
 ## Optimizations Applied
@@ -172,6 +173,40 @@ fields, persistent refs) where the codec is **1.1-1.8x faster** decode and
 13. **Shared ZODB memo** — single decoder processes both class and state
     pickles, sharing the pickle memo between them. Avoids the overhead
     of splitting and re-initializing for the state pickle.
+
+14. **Boxed Instance variant** — `Instance(Box<InstanceData>)` reduces the
+    `PickleValue` enum from 56 to 48 bytes, improving cache utilization
+    across the entire decode/encode pipeline (-13% weighted average).
+
+## Changelog
+
+### 2026-02-23: Dict/list subclass support + PickleValue boxing optimization
+
+Added support for pickle SETITEMS/SETITEM/APPENDS/APPEND on Reduce and
+Instance variants (fixes [#5](https://github.com/bluedynamics/zodb-json-codec/issues/5):
+`ValueError: SETITEMS on non-dict` for OrderedDict, defaultdict, deque, etc.).
+
+To avoid an enum size regression, the `Instance` variant was refactored from
+an inline struct to `Instance(Box<InstanceData>)`, reducing `PickleValue` from
+56 bytes (pre-change baseline) to **48 bytes** — a 14% reduction.
+
+5-round min-median benchmark comparison (baseline vs fix):
+
+| Payload | Op | Baseline | Fix | Delta |
+|---|---|---|---|---|
+| simple_flat_dict | decode | 1.31 us | 1.21 us | **-7.9%** |
+| nested_dict | decode | 2.00 us | 1.95 us | -2.5% |
+| large_flat_dict | decode | 20.19 us | 19.65 us | -2.7% |
+| btree_length | decode | 0.63 us | 0.58 us | **-9.0%** |
+| wide_dict | decode | 304.69 us | 257.02 us | **-15.6%** |
+| special_types | encode | 1.01 us | 0.96 us | **-5.2%** |
+| btree_small | encode | 0.27 us | 0.24 us | **-10.1%** |
+| wide_dict | encode | 17.47 us | 16.24 us | **-7.1%** |
+| **Weighted avg** | **all** | | | **-13.4%** |
+
+No regressions above noise threshold. The smaller enum improves cache
+utilization across the entire decode/encode pipeline, with the largest
+gains on payloads that allocate many PickleValue nodes (wide_dict, large dicts).
 
 ## Running Benchmarks
 

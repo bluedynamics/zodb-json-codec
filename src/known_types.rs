@@ -7,7 +7,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::CodecError;
-use crate::types::PickleValue;
+use crate::types::{InstanceData, PickleValue};
 
 // ---------------------------------------------------------------------------
 // Forward direction: PickleValue → typed JSON
@@ -130,7 +130,7 @@ pub fn extract_tz_info(
     to_json: &dyn Fn(&PickleValue) -> Result<Value, CodecError>,
 ) -> Result<Option<TzInfo>, CodecError> {
     match tz_val {
-        PickleValue::Reduce { callable, args } => {
+        PickleValue::Reduce { callable, args, .. } => {
             if let PickleValue::Global { module, name } = callable.as_ref() {
                 match (module.as_str(), name.as_str()) {
                     // datetime.timezone(timedelta(...))
@@ -197,7 +197,7 @@ pub fn extract_tz_info(
 
 /// Extract total seconds from a timedelta PickleValue (REDUCE(datetime.timedelta, (d, s, us))).
 pub fn extract_timedelta_seconds(val: &PickleValue) -> Option<i64> {
-    if let PickleValue::Reduce { callable, args } = val {
+    if let PickleValue::Reduce { callable, args, .. } = val {
         if let PickleValue::Global { module, name } = callable.as_ref() {
             if module == "datetime" && name == "timedelta" {
                 if let PickleValue::Tuple(items) = args.as_ref() {
@@ -544,6 +544,8 @@ fn try_decode_datetime(
             name: "datetime".into(),
         }),
         args: Box::new(args),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -574,6 +576,8 @@ fn try_decode_date(val: &Value) -> Result<PickleValue, CodecError> {
             name: "date".into(),
         }),
         args: Box::new(PickleValue::Tuple(vec![PickleValue::Bytes(bytes)])),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -614,6 +618,8 @@ fn try_decode_time(val: &Value, tz_val: Option<&Value>) -> Result<PickleValue, C
             name: "time".into(),
         }),
         args: Box::new(args),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -645,6 +651,8 @@ fn try_decode_timedelta(val: &Value) -> Result<PickleValue, CodecError> {
             PickleValue::Int(secs),
             PickleValue::Int(us),
         ])),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -659,6 +667,8 @@ fn try_decode_decimal(val: &Value) -> Result<PickleValue, CodecError> {
             name: "Decimal".into(),
         }),
         args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s.to_string())])),
+        dict_items: None,
+        list_items: None,
     })
 }
 
@@ -684,14 +694,16 @@ fn try_decode_uuid(val: &Value) -> Result<PickleValue, CodecError> {
         PickleValue::BigInt(bi)
     };
 
-    Ok(PickleValue::Instance {
+    Ok(PickleValue::Instance(Box::new(InstanceData {
         module: "uuid".into(),
         name: "UUID".into(),
         state: Box::new(PickleValue::Dict(vec![(
             PickleValue::String("int".into()),
             int_pickle,
         )])),
-    })
+        dict_items: None,
+        list_items: None,
+    })))
 }
 
 // ===========================================================================
@@ -836,6 +848,8 @@ pub fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
             PickleValue::Int(offset_seconds),
             PickleValue::Int(0),
         ])),
+        dict_items: None,
+        list_items: None,
     };
     PickleValue::Reduce {
         callable: Box::new(PickleValue::Global {
@@ -843,6 +857,8 @@ pub fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
             name: "timezone".into(),
         }),
         args: Box::new(PickleValue::Tuple(vec![td])),
+        dict_items: None,
+        list_items: None,
     }
 }
 
@@ -876,6 +892,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                     name: "_p".into(),
                 }),
                 args: Box::new(PickleValue::Tuple(pickle_args)),
+                dict_items: None,
+                list_items: None,
             });
         }
 
@@ -894,6 +912,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                     },
                     PickleValue::String("_unpickle".into()),
                 ])),
+                dict_items: None,
+                list_items: None,
             };
             return Ok(PickleValue::Reduce {
                 callable: Box::new(inner_reduce),
@@ -901,6 +921,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                     PickleValue::String(key.clone()),
                     PickleValue::Int(1),
                 ])),
+                dict_items: None,
+                list_items: None,
             });
         }
     }
@@ -926,6 +948,8 @@ mod tests {
                 name: name.into(),
             }),
             args: Box::new(args),
+            dict_items: None,
+            list_items: None,
         }
     }
 
@@ -1168,14 +1192,16 @@ mod tests {
         // Integer value: 0x12345678123456781234567812345678
         let int_val: u128 = 0x12345678_1234_5678_1234_5678_1234_5678;
         let bi = num_bigint::BigInt::from(int_val);
-        let instance = PickleValue::Instance {
+        let instance = PickleValue::Instance(Box::new(InstanceData {
             module: "uuid".into(),
             name: "UUID".into(),
             state: Box::new(PickleValue::Dict(vec![(
                 PickleValue::String("int".into()),
                 PickleValue::BigInt(bi),
             )])),
-        };
+            dict_items: None,
+            list_items: None,
+        }));
         let json = pickle_value_to_json(&instance).unwrap();
         assert_eq!(json, json!({"@uuid": "12345678-1234-5678-1234-567812345678"}));
     }
