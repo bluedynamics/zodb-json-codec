@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.3.0 (unreleased)
+## 1.3.0 (2026-02-24)
 
 - Fix SETITEMS/SETITEM/APPENDS/APPEND on dict/list subclasses (OrderedDict,
   defaultdict, deque, etc.) — previously crashed with
@@ -8,7 +8,7 @@
 - Box Instance variant as `Instance(Box<InstanceData>)`, reducing PickleValue
   enum from 56 to 48 bytes (-13% weighted benchmark improvement)
 
-## 1.2.2
+## 1.2.2 (2026-02-22)
 
 Security review fixes (addresses #3):
 
