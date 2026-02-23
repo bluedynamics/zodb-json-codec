@@ -11,12 +11,15 @@ All commands accept --output FILE (JSON export) and --format {table,json,both}.
 from __future__ import annotations
 
 import argparse
+import gzip
+import hashlib
 import io
 import json
 import pickle
 import statistics
 import sys
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -684,6 +687,256 @@ def results_to_json(
 
 
 # ---------------------------------------------------------------------------
+# FileStorage generation
+# ---------------------------------------------------------------------------
+
+
+def _find_seed_data(seed_path: str | None) -> str:
+    """Locate seed_data.json.gz, auto-detecting from monorepo layout."""
+    if seed_path and Path(seed_path).exists():
+        return seed_path
+    # Auto-detect relative to this script
+    script_dir = Path(__file__).resolve().parent
+    candidates = [
+        script_dir / ".." / ".." / "plone-pgcatalog" / "example" / "seed_data.json.gz",
+    ]
+    for p in candidates:
+        p = p.resolve()
+        if p.exists():
+            return str(p)
+    print(
+        "ERROR: seed_data.json.gz not found. Use --seed-data PATH.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
+def _body_max_len(index: int) -> int:
+    """Deterministic body length limit with exponential skew toward short texts.
+
+    Uses a hash to get a uniform value in [0,1), then applies x^3 to skew
+    heavily toward the low end.  Maps to the range [500, 10000].
+    """
+    h = hashlib.md5(index.to_bytes(4, "big")).digest()
+    uniform = int.from_bytes(h[:4], "big") / 0xFFFFFFFF  # [0, 1)
+    skewed = uniform**3  # most values near 0
+    return int(500 + skewed * 9500)
+
+
+def run_generate(output_path: str, seed_path: str | None) -> None:
+    """Generate a FileStorage populated with diverse ZODB objects."""
+    import transaction
+    from BTrees.Length import Length
+    from BTrees.OIBTree import OIBTree
+    from BTrees.OOBTree import OOBTree
+    from persistent.list import PersistentList
+    from persistent.mapping import PersistentMapping
+    from ZODB import DB
+    from ZODB.FileStorage import FileStorage
+
+    # Load seed data
+    resolved = _find_seed_data(seed_path)
+    with gzip.open(resolved, "rt", encoding="utf-8") as f:
+        data = json.load(f)
+    articles = data["articles"]
+    print(f"Loaded {len(articles)} seed articles from {resolved}")
+
+    # Prepare output
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if out.exists():
+        print(f"Removing existing {out}")
+        for suffix in ("", ".index", ".lock", ".tmp"):
+            p = Path(str(out) + suffix)
+            if p.exists():
+                p.unlink()
+
+    storage = FileStorage(str(out))
+    db = DB(storage)
+    conn = db.open()
+    root = conn.root()
+
+    # --- Structural containers ---
+    root["categories"] = OOBTree()
+    root["by_language"] = OOBTree()
+    root["groups"] = OOBTree()
+    root["stats"] = OIBTree()
+    root["total_articles"] = Length(0)
+
+    config = PersistentMapping()
+    config["site"] = PersistentMapping()
+    config["site"]["name"] = "Benchmark Wiki"
+    config["site"]["version"] = 1
+    config["site"]["languages"] = PersistentMapping()
+    root["config"] = config
+
+    transaction.commit()
+
+    # --- Articles ---
+    BATCH = 100
+    cat_trees: dict[str, OOBTree] = {}
+    lang_trees: dict[str, OOBTree] = {}
+    category_counts: dict[str, int] = {}
+    language_counts: dict[str, int] = {}
+    groups_map: dict[int, list] = {}
+
+    tag_pool = [
+        "science", "history", "geography", "culture", "nature",
+        "politics", "economy", "society", "travel", "education",
+    ]
+
+    for i, seed in enumerate(articles):
+        art = PersistentMapping()
+        art["title"] = seed["title"]
+        art["description"] = seed["description"]
+        art["body"] = seed["body"][:_body_max_len(i)]
+        art["url"] = seed["url"]
+        art["language"] = seed["language"]
+        art["category"] = seed["category"]
+        art["group_id"] = seed["group_id"]
+
+        # Enriched type-diverse fields (deterministic from index)
+        art["created"] = datetime(
+            2024, 1, 1, tzinfo=timezone.utc
+        ) + timedelta(days=i % 365, hours=i % 24, minutes=i % 60)
+        art["modified"] = art["created"] + timedelta(
+            days=i % 30 + 1, seconds=i * 37 % 86400
+        )
+        art["pub_date"] = date(2024, 1, 1) + timedelta(days=i % 365)
+        art["reading_time"] = timedelta(seconds=max(60, len(seed["body"]) // 20))
+        art["word_count"] = Decimal(str(len(seed["body"].split())))
+        art["score"] = Decimal(f"{(i * 17 % 1000) / 100:.2f}")
+        art["article_uuid"] = uuid.UUID(int=i + 1)
+        art["tags"] = frozenset(
+            tag_pool[(i + j) % len(tag_pool)] for j in range(2 + i % 4)
+        )
+        art["related_ids"] = {i % 200, (i + 7) % 200, (i + 13) % 200}
+        art["coordinates"] = (
+            float(f"{(i * 7 % 180) - 90:.4f}"),
+            float(f"{(i * 13 % 360) - 180:.4f}"),
+        )
+        art["raw_header"] = seed["title"].encode("utf-8")[:64]
+
+        root[f"article_{i:04d}"] = art
+
+        # Category OOBTree
+        cat = seed["category"]
+        if cat not in cat_trees:
+            cat_trees[cat] = OOBTree()
+            root["categories"][cat] = cat_trees[cat]
+        cat_trees[cat][seed["title"]] = art
+        category_counts[cat] = category_counts.get(cat, 0) + 1
+
+        # Language OOBTree
+        lang = seed["language"]
+        if lang not in lang_trees:
+            lang_trees[lang] = OOBTree()
+            root["by_language"][lang] = lang_trees[lang]
+        lang_trees[lang][seed["title"]] = art
+        language_counts[lang] = language_counts.get(lang, 0) + 1
+
+        # Group tracking
+        gid = seed["group_id"]
+        if gid not in groups_map:
+            groups_map[gid] = []
+        groups_map[gid].append(art)
+
+        if (i + 1) % BATCH == 0:
+            transaction.commit()
+            print(f"  Committed {i + 1}/{len(articles)} articles...")
+
+    transaction.commit()
+    print(f"  Created {len(articles)} article objects")
+
+    # --- Group summaries ---
+    group_count = 0
+    for gid, group_articles in sorted(groups_map.items())[:100]:
+        grp = PersistentMapping()
+        grp["group_id"] = gid
+        grp["article_refs"] = PersistentList(group_articles)
+        grp["languages"] = frozenset(a["language"] for a in group_articles)
+        grp["total_words"] = Decimal(
+            str(sum(len(a["body"].split()) for a in group_articles))
+        )
+        grp["created"] = datetime(
+            2024, 6, 1, tzinfo=timezone.utc
+        ) + timedelta(days=gid)
+        root["groups"][str(gid)] = grp
+        group_count += 1
+    transaction.commit()
+    print(f"  Created {group_count} group summary objects")
+
+    # --- Stats & counters ---
+    for cat, count in category_counts.items():
+        root["stats"][cat] = count
+    root["total_articles"].change(len(articles))
+    for lang, count in language_counts.items():
+        root[f"total_{lang}"] = Length(count)
+
+    # --- Language config ---
+    display_names = {"en": "English", "de": "Deutsch", "zh": "Chinese"}
+    for lang, count in language_counts.items():
+        lc = PersistentMapping()
+        lc["enabled"] = True
+        lc["article_count"] = count
+        lc["display_name"] = display_names.get(lang, lang)
+        config["site"]["languages"][lang] = lc
+
+    # --- Edge-case objects ---
+    # Large binary
+    root["binary_sample"] = PersistentMapping()
+    root["binary_sample"]["data"] = bytes(range(256)) * 100
+    root["binary_sample"]["name"] = "binary-test"
+
+    # All-None fields
+    root["null_obj"] = PersistentMapping()
+    root["null_obj"]["a"] = None
+    root["null_obj"]["b"] = None
+    root["null_obj"]["c"] = None
+
+    # Deep nesting (plain dicts in state)
+    root["deep_nested"] = PersistentMapping()
+    deep: dict = {}
+    current = deep
+    for depth in range(15):
+        current["level"] = depth
+        current["siblings"] = list(range(depth + 1))
+        current["child"] = {}
+        current = current["child"]
+    current["leaf"] = True
+    root["deep_nested"]["tree"] = deep
+
+    # Wide dict (500 keys)
+    root["wide_obj"] = PersistentMapping()
+    for j in range(500):
+        root["wide_obj"][f"field_{j:04d}"] = f"value_{j}"
+
+    # Tuple-heavy
+    root["tuple_obj"] = PersistentMapping()
+    root["tuple_obj"]["data"] = tuple(
+        (i, f"item_{i}", i * 0.1) for i in range(50)
+    )
+
+    transaction.commit()
+
+    conn.close()
+    db.close()
+    storage.close()
+
+    # Summary
+    fs_size = out.stat().st_size
+    print(f"\nGenerated FileStorage: {out}")
+    print(f"  File size: {_fmt_bytes(fs_size)}")
+    print(f"  Articles: {len(articles)}")
+    print(f"  Category BTrees: {len(cat_trees)}")
+    print(f"  Language BTrees: {len(lang_trees)}")
+    print(f"  Group summaries: {group_count}")
+    print(f"  Edge-case objects: 5")
+    print("\nRun benchmark with:")
+    print(f"  python benchmarks/bench.py filestorage {out}")
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -782,6 +1035,18 @@ def main() -> None:
     chk.add_argument("--iterations", type=int, default=500)
     chk.add_argument("--warmup", type=int, default=100)
 
+    # generate
+    gen = sub.add_parser(
+        "generate",
+        help="Generate a FileStorage for benchmarking from Wikipedia seed data",
+    )
+    gen.add_argument(
+        "--output",
+        default="benchmarks/bench_data/Data.fs",
+        help="Output path for generated Data.fs",
+    )
+    gen.add_argument("--seed-data", default=None, help="Path to seed_data.json.gz")
+
     for p in [syn, fs, both, chk]:
         p.add_argument("--output", help="Write JSON results to file")
         p.add_argument(
@@ -795,6 +1060,11 @@ def main() -> None:
     if not args.command:
         parser.print_help()
         sys.exit(1)
+
+    # Generate doesn't need the codec — handle early
+    if args.command == "generate":
+        run_generate(args.output, args.seed_data)
+        return
 
     # Check codec is importable
     try:

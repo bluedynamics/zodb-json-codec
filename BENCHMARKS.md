@@ -88,39 +88,59 @@ JSON is typically smaller than pickle for string-heavy data (wide_dict: 42%
 smaller). It is larger for binary data (base64 overhead) and deeply nested
 structures (marker overhead).
 
-## FileStorage Scan (Real Plone 6 Database)
+## FileStorage Scan (Generated Wikipedia Database)
 
-8,422 records, 182 distinct types, 0 errors.
+1,692 records, 6 distinct types, 0 errors. Generated from 1,062 multilingual
+Wikipedia articles (en/de/zh) with body text truncated to 500-10,000 chars
+(exponential skew toward shorter texts), enriched type-diverse fields
+(datetime, date, timedelta, Decimal, UUID, frozenset, set, tuple, bytes)
+plus OOBTree containers, group summaries, and edge-case objects.
+
+Generate with: `python benchmarks/bench.py generate`
 
 | Metric | Codec | Python | Speedup |
 |---|---|---|---|
-| Decode mean | 5.3 us | 100.1 us | **18.7x faster** |
-| Decode median | 3.6 us | 4.6 us | **1.3x faster** |
-| Decode P95 | 11.6 us | 10.1 us | 1.1x slower |
-| Encode mean | 1.1 us | 3.8 us | **3.5x faster** |
-| Encode median | 0.7 us | 2.9 us | **4.1x faster** |
-| Encode P95 | 2.7 us | 7.0 us | **2.6x faster** |
-| Total pickle | 3.1 MB | — | — |
-| Total JSON | 4.1 MB | — | 1.30x |
+| Decode mean | 30.5 us | 24.2 us | 1.3x slower |
+| Decode median | 26.1 us | 23.4 us | 1.1x slower |
+| Decode P95 | 43.2 us | 36.1 us | 1.2x slower |
+| Encode mean | 7.5 us | 19.3 us | **2.6x faster** |
+| Encode median | 6.8 us | 20.9 us | **3.1x faster** |
+| Encode P95 | 13.2 us | 31.9 us | **2.4x faster** |
+| Total pickle | 5.1 MB | — | — |
+| Total JSON | 7.2 MB | — | 1.41x |
 
-The codec's mean decode speedup (18.7x) far exceeds median (1.3x) because
-Python pickle has extreme outliers (max 365 ms) that the Rust codec avoids
-(max 2.4 ms). This matters for tail latency in web applications.
+The codec is slightly slower on decode (1.1x median) because it does
+fundamentally more work than CPython's C-extension pickle: two conversions
+(pickle bytes → Rust AST → Python objects) plus type-aware transformation.
+The gap narrows on metadata-heavy records (small dicts with mixed types).
+
+Encode is consistently **2.4-3.1x faster** because the Rust encoder writes
+pickle opcodes directly from Python objects, bypassing intermediate
+allocations that CPython's pickle module incurs.
+
+| Record type | Count | % |
+|---|---|---|
+| persistent.mapping.PersistentMapping | 1,188 | 70.2% |
+| BTrees.OOBTree.OOBucket | 342 | 20.2% |
+| persistent.list.PersistentList | 100 | 5.9% |
+| BTrees.OOBTree.OOBTree | 55 | 3.3% |
+| BTrees.Length.Length | 5 | 0.3% |
+| BTrees.OIBTree.OIBTree | 2 | 0.1% |
 
 ## Analysis
 
 The codec **beats CPython pickle** on decode for 8 of 10 synthetic categories,
-and on encode for **all 10 categories**. On real Plone data, both decode and
-encode are faster across all statistical measures.
-
-The remaining decode-parity cases:
-
-- **btree_small decode**: at parity (1.0x) — small payload, minimal work
-- **deep_nesting decode**: recursive marker prefix scanning on nested dicts
+and on encode for **all 10 categories**. On the generated FileStorage data,
+decode is near parity (1.1x median) while encode is **2.4-3.1x faster**.
 
 The sweet spot is typical ZODB objects (5-50 keys, mixed types, datetime
 fields, persistent refs) where the codec is **1.3-1.7x faster** decode and
 **3-7x faster** encode while also producing queryable JSONB output.
+
+Decode overhead comes from the codec's two-pass conversion plus type
+transformation. On string-dominated payloads this matters more; on
+metadata-rich records with mixed types (the typical ZODB case) the codec
+is competitive or faster.
 
 ## Optimizations Applied
 
@@ -219,9 +239,15 @@ maturin develop --release
 # Synthetic micro-benchmarks
 python benchmarks/bench.py synthetic --iterations 1000
 
-# Scan a real FileStorage
-python benchmarks/bench.py filestorage /path/to/Data.fs
+# Generate a reproducible benchmark FileStorage (requires ZODB + BTrees)
+python benchmarks/bench.py generate
+# Custom paths:
+python benchmarks/bench.py generate --output /tmp/bench.fs \
+    --seed-data path/to/seed_data.json.gz
 
-# Both, with JSON export for tracking
-python benchmarks/bench.py all --filestorage /path/to/Data.fs --output results.json
+# Scan the generated (or any) FileStorage
+python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+
+# Both synthetic + filestorage, with JSON export
+python benchmarks/bench.py all --filestorage benchmarks/bench_data/Data.fs --output results.json
 ```

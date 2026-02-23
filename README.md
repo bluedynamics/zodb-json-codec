@@ -86,13 +86,12 @@ categories:
 
 | Operation | Best | Worst | Typical ZODB |
 |---|---|---|---|
-| Decode | **1.8x faster** | 1.1x slower | 1.3x faster |
-| Encode | **7.0x faster** | 1.4x faster | 4.0x faster |
-| Roundtrip | **2.9x faster** | 1.3x slower | 2.0x faster |
+| Decode | **1.7x faster** | 1.0x slower | 1.3x faster |
+| Encode | **7.0x faster** | 1.3x faster | 4.0x faster |
+| Roundtrip | **2.7x faster** | 1.0x | 2.0x faster |
 
-On a real Plone 6 database (8,400+ records, 182 distinct types, 0 errors):
-decode is **1.3x faster** (median), **18.7x faster** mean; encode is
-**3.5x faster** (median). Python pickle's extreme outliers are eliminated.
+On a generated Wikipedia database (1,692 records, 6 types, 0 errors):
+decode is near parity (1.1x median), encode is **3.1x faster** (median).
 
 For detailed numbers and optimization history, see [BENCHMARKS.md](BENCHMARKS.md).
 
@@ -121,7 +120,8 @@ maturin develop --release
 
 # Run benchmarks
 python benchmarks/bench.py synthetic --iterations 1000
-python benchmarks/bench.py filestorage /path/to/Data.fs
+python benchmarks/bench.py generate  # create benchmark FileStorage
+python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
 ```
 
 ### Project Structure
