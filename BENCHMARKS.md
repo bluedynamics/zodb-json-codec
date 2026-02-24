@@ -4,8 +4,8 @@ Comparison of `zodb-json-codec` (Rust + PyO3) vs CPython's `pickle` module
 for ZODB record encoding/decoding.
 
 Measured on: 2026-02-24
-Python: 3.13.9, PyO3: 0.28, 500 iterations, 100 warmup
-Build: `maturin develop --release` (optimized, LTO + codegen-units=1)
+Python: 3.13.9, PyO3: 0.28, 5000 iterations, 100 warmup
+Build: `maturin develop --release` (optimized, LTO + codegen-units=1 + PGO)
 
 **Important:** Always benchmark with `maturin develop --release`. Debug builds
 are 3-8x slower due to missing optimizations and inlining.
@@ -63,31 +63,31 @@ with the GIL released. Compared against the dict path + `json.dumps()`.
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 1.3 us | 0.2 us | **5.3x faster** |
-| nested_dict | 1.6 us | 0.4 us | **4.5x faster** |
-| large_flat_dict | 5.9 us | 1.7 us | **3.8x faster** |
-| bytes_in_state | 1.4 us | 0.9 us | **1.7x faster** |
-| special_types | 4.6 us | 0.9 us | **5.0x faster** |
-| btree_small | 1.3 us | 0.2 us | **5.8x faster** |
-| btree_length | 1.1 us | 0.1 us | **7.5x faster** |
-| scalar_string | 1.0 us | 0.1 us | **6.6x faster** |
-| wide_dict | 59.2 us | 15.7 us | **3.7x faster** |
-| deep_nesting | 2.7 us | 1.4 us | **1.9x faster** |
+| simple_flat_dict | 1.3 us | 0.2 us | **6.5x faster** |
+| nested_dict | 1.5 us | 0.3 us | **4.8x faster** |
+| large_flat_dict | 5.3 us | 1.5 us | **3.5x faster** |
+| bytes_in_state | 1.2 us | 0.7 us | **1.7x faster** |
+| special_types | 4.7 us | 0.5 us | **9.8x faster** |
+| btree_small | 1.3 us | 0.2 us | **6.0x faster** |
+| btree_length | 1.1 us | 0.1 us | **8.8x faster** |
+| scalar_string | 1.2 us | 0.1 us | **8.3x faster** |
+| wide_dict | 56.4 us | 13.9 us | **4.0x faster** |
+| deep_nesting | 2.8 us | 1.0 us | **2.8x faster** |
 
 ### Full roundtrip (decode + encode)
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 3.2 us | 1.5 us | **2.1x faster** |
-| nested_dict | 4.5 us | 2.2 us | **2.0x faster** |
-| large_flat_dict | 29.7 us | 21.8 us | **1.4x faster** |
-| bytes_in_state | 3.3 us | 3.0 us | 1.1x faster |
-| special_types | 11.7 us | 6.0 us | **2.0x faster** |
-| btree_small | 5.8 us | 2.1 us | **2.8x faster** |
-| btree_length | 2.1 us | 0.7 us | **3.2x faster** |
-| scalar_string | 2.3 us | 0.8 us | **3.1x faster** |
-| wide_dict | 316 us | 232 us | **1.4x faster** |
-| deep_nesting | 10.3 us | 9.2 us | 1.1x faster |
+| simple_flat_dict | 3.2 us | 1.4 us | **2.4x faster** |
+| nested_dict | 4.5 us | 2.1 us | **2.2x faster** |
+| large_flat_dict | 29.7 us | 19.1 us | **1.6x faster** |
+| bytes_in_state | 3.3 us | 2.4 us | **1.4x faster** |
+| special_types | 11.7 us | 4.4 us | **2.7x faster** |
+| btree_small | 5.8 us | 1.8 us | **3.3x faster** |
+| btree_length | 2.1 us | 0.6 us | **3.6x faster** |
+| scalar_string | 2.3 us | 0.6 us | **3.6x faster** |
+| wide_dict | 316 us | 260 us | **1.2x faster** |
+| deep_nesting | 10.3 us | 7.3 us | **1.4x faster** |
 
 ### Output size (pickle bytes vs JSON)
 
@@ -122,18 +122,18 @@ plus OOBTree containers, group summaries, and edge-case objects.
 
 | Metric | Codec | Python | Speedup |
 |---|---|---|---|
-| Decode mean | 28.7 us | 23.7 us | 1.2x slower |
-| Decode median | 24.7 us | 22.6 us | 1.1x slower |
-| Decode P95 | 42.3 us | 36.3 us | 1.2x slower |
-| Encode mean | 7.0 us | 18.8 us | **2.7x faster** |
-| Encode median | 6.2 us | 20.4 us | **3.3x faster** |
-| Encode P95 | 12.8 us | 31.5 us | **2.5x faster** |
+| Decode mean | 26.9 us | 22.2 us | 1.2x slower |
+| Decode median | 23.2 us | 21.6 us | 1.1x slower |
+| Decode P95 | 39.7 us | 31.7 us | 1.3x slower |
+| Encode mean | 4.7 us | 18.0 us | **3.8x faster** |
+| Encode median | 3.9 us | 19.7 us | **5.1x faster** |
+| Encode P95 | 9.6 us | 29.1 us | **3.0x faster** |
 | Total pickle | 5.1 MB | — | — |
 | Total JSON | 7.2 MB | — | 1.41x |
 
 Decode is slightly slower (1.1x median) due to the two-pass conversion plus
 type-aware transformation. The gap narrows on metadata-heavy records.
-Encode is consistently **2.5-3.3x faster** because the Rust encoder writes
+Encode is consistently **3.0-5.1x faster** because the Rust encoder writes
 pickle opcodes directly from Python objects, bypassing intermediate allocations.
 
 ### Record type distribution
@@ -183,7 +183,7 @@ The sweet spot is typical ZODB objects (5-50 keys, mixed types, datetime
 fields, persistent refs):
 
 - **Decode:** 1.5-2.0x faster on synthetic, near parity on real-world data
-- **Encode:** 4-7x faster on synthetic, 2.5-3.3x faster on real-world data
+- **Encode:** 2-10x faster on synthetic, 3-5x faster on real-world data
 - **PG path:** 1.3x faster end-to-end with GIL-free throughput
 
 Decode overhead comes from the two-pass conversion plus type transformation.
@@ -208,13 +208,20 @@ mixed types (the typical ZODB case) the codec is competitive or faster.
 - Direct PyObject → pickle bytes encoder (bypasses PickleValue AST)
 - Frequency-ordered type dispatch (PyString first)
 - Dict-size fast path (>4 keys skips all marker checks)
-- `@` prefix scan before marker lookups (-20% on deep_nesting)
+- O(1) `@cls` hash lookup replaces O(n) key scan for marker detection
+- Direct known-type encoding (`@dt`, `@date`, `@time`, `@td`, `@dec`) —
+  writes pickle opcodes inline, skipping PickleValue intermediate (eliminates
+  6 heap allocations per datetime encode)
+- Thread-local buffer reuse (retains capacity across encode calls)
+- `reserve()` calls before multi-part writes (eliminates mid-write reallocations)
+- Direct i64 LONG1 encoding (eliminates BigInt heap allocation)
 - `#[inline]` on `write_u8`, `write_bytes`, `encode_int`
 
 **Both paths:**
 - Interned marker strings (`pyo3::intern!` for `@t`, `@cls`, `@s`, etc.)
 - Pre-collected PyList (`PyList::new` vs append loop)
 - Thin LTO + single codegen unit (free 6-9% improvement)
+- Profile-guided optimization (PGO) with real FileStorage + synthetic data
 - Direct pickle → JSON string path for PG storage (GIL released)
 
 ---
@@ -241,4 +248,29 @@ python benchmarks/bench.py pg-compare --filestorage benchmarks/bench_data/Data.f
 
 # Both synthetic + filestorage, with JSON export
 python benchmarks/bench.py all --filestorage benchmarks/bench_data/Data.fs --output results.json
+```
+
+## PGO build (optional, adds 5-15%)
+
+Profile-guided optimization uses real workload data to optimize branch
+prediction and code layout. The release CI builds include PGO for
+Linux x86_64 wheels.
+
+```bash
+# 1. Install LLVM tools
+rustup component add llvm-tools
+
+# 2. Instrumented build
+RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
+
+# 3. Generate profiles — use BOTH real data and synthetic for best coverage
+python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+python benchmarks/bench.py synthetic --iterations 2000
+
+# 4. Merge profiles
+LLVM_PROFDATA=$(find ~/.rustup -name llvm-profdata | head -1)
+$LLVM_PROFDATA merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
+
+# 5. Optimized build
+RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" maturin develop --release
 ```

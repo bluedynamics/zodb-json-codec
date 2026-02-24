@@ -24,5 +24,6 @@ dist/
 .pytest_cache/
 *.prof
 
-# Generated benchmark data
-benchmarks/bench_data/
+# Generated benchmark data (keep .gz seed files for CI/PGO)
+benchmarks/bench_data/*
+!benchmarks/bench_data/Data.fs.gz

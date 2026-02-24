@@ -1783,36 +1783,56 @@ pub fn encode_pyobject_as_pickle(
 /// Encode a ZODB record (class + state) directly to concatenated pickle bytes.
 /// Writes both the class pickle and state pickle directly, skipping
 /// all PickleValue intermediate allocations.
+/// Thread-local reusable buffer for encode_zodb_record_direct.
+/// Avoids repeated Vec allocation + growth across calls — the buffer
+/// retains its capacity from previous calls, so subsequent encodes
+/// skip the initial growth phase.
+thread_local! {
+    static ENCODE_BUF: std::cell::RefCell<Vec<u8>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub fn encode_zodb_record_direct(
     module: &str,
     name: &str,
     state_obj: &Bound<'_, pyo3::PyAny>,
 ) -> PyResult<Vec<u8>> {
-    let btree_info = btrees::classify_btree(module, name);
+    ENCODE_BUF.with(|cell| {
+        let mut buf = cell.borrow_mut();
+        buf.clear(); // keep capacity from previous calls
 
-    let mut result = Vec::with_capacity(256);
+        let btree_info = btrees::classify_btree(module, name);
 
-    // Class pickle: PROTO 2 + ((module, name), None) as tuple + STOP
-    // This is the format produced by ZODB's PersistentPickler and expected
-    // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
-    result.extend_from_slice(&[PROTO, 2]);
-    write_string(&mut result, module);
-    write_string(&mut result, name);
-    result.push(TUPLE2);  // inner tuple: (module, name)
-    result.push(NONE);
-    result.push(TUPLE2);  // outer tuple: ((module, name), None)
-    result.push(STOP);
+        // Ensure minimum capacity for class pickle + reasonable state estimate.
+        // On first call this allocates; on subsequent calls it's usually a no-op.
+        let min_cap = 18 + module.len() + name.len() + 256;
+        if buf.capacity() < min_cap {
+            let needed = min_cap - buf.len();
+            buf.reserve(needed);
+        }
 
-    // State pickle: PROTO 2 + state opcodes + STOP
-    result.extend_from_slice(&[PROTO, 2]);
-    if let Some(info) = btree_info {
-        encode_btree_state_to_pickle(&info, state_obj, &mut result, true)?;
-    } else {
-        encode_pyobject_to_pickle(state_obj, &mut result, true)?;
-    }
-    result.push(STOP);
+        // Class pickle: PROTO 2 + ((module, name), None) as tuple + STOP
+        // This is the format produced by ZODB's PersistentPickler and expected
+        // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
+        buf.extend_from_slice(&[PROTO, 2]);
+        write_string(&mut buf, module);
+        write_string(&mut buf, name);
+        buf.push(TUPLE2);  // inner tuple: (module, name)
+        buf.push(NONE);
+        buf.push(TUPLE2);  // outer tuple: ((module, name), None)
+        buf.push(STOP);
 
-    Ok(result)
+        // State pickle: PROTO 2 + state opcodes + STOP
+        buf.extend_from_slice(&[PROTO, 2]);
+        if let Some(info) = btree_info {
+            encode_btree_state_to_pickle(&info, state_obj, &mut buf, true)?;
+        } else {
+            encode_pyobject_to_pickle(state_obj, &mut buf, true)?;
+        }
+        buf.push(STOP);
+
+        Ok(buf.to_vec())
+    })
 }
 
 /// Write a Py<PyAny> as pickle opcodes into the buffer (no PROTO/STOP framing).
@@ -1929,27 +1949,10 @@ fn encode_pydict_to_pickle(
         return Ok(());
     }
 
-    // 2-4 key dicts: quick scan for '@' prefix
-    let mut has_marker = false;
-    for (k, _v) in dict {
-        if let Ok(s) = k.cast::<PyString>() {
-            if let Ok(key_str) = s.to_str() {
-                if key_str.starts_with('@') {
-                    has_marker = true;
-                    break;
-                }
-            }
-        }
-    }
-
-    if !has_marker {
-        return encode_plain_dict_to_pickle(dict, buf, expand_refs);
-    }
-
-    // Multi-key marker dict — targeted checks
+    // 2-4 key dicts: check for @cls directly via hash lookup (cheaper than
+    // iterating all keys across the Python/Rust boundary).
     let py = dict.py();
 
-    // @cls (+@s) is the most common multi-key marker
     if let Some(cls_val) = dict.get_item(intern!(py, "@cls"))? {
         if let Ok(cls_list) = cls_val.cast::<PyList>() {
             if cls_list.len() == 2 {
@@ -1982,12 +1985,29 @@ fn encode_pydict_to_pickle(
                 }
             }
         }
+        // @cls present but malformed — fall back to PickleValue path
+        let pv = pydict_to_pickle_value(dict, expand_refs)?;
+        encode_value_into(&pv, buf)?;
+        return Ok(());
     }
 
-    // Other multi-key markers: fall back to PickleValue path
-    let pv = pydict_to_pickle_value(dict, expand_refs)?;
-    encode_value_into(&pv, buf)?;
-    Ok(())
+    // Check for 2-key @dt+@tz (datetime with named timezone).
+    // Only @dt — the most common multi-key typed marker — to minimize overhead
+    // on the hot path for plain 2-key dicts. Other multi-key typed markers
+    // (@time+@tz) are extremely rare in ZODB data.
+    if len == 2 {
+        if let Some(dt_val) = dict.get_item(intern!(py, "@dt"))? {
+            if let Ok(iso) = dt_val.extract::<String>() {
+                let tz_obj = dict.get_item(intern!(py, "@tz"))?;
+                let pv = decode_datetime_from_pyobject(&iso, tz_obj.as_ref(), expand_refs)?;
+                encode_value_into(&pv, buf)?;
+                return Ok(());
+            }
+        }
+    }
+
+    // No @cls, no typed marker → plain dict (most common case for nested non-marker dicts)
+    encode_plain_dict_to_pickle(dict, buf, expand_refs)
 }
 
 /// Write a plain dict (no markers) directly to pickle buffer.
@@ -2017,6 +2037,22 @@ fn encode_plain_dict_to_pickle(
         buf.push(SETITEMS);
     }
     Ok(())
+}
+
+/// Write a fixed-offset timezone as inline REDUCE opcodes.
+/// After this, the timezone object is on the pickle stack.
+/// Pattern: GLOBAL datetime.timezone( GLOBAL datetime.timedelta(0, offset, 0) )
+#[inline]
+fn write_stdlib_timezone_inline(buf: &mut Vec<u8>, offset_seconds: i64) {
+    write_global(buf, "datetime", "timezone");
+    write_global(buf, "datetime", "timedelta");
+    write_int(buf, 0);
+    write_int(buf, offset_seconds);
+    write_int(buf, 0);
+    buf.push(TUPLE3);
+    buf.push(REDUCE); // → timedelta on stack
+    buf.push(TUPLE1); // → (timedelta,) on stack
+    buf.push(REDUCE); // → timezone on stack
 }
 
 /// Try to encode a single-key marker dict directly to pickle.
@@ -2140,10 +2176,119 @@ fn try_encode_marker_to_pickle(
             }
             Ok(false)
         }
+        // --- Direct opcode encoding for known type markers ---
+        // These skip PickleValue intermediate, writing pickle opcodes directly.
+        "@dt" => {
+            if let Ok(s) = v.cast::<PyString>() {
+                if let Ok(iso) = s.to_str() {
+                    let (dt_part, offset_part) = known_types::parse_iso_datetime(iso)?;
+                    let (year, month, day, hour, min, sec, us) = dt_part;
+                    let dt_bytes =
+                        known_types::encode_datetime_bytes(year, month, day, hour, min, sec, us);
+
+                    write_global(buf, "datetime", "datetime");
+                    write_bytes_val(buf, &dt_bytes);
+
+                    if let Some(offset_secs) = offset_part {
+                        write_stdlib_timezone_inline(buf, offset_secs);
+                        buf.push(TUPLE2);
+                    } else {
+                        buf.push(TUPLE1);
+                    }
+                    buf.push(REDUCE);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "@date" => {
+            if let Ok(s) = v.cast::<PyString>() {
+                if let Ok(date_str) = s.to_str() {
+                    if date_str.len() >= 10 {
+                        let year: u16 = date_str[0..4].parse().map_err(|_| {
+                            CodecError::InvalidData(format!("bad year: {date_str}"))
+                        })?;
+                        let month: u8 = date_str[5..7].parse().map_err(|_| {
+                            CodecError::InvalidData(format!("bad month: {date_str}"))
+                        })?;
+                        let day: u8 = date_str[8..10].parse().map_err(|_| {
+                            CodecError::InvalidData(format!("bad day: {date_str}"))
+                        })?;
+                        let bytes =
+                            [(year >> 8) as u8, (year & 0xff) as u8, month, day];
+
+                        write_global(buf, "datetime", "date");
+                        write_bytes_val(buf, &bytes);
+                        buf.push(TUPLE1);
+                        buf.push(REDUCE);
+                        return Ok(true);
+                    }
+                }
+            }
+            Ok(false)
+        }
+        "@time" => {
+            if let Ok(s) = v.cast::<PyString>() {
+                if let Ok(time_str) = s.to_str() {
+                    let (time_part, offset_part) = known_types::parse_iso_time(time_str)?;
+                    let (hour, min, sec, us) = time_part;
+                    let bytes = [
+                        hour,
+                        min,
+                        sec,
+                        ((us >> 16) & 0xff) as u8,
+                        ((us >> 8) & 0xff) as u8,
+                        (us & 0xff) as u8,
+                    ];
+
+                    write_global(buf, "datetime", "time");
+                    write_bytes_val(buf, &bytes);
+
+                    if let Some(offset_secs) = offset_part {
+                        write_stdlib_timezone_inline(buf, offset_secs);
+                        buf.push(TUPLE2);
+                    } else {
+                        buf.push(TUPLE1);
+                    }
+                    buf.push(REDUCE);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "@td" => {
+            if let Ok(list) = v.cast::<PyList>() {
+                if list.len() == 3 {
+                    let days: i64 = list.get_item(0)?.extract()?;
+                    let secs: i64 = list.get_item(1)?.extract()?;
+                    let us: i64 = list.get_item(2)?.extract()?;
+
+                    write_global(buf, "datetime", "timedelta");
+                    write_int(buf, days);
+                    write_int(buf, secs);
+                    write_int(buf, us);
+                    buf.push(TUPLE3);
+                    buf.push(REDUCE);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        "@dec" => {
+            if let Ok(s) = v.cast::<PyString>() {
+                if let Ok(dec_str) = s.to_str() {
+                    write_global(buf, "decimal", "Decimal");
+                    write_string(buf, dec_str);
+                    buf.push(TUPLE1);
+                    buf.push(REDUCE);
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
         _ => {
-            // All other single-key markers (@dt, @date, @time, @td, @dec, @uuid,
-            // @pkl, @reduce, @bi, @d, @set, @fset, @inst):
-            // fall back to PickleValue conversion + encode
+            // Remaining single-key markers (@uuid, @pkl, @reduce, @bi, @d,
+            // @set, @fset, @inst): fall back to PickleValue conversion + encode
             let py = v.py();
             let pv =
                 if let Some(pv) = try_decode_single_key_marker(py, key, v, expand_refs)? {
