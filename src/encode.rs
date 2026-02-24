@@ -4,6 +4,23 @@ use crate::types::{InstanceData, PickleValue};
 
 const MAX_DEPTH: usize = 1000;
 
+/// Compute minimal byte length for a signed little-endian integer encoding.
+/// Trims trailing sign-extension bytes (0x00 for positive, 0xFF for negative),
+/// keeping the minimum needed to preserve the sign bit.
+#[inline]
+fn minimal_signed_le_len(bytes: &[u8]) -> usize {
+    let mut n = bytes.len();
+    if n == 0 {
+        return 0;
+    }
+    let sign_byte = if bytes[n - 1] & 0x80 != 0 { 0xFF } else { 0x00 };
+    while n > 1 && bytes[n - 1] == sign_byte && (bytes[n - 2] & 0x80 != 0) == (sign_byte == 0xFF)
+    {
+        n -= 1;
+    }
+    n
+}
+
 /// Encode a PickleValue AST into pickle bytes (protocol 3).
 /// We target protocol 3 because ZODB uses zodbpickle which only supports up to protocol 3.
 pub fn encode_pickle(val: &PickleValue) -> Result<Vec<u8>, CodecError> {
@@ -36,6 +53,7 @@ pub fn write_string(buf: &mut Vec<u8>, s: &str) {
     let n = bytes.len();
     // Always use BINUNICODE (protocol 1+), not SHORT_BINUNICODE (protocol 4)
     // because ZODB uses zodbpickle which only supports up to protocol 3.
+    buf.reserve(5 + n); // opcode + 4-byte length + payload — single capacity check
     buf.push(BINUNICODE);
     buf.extend_from_slice(&(n as u32).to_le_bytes());
     buf.extend_from_slice(bytes);
@@ -53,11 +71,13 @@ pub fn write_int(buf: &mut Vec<u8>, val: i64) {
         buf.push(BININT);
         buf.extend_from_slice(&(val as i32).to_le_bytes());
     } else {
-        let bi = num_bigint::BigInt::from(val);
-        let bytes = bi.to_signed_bytes_le();
+        // LONG1 for i64 values outside i32 range — encode directly
+        // without allocating a BigInt.
+        let raw = val.to_le_bytes();
+        let n = minimal_signed_le_len(&raw);
         buf.push(LONG1);
-        buf.push(bytes.len() as u8);
-        buf.extend_from_slice(&bytes);
+        buf.push(n as u8);
+        buf.extend_from_slice(&raw[..n]);
     }
 }
 
@@ -65,9 +85,11 @@ pub fn write_int(buf: &mut Vec<u8>, val: i64) {
 pub fn write_bytes_val(buf: &mut Vec<u8>, data: &[u8]) {
     let n = data.len();
     if n < 256 {
+        buf.reserve(2 + n); // opcode + 1-byte length + payload
         buf.push(SHORT_BINBYTES);
         buf.push(n as u8);
     } else {
+        buf.reserve(5 + n); // opcode + 4-byte length + payload
         buf.push(BINBYTES);
         buf.extend_from_slice(&(n as u32).to_le_bytes());
     }
@@ -76,6 +98,7 @@ pub fn write_bytes_val(buf: &mut Vec<u8>, data: &[u8]) {
 
 #[inline]
 pub fn write_global(buf: &mut Vec<u8>, module: &str, name: &str) {
+    buf.reserve(3 + module.len() + name.len()); // GLOBAL + mod + \n + name + \n
     buf.push(GLOBAL);
     buf.extend_from_slice(module.as_bytes());
     buf.push(b'\n');
@@ -142,6 +165,7 @@ impl Encoder {
                 let n = bytes.len();
                 // Always use BINUNICODE (protocol 1+), not SHORT_BINUNICODE (protocol 4)
                 // because ZODB uses zodbpickle which only supports up to protocol 3.
+                self.buf.reserve(5 + n);
                 self.write_u8(BINUNICODE);
                 self.write_bytes(&(n as u32).to_le_bytes());
                 self.write_bytes(bytes);
@@ -149,9 +173,11 @@ impl Encoder {
             PickleValue::Bytes(b) => {
                 let n = b.len();
                 if n < 256 {
+                    self.buf.reserve(2 + n);
                     self.write_u8(SHORT_BINBYTES);
                     self.write_u8(n as u8);
                 } else {
+                    self.buf.reserve(5 + n);
                     self.write_u8(BINBYTES);
                     self.write_bytes(&(n as u32).to_le_bytes());
                 }
@@ -236,6 +262,7 @@ impl Encoder {
                 self.write_u8(REDUCE);
             }
             PickleValue::Global { module, name } => {
+                self.buf.reserve(3 + module.len() + name.len());
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
                 self.write_u8(b'\n');
@@ -246,6 +273,7 @@ impl Encoder {
                 let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
                 // Emit as: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
                 // This is the standard ZODB pattern.
+                self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+NEWOBJ
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
                 self.write_u8(b'\n');
@@ -345,12 +373,13 @@ impl Encoder {
             self.write_u8(BININT);
             self.write_bytes(&(val as i32).to_le_bytes());
         } else {
-            // Use LONG1 for larger values
-            let bi = num_bigint::BigInt::from(val);
-            let bytes = bi.to_signed_bytes_le();
+            // LONG1 for i64 values outside i32 range — encode directly
+            // without allocating a BigInt.
+            let raw = val.to_le_bytes();
+            let n = minimal_signed_le_len(&raw);
             self.write_u8(LONG1);
-            self.write_u8(bytes.len() as u8);
-            self.write_bytes(&bytes);
+            self.write_u8(n as u8);
+            self.write_bytes(&raw[..n]);
         }
     }
 }

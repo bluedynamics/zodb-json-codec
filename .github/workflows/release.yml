@@ -22,10 +22,14 @@ jobs:
 
   linux:
     needs: ci
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
-        target: [x86_64, aarch64]
+        include:
+          - runner: ubuntu-latest
+            target: x86_64
+          - runner: ubuntu-24.04-arm
+            target: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -37,6 +41,34 @@ jobs:
           target: ${{ matrix.target }}
           args: --release --out dist ${{ env.PYTHON_TARGETS }}
           manylinux: auto
+          rustup-components: llvm-tools
+          # PGO: Profile-guided optimization. Both targets build natively
+          # on their respective runners, so PGO works for all Linux wheels.
+          before-script-linux: |
+            set -e
+            echo "::group::PGO: Instrumented build + profiling"
+            PYTHON=$(find /opt/python -maxdepth 1 -name 'cp313-cp313' -type d | head -1)/bin/python
+            # 1. Install ZODB+BTrees for FileStorage benchmarks
+            $PYTHON -m pip install --quiet ZODB BTrees
+
+            # 2. Instrumented build
+            RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release -i $PYTHON
+
+            # 3. Generate profile data with real + synthetic workloads
+            gunzip -k benchmarks/bench_data/Data.fs.gz
+            $PYTHON benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+            $PYTHON benchmarks/bench.py synthetic --iterations 2000
+
+            # 4. Merge profiles and set RUSTFLAGS for the final build
+            LLVM_PROFDATA=$(find /root/.rustup -name llvm-profdata 2>/dev/null | head -1 || true)
+            if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
+              $LLVM_PROFDATA merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
+              export RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"
+              echo "PGO: Building with merged profile data"
+            else
+              echo "PGO: No profile data found, building without PGO"
+            fi
+            echo "::endgroup::"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
@@ -57,6 +89,23 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
+      - name: PGO profiling
+        run: |
+          set -e
+          rustup component add llvm-tools
+          pip install maturin ZODB BTrees
+          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
+          gunzip -k benchmarks/bench_data/Data.fs.gz
+          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          python benchmarks/bench.py synthetic --iterations 2000
+          LLVM_PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata | head -1)
+          if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
+            "$LLVM_PROFDATA" merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
+            echo "RUSTFLAGS=-Cprofile-use=/tmp/pgo-data/merged.profdata" >> "$GITHUB_ENV"
+            echo "PGO: Building with merged profile data"
+          else
+            echo "PGO: No profile data found, building without PGO"
+          fi
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
@@ -76,6 +125,26 @@ jobs:
         with:
           python-version: "3.13"
           architecture: x64
+      - name: PGO profiling
+        shell: bash
+        run: |
+          set -e
+          rustup component add llvm-tools
+          pip install maturin ZODB BTrees
+          PGO_DIR="$(pwd)/pgo-data"
+          mkdir -p "$PGO_DIR"
+          RUSTFLAGS="-Cprofile-generate=$PGO_DIR" maturin develop --release
+          gunzip -k benchmarks/bench_data/Data.fs.gz
+          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          python benchmarks/bench.py synthetic --iterations 2000
+          LLVM_PROFDATA=$(find "$(rustc --print sysroot)" \( -name llvm-profdata -o -name llvm-profdata.exe \) | head -1)
+          if [ -n "$LLVM_PROFDATA" ] && ls "$PGO_DIR"/*.profraw 1>/dev/null 2>&1; then
+            "$LLVM_PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw
+            echo "RUSTFLAGS=-Cprofile-use=$PGO_DIR/merged.profdata" >> "$GITHUB_ENV"
+            echo "PGO: Building with merged profile data"
+          else
+            echo "PGO: No profile data found, building without PGO"
+          fi
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         with:
