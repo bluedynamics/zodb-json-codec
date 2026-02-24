@@ -147,7 +147,7 @@ jobs:
           python -m venv .pgo-venv
           source .pgo-venv/Scripts/activate
           pip install maturin ZODB BTrees
-          PGO_DIR="$(pwd)/pgo-data"
+          PGO_DIR="$(cygpath -m "$(pwd)")/pgo-data"
           mkdir -p "$PGO_DIR"
           RUSTFLAGS="-Cprofile-generate=$PGO_DIR" maturin develop --release
           gunzip -k benchmarks/bench_data/Data.fs.gz
