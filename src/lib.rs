@@ -120,6 +120,42 @@ fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>>
     Ok(result.into_pyobject(py)?.into_any().unbind())
 }
 
+/// Decode a ZODB record for PostgreSQL JSONB storage, returning a JSON string.
+///
+/// Like `decode_zodb_record_for_pg` but the entire pipeline runs in Rust with
+/// the GIL released — no intermediate Python dicts are created.
+/// Returns: `(class_mod: str, class_name: str, state_json: str, refs: list[int])`
+#[pyfunction]
+fn decode_zodb_record_for_pg_json(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
+    // ENTIRE pipeline runs with GIL released: pickle decode + JSON conversion
+    let (module, name, json_str, refs) = py.detach(|| {
+        let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
+        let (module, name) = zodb::extract_class_info(&class_val);
+        let mut refs = Vec::new();
+        pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
+
+        let state_json = if let Some(info) = btrees::classify_btree(&module, &name) {
+            btrees::btree_state_to_json(&info, &state_val, &json::pickle_value_to_json_pg)?
+        } else {
+            json::pickle_value_to_json_pg(&state_val)?
+        };
+
+        let json_str = serde_json::to_string(&state_json)
+            .map_err(|e| CodecError::Json(e.to_string()))?;
+        Ok::<_, PyErr>((module, name, json_str, refs))
+    })?;
+
+    // Only GIL-held work: build the 4-element return tuple
+    let refs_list = PyList::new(py, &refs)?;
+    let result = (
+        module.into_pyobject(py)?,
+        name.into_pyobject(py)?,
+        json_str.into_pyobject(py)?,
+        refs_list.into_any(),
+    );
+    Ok(result.into_pyobject(py)?.into_any().unbind())
+}
+
 /// Encode a ZODB JSON record back into two concatenated pickles.
 /// Uses the direct Py<PyAny> → pickle encoder, bypassing PickleValue allocations.
 #[pyfunction]
@@ -163,6 +199,7 @@ fn _rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(dict_to_pickle, m)?)?;
     m.add_function(wrap_pyfunction!(decode_zodb_record, m)?)?;
     m.add_function(wrap_pyfunction!(decode_zodb_record_for_pg, m)?)?;
+    m.add_function(wrap_pyfunction!(decode_zodb_record_for_pg_json, m)?)?;
     m.add_function(wrap_pyfunction!(encode_zodb_record, m)?)?;
     Ok(())
 }

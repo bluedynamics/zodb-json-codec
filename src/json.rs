@@ -8,6 +8,35 @@ use crate::types::{InstanceData, PickleValue};
 
 /// Convert a PickleValue AST to a serde_json Value.
 pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
+    pickle_value_to_json_impl(val, false, false, 0)
+}
+
+/// Convert a PickleValue AST to a serde_json Value for PostgreSQL JSONB.
+///
+/// Like `pickle_value_to_json` but with PG-specific transformations:
+/// - Null-byte sanitization: strings containing `\0` → `{"@ns": base64}`
+/// - Persistent ref compaction: `(oid_bytes, None)` → `{"@ref": "hex_oid"}`
+pub fn pickle_value_to_json_pg(val: &PickleValue) -> Result<Value, CodecError> {
+    pickle_value_to_json_impl(val, true, true, 0)
+}
+
+const MAX_DEPTH: usize = 1000;
+
+fn pickle_value_to_json_impl(
+    val: &PickleValue,
+    sanitize_nulls: bool,
+    compact_refs: bool,
+    depth: usize,
+) -> Result<Value, CodecError> {
+    if depth > MAX_DEPTH {
+        return Err(CodecError::InvalidData(
+            "maximum nesting depth exceeded in JSON conversion".to_string(),
+        ));
+    }
+    // Recursive closure that captures the flags
+    let to_json = |v: &PickleValue| -> Result<Value, CodecError> {
+        pickle_value_to_json_impl(v, sanitize_nulls, compact_refs, depth + 1)
+    };
     match val {
         PickleValue::None => Ok(Value::Null),
         PickleValue::Bool(b) => Ok(Value::Bool(*b)),
@@ -21,50 +50,55 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
                 .map(Value::Number)
                 .unwrap_or(Value::Null))
         }
-        PickleValue::String(s) => Ok(Value::String(s.clone())),
+        PickleValue::String(s) => {
+            if sanitize_nulls && s.contains('\0') {
+                // PG JSONB cannot store \u0000 — base64-encode with @ns marker
+                Ok(json!({"@ns": BASE64.encode(s.as_bytes())}))
+            } else {
+                Ok(Value::String(s.clone()))
+            }
+        }
         PickleValue::Bytes(b) => {
             Ok(json!({"@b": BASE64.encode(b)}))
         }
         PickleValue::List(items) => {
-            let arr: Result<Vec<Value>, _> =
-                items.iter().map(pickle_value_to_json).collect();
+            let arr: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
             Ok(Value::Array(arr?))
         }
         PickleValue::Tuple(items) => {
-            let arr: Result<Vec<Value>, _> =
-                items.iter().map(pickle_value_to_json).collect();
+            let arr: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
             Ok(json!({"@t": arr?}))
         }
         PickleValue::Dict(pairs) => {
-            // Check if all keys are strings
             let all_string_keys = pairs.iter().all(|(k, _)| matches!(k, PickleValue::String(_)));
             if all_string_keys {
                 let mut map = Map::new();
                 for (k, v) in pairs {
                     if let PickleValue::String(key) = k {
-                        map.insert(key.clone(), pickle_value_to_json(v)?);
+                        let json_key = if sanitize_nulls && key.contains('\0') {
+                            // Null-byte in dict key — use @ns: prefix for JSON key
+                            format!("@ns:{}", BASE64.encode(key.as_bytes()))
+                        } else {
+                            key.clone()
+                        };
+                        map.insert(json_key, to_json(v)?);
                     }
                 }
                 Ok(Value::Object(map))
             } else {
-                // Non-string keys: use array-of-pairs representation
                 let arr: Result<Vec<Value>, CodecError> = pairs
                     .iter()
-                    .map(|(k, v)| {
-                        Ok(json!([pickle_value_to_json(k)?, pickle_value_to_json(v)?]))
-                    })
+                    .map(|(k, v)| Ok(json!([to_json(k)?, to_json(v)?])))
                     .collect();
                 Ok(json!({"@d": arr?}))
             }
         }
         PickleValue::Set(items) => {
-            let arr: Result<Vec<Value>, _> =
-                items.iter().map(pickle_value_to_json).collect();
+            let arr: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
             Ok(json!({"@set": arr?}))
         }
         PickleValue::FrozenSet(items) => {
-            let arr: Result<Vec<Value>, _> =
-                items.iter().map(pickle_value_to_json).collect();
+            let arr: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
             Ok(json!({"@fset": arr?}))
         }
         PickleValue::Global { module, name } => {
@@ -72,20 +106,17 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
         }
         PickleValue::Instance(inst) => {
             let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
-            // Try known type handlers first (e.g., uuid.UUID)
             if let Some(typed) =
-                known_types::try_instance_to_typed_json(module, name, state, &pickle_value_to_json)?
+                known_types::try_instance_to_typed_json(module, name, state, &to_json)?
             {
                 return Ok(typed);
             }
-            // Try BTree state flattening
             let state_json = if let Some(info) = btrees::classify_btree(module, name) {
-                btrees::btree_state_to_json(&info, state, &pickle_value_to_json)?
+                btrees::btree_state_to_json(&info, state, &to_json)?
             } else {
-                pickle_value_to_json(state)?
+                to_json(state)?
             };
             if module.is_empty() && name.is_empty() {
-                // Anonymous instance (couldn't extract class info)
                 Ok(json!({"@inst": state_json}))
             } else {
                 let mut obj = json!({
@@ -95,34 +126,32 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
                 if let Some(pairs) = dict_items {
                     let items_json: Result<Vec<Value>, CodecError> = pairs
                         .iter()
-                        .map(|(k, v)| {
-                            Ok(json!([pickle_value_to_json(k)?, pickle_value_to_json(v)?]))
-                        })
+                        .map(|(k, v)| Ok(json!([to_json(k)?, to_json(v)?])))
                         .collect();
                     obj.as_object_mut().unwrap().insert("@items".to_string(), json!(items_json?));
                 }
                 if let Some(items) = list_items {
-                    let appends_json: Result<Vec<Value>, _> =
-                        items.iter().map(pickle_value_to_json).collect();
+                    let appends_json: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
                     obj.as_object_mut().unwrap().insert("@appends".to_string(), json!(appends_json?));
                 }
                 Ok(obj)
             }
         }
         PickleValue::PersistentRef(inner) => {
-            let inner_json = pickle_value_to_json(inner)?;
+            if compact_refs {
+                return compact_ref_to_json(inner, &to_json);
+            }
+            let inner_json = to_json(inner)?;
             Ok(json!({"@ref": inner_json}))
         }
         PickleValue::Reduce { callable, args, dict_items, list_items } => {
-            // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(typed) =
-                known_types::try_reduce_to_typed_json(callable, args, &pickle_value_to_json)?
+                known_types::try_reduce_to_typed_json(callable, args, &to_json)?
             {
                 return Ok(typed);
             }
-            // Fall back to generic @reduce
-            let callable_json = pickle_value_to_json(callable)?;
-            let args_json = pickle_value_to_json(args)?;
+            let callable_json = to_json(callable)?;
+            let args_json = to_json(args)?;
             let mut reduce_obj = json!({
                 "callable": callable_json,
                 "args": args_json,
@@ -130,15 +159,12 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
             if let Some(pairs) = dict_items {
                 let items_json: Result<Vec<Value>, CodecError> = pairs
                     .iter()
-                    .map(|(k, v)| {
-                        Ok(json!([pickle_value_to_json(k)?, pickle_value_to_json(v)?]))
-                    })
+                    .map(|(k, v)| Ok(json!([to_json(k)?, to_json(v)?])))
                     .collect();
                 reduce_obj.as_object_mut().unwrap().insert("items".to_string(), json!(items_json?));
             }
             if let Some(items) = list_items {
-                let appends_json: Result<Vec<Value>, _> =
-                    items.iter().map(pickle_value_to_json).collect();
+                let appends_json: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
                 reduce_obj.as_object_mut().unwrap().insert("appends".to_string(), json!(appends_json?));
             }
             Ok(json!({"@reduce": reduce_obj}))
@@ -147,6 +173,38 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
             Ok(json!({"@pkl": BASE64.encode(data)}))
         }
     }
+}
+
+/// Compact a ZODB persistent ref to JSON.
+/// inner is typically Tuple([Bytes(oid), None_or_Global])
+fn compact_ref_to_json(
+    inner: &PickleValue,
+    to_json: &dyn Fn(&PickleValue) -> Result<Value, CodecError>,
+) -> Result<Value, CodecError> {
+    if let PickleValue::Tuple(items) = inner {
+        if items.len() == 2 {
+            if let PickleValue::Bytes(oid) = &items[0] {
+                let hex = hex::encode(oid);
+                match &items[1] {
+                    PickleValue::None => {
+                        return Ok(json!({"@ref": hex}));
+                    }
+                    PickleValue::Global { module, name } => {
+                        let class_path = if module.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{module}.{name}")
+                        };
+                        return Ok(json!({"@ref": [hex, class_path]}));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Fallback: generic ref
+    let inner_json = to_json(inner)?;
+    Ok(json!({"@ref": inner_json}))
 }
 
 /// Convert a serde_json Value back to a PickleValue AST.
@@ -524,5 +582,115 @@ mod tests {
         assert_eq!(appends.len(), 2);
         let back = json_to_pickle_value(&json).unwrap();
         assert_eq!(val, back);
+    }
+
+    // ── PG-specific tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_pg_null_byte_sanitization() {
+        let val = PickleValue::String("hello\0world".to_string());
+        // Standard path: no sanitization
+        let json = pickle_value_to_json(&val).unwrap();
+        assert_eq!(json, Value::String("hello\0world".to_string()));
+        // PG path: @ns marker with base64
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        assert!(pg_json.get("@ns").is_some());
+        let encoded = pg_json["@ns"].as_str().unwrap();
+        let decoded = BASE64.decode(encoded).unwrap();
+        assert_eq!(decoded, b"hello\0world");
+    }
+
+    #[test]
+    fn test_pg_null_byte_in_dict_key() {
+        let val = PickleValue::Dict(vec![(
+            PickleValue::String("key\0null".to_string()),
+            PickleValue::Int(42),
+        )]);
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        let map = pg_json.as_object().unwrap();
+        // Key should be @ns: prefixed base64
+        assert!(map.keys().any(|k| k.starts_with("@ns:")));
+        assert_eq!(*map.values().next().unwrap(), json!(42));
+    }
+
+    #[test]
+    fn test_pg_string_without_null_unchanged() {
+        let val = PickleValue::String("normal".to_string());
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        assert_eq!(pg_json, Value::String("normal".to_string()));
+    }
+
+    #[test]
+    fn test_pg_compact_ref_oid_only() {
+        // Tuple([Bytes(oid), None]) → {"@ref": "hex_oid"}
+        let oid = vec![0, 0, 0, 0, 0, 0, 0, 3u8];
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(oid),
+            PickleValue::None,
+        ])));
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        assert_eq!(pg_json, json!({"@ref": "0000000000000003"}));
+    }
+
+    #[test]
+    fn test_pg_compact_ref_with_class() {
+        // Tuple([Bytes(oid), Global{mod, name}]) → {"@ref": ["hex", "mod.name"]}
+        let oid = vec![0, 0, 0, 0, 0, 0, 0, 5u8];
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(oid),
+            PickleValue::Global {
+                module: "myapp.models".to_string(),
+                name: "Document".to_string(),
+            },
+        ])));
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        assert_eq!(
+            pg_json,
+            json!({"@ref": ["0000000000000005", "myapp.models.Document"]})
+        );
+    }
+
+    #[test]
+    fn test_pg_generic_ref_no_compact() {
+        // Standard path: no compaction
+        let oid = vec![0, 0, 0, 0, 0, 0, 0, 3u8];
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(oid),
+            PickleValue::None,
+        ])));
+        let json = pickle_value_to_json(&val).unwrap();
+        // Should NOT be compact — should be nested structure
+        let ref_val = &json["@ref"];
+        assert!(ref_val.is_object(), "standard path should produce nested ref");
+    }
+
+    #[test]
+    fn test_pg_null_sanitization_in_list() {
+        let val = PickleValue::List(vec![
+            PickleValue::String("ok".to_string()),
+            PickleValue::String("has\0null".to_string()),
+        ]);
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        let arr = pg_json.as_array().unwrap();
+        assert_eq!(arr[0], Value::String("ok".to_string()));
+        assert!(arr[1].get("@ns").is_some());
+    }
+
+    #[test]
+    fn test_pg_compact_ref_empty_module() {
+        // Global with empty module: just use name
+        let oid = vec![0, 0, 0, 0, 0, 0, 0, 1u8];
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(oid),
+            PickleValue::Global {
+                module: "".to_string(),
+                name: "SomeClass".to_string(),
+            },
+        ])));
+        let pg_json = pickle_value_to_json_pg(&val).unwrap();
+        assert_eq!(
+            pg_json,
+            json!({"@ref": ["0000000000000001", "SomeClass"]})
+        );
     }
 }

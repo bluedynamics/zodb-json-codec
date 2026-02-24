@@ -937,6 +937,193 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
+# PG decode path comparison: dict vs JSON string
+# ---------------------------------------------------------------------------
+
+
+def run_pg_compare(
+    iterations: int = 1000, warmup: int = 100
+) -> list[dict]:
+    """Compare decode_zodb_record_for_pg (dict) vs decode_zodb_record_for_pg_json (str).
+
+    Measures both raw decode time and full pipeline time (decode + JSON serialization),
+    since the dict path still needs json.dumps() before sending to PG.
+    """
+    import zodb_json_codec
+
+    datasets = generate_synthetic_data()
+    results = []
+
+    for name, record_data in datasets.items():
+        # Raw decode: dict path
+        pg_dict = bench_one(
+            zodb_json_codec.decode_zodb_record_for_pg,
+            record_data,
+            iterations=iterations,
+            warmup=warmup,
+        )
+        # Raw decode: JSON string path
+        pg_json = bench_one(
+            zodb_json_codec.decode_zodb_record_for_pg_json,
+            record_data,
+            iterations=iterations,
+            warmup=warmup,
+        )
+
+        # Full pipeline: dict path needs json.dumps() for PG
+        def _dict_pipeline(data=record_data):
+            _, _, state, _ = zodb_json_codec.decode_zodb_record_for_pg(data)
+            json.dumps(state)
+
+        # Full pipeline: JSON string path already has the JSON string
+        def _json_pipeline(data=record_data):
+            zodb_json_codec.decode_zodb_record_for_pg_json(data)
+
+        pipeline_dict = bench_one(
+            _dict_pipeline, iterations=iterations, warmup=warmup
+        )
+        pipeline_json = bench_one(
+            _json_pipeline, iterations=iterations, warmup=warmup
+        )
+
+        results.append({
+            "name": name,
+            "pickle_size": len(record_data),
+            "pg_dict": pg_dict,
+            "pg_json": pg_json,
+            "pipeline_dict": pipeline_dict,
+            "pipeline_json": pipeline_json,
+        })
+
+    return results
+
+
+def run_pg_compare_filestorage(path: str) -> dict:
+    """Compare PG decode paths on real FileStorage data."""
+    import zodb_json_codec
+    from ZODB.FileStorage import FileStorage
+
+    storage = FileStorage(path, read_only=True)
+    pg_dict_stats = TimingStats()
+    pg_json_stats = TimingStats()
+    pipeline_dict_stats = TimingStats()
+    pipeline_json_stats = TimingStats()
+    count = 0
+
+    for txn in storage.iterator():
+        for record in txn:
+            data = record.data
+            if not data:
+                continue
+            try:
+                # Raw dict decode
+                t0 = time.perf_counter_ns()
+                zodb_json_codec.decode_zodb_record_for_pg(data)
+                t1 = time.perf_counter_ns()
+                pg_dict_stats.samples.append((t1 - t0) / 1000.0)
+
+                # Raw JSON string decode
+                t0 = time.perf_counter_ns()
+                zodb_json_codec.decode_zodb_record_for_pg_json(data)
+                t1 = time.perf_counter_ns()
+                pg_json_stats.samples.append((t1 - t0) / 1000.0)
+
+                # Full pipeline: dict + json.dumps
+                t0 = time.perf_counter_ns()
+                _, _, state, _ = zodb_json_codec.decode_zodb_record_for_pg(data)
+                json.dumps(state)
+                t1 = time.perf_counter_ns()
+                pipeline_dict_stats.samples.append((t1 - t0) / 1000.0)
+
+                # Full pipeline: JSON string (already serialized)
+                t0 = time.perf_counter_ns()
+                zodb_json_codec.decode_zodb_record_for_pg_json(data)
+                t1 = time.perf_counter_ns()
+                pipeline_json_stats.samples.append((t1 - t0) / 1000.0)
+
+                count += 1
+            except Exception:
+                continue
+
+    storage.close()
+    return {
+        "records": count,
+        "pg_dict": pg_dict_stats,
+        "pg_json": pg_json_stats,
+        "pipeline_dict": pipeline_dict_stats,
+        "pipeline_json": pipeline_json_stats,
+    }
+
+
+def print_pg_compare_results(
+    synthetic: list[dict],
+    filestorage: dict | None = None,
+) -> None:
+    print(f"\n{HEADER}{'='*72}")
+    print(f" PG Decode: dict path vs JSON string path")
+    print(f"{'='*72}{RESET}\n")
+
+    # Raw decode comparison
+    print(f"  {HEADER}Raw decode (no JSON serialization){RESET}")
+    print(
+        f"  {'Category':<26} {'Dict (mean)':>12} {'JSON (mean)':>12} "
+        f"{'Speedup':>12}"
+    )
+    print(f"  {'-'*62}")
+    for r in synthetic:
+        d_mean = r["pg_dict"].mean
+        j_mean = r["pg_json"].mean
+        sp = _speedup(d_mean, j_mean)
+        print(
+            f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} "
+            f"{sp:>12}"
+        )
+    print()
+
+    # Full pipeline comparison (dict+json.dumps vs JSON string)
+    print(f"  {HEADER}Full pipeline (decode + JSON serialization for PG){RESET}")
+    print(
+        f"  {'Category':<26} {'Dict+dumps':>12} {'JSON str':>12} "
+        f"{'Speedup':>12}"
+    )
+    print(f"  {'-'*62}")
+    for r in synthetic:
+        d_mean = r["pipeline_dict"].mean
+        j_mean = r["pipeline_json"].mean
+        sp = _speedup(d_mean, j_mean)
+        print(
+            f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} "
+            f"{sp:>12}"
+        )
+    print()
+
+    if filestorage:
+        print(f"  {HEADER}FileStorage ({filestorage['records']:,} records){RESET}")
+        print(f"\n  Raw decode:")
+        d = filestorage["pg_dict"]
+        j = filestorage["pg_json"]
+        print(f"    {'Metric':<16} {'Dict':>12} {'JSON str':>12} {'Speedup':>12}")
+        print(f"    {'-'*52}")
+        for label, attr in [("Mean", "mean"), ("Median", "median"), ("P95", "p95")]:
+            dv = getattr(d, attr)
+            jv = getattr(j, attr)
+            sp = _speedup(dv, jv)
+            print(f"    {label:<16} {_fmt_us(dv):>12} {_fmt_us(jv):>12} {sp:>12}")
+
+        print(f"\n  Full pipeline (decode + JSON serialization):")
+        d = filestorage["pipeline_dict"]
+        j = filestorage["pipeline_json"]
+        print(f"    {'Metric':<16} {'Dict+dumps':>12} {'JSON str':>12} {'Speedup':>12}")
+        print(f"    {'-'*52}")
+        for label, attr in [("Mean", "mean"), ("Median", "median"), ("P95", "p95")]:
+            dv = getattr(d, attr)
+            jv = getattr(j, attr)
+            sp = _speedup(dv, jv)
+            print(f"    {label:<16} {_fmt_us(dv):>12} {_fmt_us(jv):>12} {sp:>12}")
+        print()
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -1035,6 +1222,15 @@ def main() -> None:
     chk.add_argument("--iterations", type=int, default=500)
     chk.add_argument("--warmup", type=int, default=100)
 
+    # pg-compare
+    pgc = sub.add_parser(
+        "pg-compare",
+        help="Compare decode_for_pg (dict) vs decode_for_pg_json (string)",
+    )
+    pgc.add_argument("--iterations", type=int, default=1000)
+    pgc.add_argument("--warmup", type=int, default=100)
+    pgc.add_argument("--filestorage", dest="pg_fs_path", default=None)
+
     # generate
     gen = sub.add_parser(
         "generate",
@@ -1047,7 +1243,7 @@ def main() -> None:
     )
     gen.add_argument("--seed-data", default=None, help="Path to seed_data.json.gz")
 
-    for p in [syn, fs, both, chk]:
+    for p in [syn, fs, both, chk, pgc]:
         p.add_argument("--output", help="Write JSON results to file")
         p.add_argument(
             "--format",
@@ -1075,6 +1271,20 @@ def main() -> None:
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # pg-compare is self-contained
+    if args.command == "pg-compare":
+        iters = args.iterations
+        warm = args.warmup
+        print(f"PG decode comparison ({iters} iterations, {warm} warmup)...")
+        pg_syn = run_pg_compare(iters, warm)
+        pg_fs = None
+        pg_fs_path = getattr(args, "pg_fs_path", None)
+        if pg_fs_path and Path(pg_fs_path).exists():
+            print(f"Scanning FileStorage: {pg_fs_path}")
+            pg_fs = run_pg_compare_filestorage(pg_fs_path)
+        print_pg_compare_results(pg_syn, pg_fs)
+        return
 
     synthetic_results = None
     fs_result = None
