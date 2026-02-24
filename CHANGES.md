@@ -6,13 +6,9 @@
   directly to a JSON string entirely in Rust with the GIL released,
   eliminating the intermediate Python dict + `json.dumps()` step
   (1.3x faster full pipeline on real-world data)
-- Restructure BENCHMARKS.md for clarity
-
-## 1.3.1 (2026-02-24)
-
 - Enable thin LTO (`lto = "thin"`) and single codegen unit
   (`codegen-units = 1`) in Cargo release profile for 6-9% faster
-  decode/encode with no code changes
+  decode/encode
 
 ## 1.3.0 (2026-02-24)
 
