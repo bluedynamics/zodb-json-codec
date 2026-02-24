@@ -86,12 +86,12 @@ categories:
 
 | Operation | Best | Worst | Typical ZODB |
 |---|---|---|---|
-| Decode | **1.7x faster** | 1.0x slower | 1.3x faster |
-| Encode | **7.0x faster** | 1.3x faster | 4.0x faster |
-| Roundtrip | **2.7x faster** | 1.0x | 2.0x faster |
+| Decode | **2.1x faster** | 1.1x slower | 1.5x faster |
+| Encode | **7.5x faster** | 1.7x faster | 5.0x faster |
+| Roundtrip | **3.2x faster** | 1.1x faster | 2.0x faster |
 
 On a generated Wikipedia database (1,692 records, 6 types, 0 errors):
-decode is near parity (1.1x median), encode is **3.1x faster** (median).
+decode is near parity (1.1x median), encode is **3.3x faster** (median).
 
 For detailed numbers and optimization history, see [BENCHMARKS.md](BENCHMARKS.md).
 

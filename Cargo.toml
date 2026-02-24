@@ -1,6 +1,6 @@
 [package]
 name = "zodb-json-codec"
-version = "1.3.0"
+version = "1.3.1"
 edition = "2021"
 description = "Fast pickle ↔ JSON transcoder for ZODB, implemented in Rust"
 readme = "README.md"
@@ -11,6 +11,10 @@ homepage = "https://github.com/bluedynamics/zodb-json-codec"
 [lib]
 name = "zodb_json_codec"
 crate-type = ["cdylib"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
 
 [dependencies]
 pyo3 = { version = "0.28", features = ["extension-module"] }

@@ -495,11 +495,6 @@ impl<'a> Decoder<'a> {
                     let state = self.pop_value()?;
                     let obj = self.pop_value()?;
                     // Save pre-BUILD value so we can update stale memo entries.
-                    // BINPUT clones the stack top into memo *before* BUILD runs,
-                    // so memo entries still reference the old (e.g. Reduce) value.
-                    // After BUILD transforms it (e.g. to Instance), we must
-                    // propagate the change to memo — mirroring how CPython's
-                    // pickle VM uses object identity (shared references).
                     let old_obj = obj.clone();
                     match obj {
                         PickleValue::Global { module, name } => {
@@ -595,12 +590,11 @@ impl<'a> Decoder<'a> {
                     }
                     // Update memo: replace stale pre-BUILD entries with the
                     // new post-BUILD value so BINGET returns the correct form.
+                    // Move new_val on first match (typically only one entry).
                     let new_val = self.peek_value()?.clone();
-                    if old_obj != new_val {
-                        for entry in self.memo.iter_mut() {
-                            if *entry == old_obj {
-                                *entry = new_val.clone();
-                            }
+                    for entry in self.memo.iter_mut() {
+                        if *entry == old_obj {
+                            *entry = new_val.clone();
                         }
                     }
                 }

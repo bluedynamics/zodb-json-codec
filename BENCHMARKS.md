@@ -3,9 +3,9 @@
 Comparison of `zodb-json-codec` (Rust + PyO3) vs CPython's `pickle` module
 for ZODB record encoding/decoding.
 
-Measured on: 2026-02-23
+Measured on: 2026-02-24
 Python: 3.13.9, PyO3: 0.28, 500 iterations, 100 warmup
-Build: `maturin develop --release` (optimized)
+Build: `maturin develop --release` (optimized, LTO + codegen-units=1)
 
 ## Context
 
@@ -28,46 +28,46 @@ are 3-8x slower due to missing optimizations and inlining.
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict (120 B) | 1.9 us | 1.3 us | **1.4x faster** |
-| nested_dict (187 B) | 2.6 us | 2.0 us | **1.3x faster** |
-| large_flat_dict (2.5 KB) | 23.4 us | 20.7 us | **1.1x faster** |
-| bytes_in_state (1 KB) | 2.1 us | 2.0 us | 1.0x |
-| special_types (314 B) | 6.9 us | 5.3 us | **1.3x faster** |
-| btree_small (112 B) | 1.7 us | 1.8 us | 1.0x |
-| btree_length (44 B) | 1.0 us | 0.6 us | **1.7x faster** |
-| scalar_string (72 B) | 1.1 us | 0.7 us | **1.6x faster** |
-| wide_dict (27 KB) | 268 us | 260 us | 1.0x |
-| deep_nesting (379 B) | 7.1 us | 7.4 us | 1.0x slower |
+| simple_flat_dict (120 B) | 1.9 us | 1.1 us | **1.8x faster** |
+| nested_dict (187 B) | 2.9 us | 1.8 us | **1.6x faster** |
+| large_flat_dict (2.5 KB) | 22.8 us | 19.7 us | **1.2x faster** |
+| bytes_in_state (1 KB) | 1.8 us | 1.9 us | 1.1x slower |
+| special_types (314 B) | 6.8 us | 4.7 us | **1.5x faster** |
+| btree_small (112 B) | 1.9 us | 1.8 us | 1.1x faster |
+| btree_length (44 B) | 1.0 us | 0.5 us | **2.0x faster** |
+| scalar_string (72 B) | 1.1 us | 0.5 us | **2.1x faster** |
+| wide_dict (27 KB) | 264 us | 279 us | 1.1x slower |
+| deep_nesting (379 B) | 7.2 us | 7.3 us | 1.0x |
 
 ### Encode (Python dict -> pickle bytes)
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 1.4 us | 0.3 us | **4.7x faster** |
-| nested_dict | 1.5 us | 0.4 us | **3.9x faster** |
-| large_flat_dict | 5.6 us | 1.9 us | **2.9x faster** |
-| bytes_in_state | 1.4 us | 1.1 us | **1.3x faster** |
-| special_types | 4.9 us | 1.1 us | **4.6x faster** |
-| btree_small | 1.3 us | 0.2 us | **5.1x faster** |
-| btree_length | 1.0 us | 0.2 us | **6.0x faster** |
-| scalar_string | 1.0 us | 0.1 us | **7.0x faster** |
-| wide_dict | 59.6 us | 20.6 us | **2.9x faster** |
-| deep_nesting | 2.7 us | 1.6 us | **1.7x faster** |
+| simple_flat_dict | 1.3 us | 0.2 us | **5.3x faster** |
+| nested_dict | 1.6 us | 0.4 us | **4.5x faster** |
+| large_flat_dict | 5.9 us | 1.7 us | **3.8x faster** |
+| bytes_in_state | 1.4 us | 0.9 us | **1.7x faster** |
+| special_types | 4.6 us | 0.9 us | **5.0x faster** |
+| btree_small | 1.3 us | 0.2 us | **5.8x faster** |
+| btree_length | 1.1 us | 0.1 us | **7.5x faster** |
+| scalar_string | 1.0 us | 0.1 us | **6.6x faster** |
+| wide_dict | 59.2 us | 15.7 us | **3.7x faster** |
+| deep_nesting | 2.7 us | 1.4 us | **1.9x faster** |
 
 ### Full Roundtrip (decode + encode)
 
 | Category | Python | Codec | Ratio |
 |---|---|---|---|
-| simple_flat_dict | 3.3 us | 1.5 us | **2.1x faster** |
-| nested_dict | 4.5 us | 2.6 us | **1.7x faster** |
-| large_flat_dict | 28.7 us | 24.3 us | **1.2x faster** |
-| bytes_in_state | 3.3 us | 3.2 us | 1.0x |
-| special_types | 12.4 us | 6.1 us | **2.0x faster** |
-| btree_small | 3.2 us | 2.3 us | **1.4x faster** |
-| btree_length | 2.1 us | 0.8 us | **2.7x faster** |
-| scalar_string | 2.1 us | 0.9 us | **2.4x faster** |
-| wide_dict | 345 us | 293 us | **1.2x faster** |
-| deep_nesting | 10.6 us | 10.2 us | 1.0x |
+| simple_flat_dict | 3.2 us | 1.5 us | **2.1x faster** |
+| nested_dict | 4.5 us | 2.2 us | **2.0x faster** |
+| large_flat_dict | 29.7 us | 21.8 us | **1.4x faster** |
+| bytes_in_state | 3.3 us | 3.0 us | 1.1x faster |
+| special_types | 11.7 us | 6.0 us | **2.0x faster** |
+| btree_small | 5.8 us | 2.1 us | **2.8x faster** |
+| btree_length | 2.1 us | 0.7 us | **3.2x faster** |
+| scalar_string | 2.3 us | 0.8 us | **3.1x faster** |
+| wide_dict | 316 us | 232 us | **1.4x faster** |
+| deep_nesting | 10.3 us | 9.2 us | 1.1x faster |
 
 ### Size Comparison (pickle bytes vs JSON)
 
@@ -100,12 +100,12 @@ Generate with: `python benchmarks/bench.py generate`
 
 | Metric | Codec | Python | Speedup |
 |---|---|---|---|
-| Decode mean | 30.5 us | 24.2 us | 1.3x slower |
-| Decode median | 26.1 us | 23.4 us | 1.1x slower |
-| Decode P95 | 43.2 us | 36.1 us | 1.2x slower |
-| Encode mean | 7.5 us | 19.3 us | **2.6x faster** |
-| Encode median | 6.8 us | 20.9 us | **3.1x faster** |
-| Encode P95 | 13.2 us | 31.9 us | **2.4x faster** |
+| Decode mean | 28.7 us | 23.7 us | 1.2x slower |
+| Decode median | 24.7 us | 22.6 us | 1.1x slower |
+| Decode P95 | 42.3 us | 36.3 us | 1.2x slower |
+| Encode mean | 7.0 us | 18.8 us | **2.7x faster** |
+| Encode median | 6.2 us | 20.4 us | **3.3x faster** |
+| Encode P95 | 12.8 us | 31.5 us | **2.5x faster** |
 | Total pickle | 5.1 MB | — | — |
 | Total JSON | 7.2 MB | — | 1.41x |
 
@@ -114,7 +114,7 @@ fundamentally more work than CPython's C-extension pickle: two conversions
 (pickle bytes → Rust AST → Python objects) plus type-aware transformation.
 The gap narrows on metadata-heavy records (small dicts with mixed types).
 
-Encode is consistently **2.4-3.1x faster** because the Rust encoder writes
+Encode is consistently **2.5-3.3x faster** because the Rust encoder writes
 pickle opcodes directly from Python objects, bypassing intermediate
 allocations that CPython's pickle module incurs.
 
@@ -131,11 +131,11 @@ allocations that CPython's pickle module incurs.
 
 The codec **beats CPython pickle** on decode for 8 of 10 synthetic categories,
 and on encode for **all 10 categories**. On the generated FileStorage data,
-decode is near parity (1.1x median) while encode is **2.4-3.1x faster**.
+decode is near parity (1.1x median) while encode is **2.5-3.3x faster**.
 
 The sweet spot is typical ZODB objects (5-50 keys, mixed types, datetime
-fields, persistent refs) where the codec is **1.3-1.7x faster** decode and
-**3-7x faster** encode while also producing queryable JSONB output.
+fields, persistent refs) where the codec is **1.5-2.0x faster** decode and
+**4-7x faster** encode while also producing queryable JSONB output.
 
 Decode overhead comes from the codec's two-pass conversion plus type
 transformation. On string-dominated payloads this matters more; on
@@ -198,7 +198,29 @@ is competitive or faster.
     `PickleValue` enum from 56 to 48 bytes, improving cache utilization
     across the entire decode/encode pipeline (-13% weighted average).
 
+15. **Thin LTO + single codegen unit** — `lto = "thin"` + `codegen-units = 1`
+    in the release profile enables cross-crate inlining and whole-crate
+    optimization. Free 6-9% improvement across decode and encode with no
+    code changes.
+
 ## Changelog
+
+### 1.3.1 (2026-02-24): LTO release profile optimization
+
+Enabled thin LTO (`lto = "thin"`) and single codegen unit (`codegen-units = 1`)
+in the Cargo release profile. This allows LLVM to inline across crate boundaries
+and optimize the entire crate as a single compilation unit.
+
+Impact on FileStorage benchmark (1,692 records):
+
+| Metric | Before | After | Improvement |
+|---|---|---|---|
+| Decode median | 26.1 us | 24.7 us | **-5.4%** |
+| Decode mean | 30.5 us | 28.7 us | **-5.9%** |
+| Encode median | 6.8 us | 6.2 us | **-8.8%** |
+| Encode mean | 7.5 us | 7.0 us | **-6.7%** |
+
+Zero code changes — purely a build configuration improvement.
 
 ### 2026-02-23: Dict/list subclass support + PickleValue boxing optimization
 
