@@ -75,7 +75,7 @@ pickle bytes.
 | BTree set data | `@ks` | `{"@ks": [1, 2, 3]}` |
 | Unknown type | `@pkl` | `{"@pkl": "base64..."}` (escape hatch) |
 
-For the complete type mapping reference, see [TYPE_MAPPING.md](TYPE_MAPPING.md).
+For the complete type mapping reference, see [TYPE_MAPPING.md](https://github.com/bluedynamics/zodb-json-codec/blob/main/TYPE_MAPPING.md).
 
 ## Performance
 
@@ -93,7 +93,7 @@ categories:
 On a generated Wikipedia database (1,692 records, 6 types, 0 errors):
 decode is near parity (1.1x median), encode is **3.3x faster** (median).
 
-For detailed numbers and optimization history, see [BENCHMARKS.md](BENCHMARKS.md).
+For detailed numbers and optimization history, see [BENCHMARKS.md](https://github.com/bluedynamics/zodb-json-codec/blob/main/BENCHMARKS.md).
 
 ## Development
 
