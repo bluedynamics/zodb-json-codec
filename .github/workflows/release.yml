@@ -47,7 +47,19 @@ jobs:
           before-script-linux: |
             set -e
             echo "::group::PGO: Instrumented build + profiling"
-            PYTHON=$(find /opt/python -maxdepth 1 -name 'cp313-cp313' -type d | head -1)/bin/python
+            # Find best available Python (prefer 3.13, fallback to newest 3.x)
+            PYDIR=$(find /opt/python -maxdepth 1 -name 'cp313-cp313' -type d 2>/dev/null | head -1)
+            if [ -z "$PYDIR" ]; then
+              PYDIR=$(find /opt/python -maxdepth 1 -name 'cp3*' -type d 2>/dev/null | sort -V | tail -1)
+            fi
+            if [ -z "$PYDIR" ] || [ ! -x "$PYDIR/bin/python" ]; then
+              echo "PGO: No suitable Python found in container, skipping PGO"
+              echo "::endgroup::"
+              exit 0
+            fi
+            PYTHON="$PYDIR/bin/python"
+            echo "PGO: Using $PYTHON"
+
             # 1. Install ZODB+BTrees for FileStorage benchmarks
             $PYTHON -m pip install --quiet ZODB BTrees
 
@@ -93,11 +105,12 @@ jobs:
         run: |
           set -e
           rustup component add llvm-tools
-          pip install maturin ZODB BTrees
-          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
+          python -m venv .pgo-venv
+          .pgo-venv/bin/pip install maturin ZODB BTrees
+          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" .pgo-venv/bin/maturin develop --release
           gunzip -k benchmarks/bench_data/Data.fs.gz
-          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-          python benchmarks/bench.py synthetic --iterations 2000
+          .pgo-venv/bin/python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          .pgo-venv/bin/python benchmarks/bench.py synthetic --iterations 2000
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
@@ -130,13 +143,14 @@ jobs:
         run: |
           set -e
           rustup component add llvm-tools
-          pip install maturin ZODB BTrees
+          python -m venv .pgo-venv
+          .pgo-venv/Scripts/pip install maturin ZODB BTrees
           PGO_DIR="$(pwd)/pgo-data"
           mkdir -p "$PGO_DIR"
-          RUSTFLAGS="-Cprofile-generate=$PGO_DIR" maturin develop --release
+          RUSTFLAGS="-Cprofile-generate=$PGO_DIR" .pgo-venv/Scripts/maturin develop --release
           gunzip -k benchmarks/bench_data/Data.fs.gz
-          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-          python benchmarks/bench.py synthetic --iterations 2000
+          .pgo-venv/Scripts/python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          .pgo-venv/Scripts/python benchmarks/bench.py synthetic --iterations 2000
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" \( -name llvm-profdata -o -name llvm-profdata.exe \) | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls "$PGO_DIR"/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw
