@@ -106,11 +106,12 @@ jobs:
           set -e
           rustup component add llvm-tools
           python -m venv .pgo-venv
-          .pgo-venv/bin/pip install maturin ZODB BTrees
-          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" .pgo-venv/bin/maturin develop --release
+          source .pgo-venv/bin/activate
+          pip install maturin ZODB BTrees
+          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
           gunzip -k benchmarks/bench_data/Data.fs.gz
-          .pgo-venv/bin/python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-          .pgo-venv/bin/python benchmarks/bench.py synthetic --iterations 2000
+          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          python benchmarks/bench.py synthetic --iterations 2000
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
@@ -144,13 +145,14 @@ jobs:
           set -e
           rustup component add llvm-tools
           python -m venv .pgo-venv
-          .pgo-venv/Scripts/pip install maturin ZODB BTrees
-          PGO_DIR="$(pwd)/pgo-data"
+          source .pgo-venv/Scripts/activate
+          pip install maturin ZODB BTrees
+          PGO_DIR="$(cygpath -m "$(pwd)")/pgo-data"
           mkdir -p "$PGO_DIR"
-          RUSTFLAGS="-Cprofile-generate=$PGO_DIR" .pgo-venv/Scripts/maturin develop --release
+          RUSTFLAGS="-Cprofile-generate=$PGO_DIR" maturin develop --release
           gunzip -k benchmarks/bench_data/Data.fs.gz
-          .pgo-venv/Scripts/python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-          .pgo-venv/Scripts/python benchmarks/bench.py synthetic --iterations 2000
+          python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+          python benchmarks/bench.py synthetic --iterations 2000
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" \( -name llvm-profdata -o -name llvm-profdata.exe \) | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls "$PGO_DIR"/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw
