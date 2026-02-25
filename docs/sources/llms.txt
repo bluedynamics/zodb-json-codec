@@ -1,0 +1,110 @@
+# zodb-json-codec
+
+> Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.
+
+zodb-json-codec converts ZODB pickle records into human-readable, JSONB-queryable JSON
+while maintaining full roundtrip fidelity. It is designed as the codec layer for
+zodb-pgjsonb, a PostgreSQL JSONB storage backend for ZODB.
+
+## Key Facts
+
+- Package: zodb-json-codec
+- License: MIT
+- Python: 3.10+
+- Rust: 1.70+ (PyO3 0.28)
+- Repository: https://github.com/bluedynamics/zodb-json-codec
+- PyPI: https://pypi.org/project/zodb-json-codec/
+
+## Architecture
+
+The codec has three decode output paths and two encode input paths:
+
+### Decode (pickle bytes → structured output)
+
+1. **Dict path**: pickle → Decoder → PickleValue AST → pyconv.rs → Python dict
+2. **JSON serde path**: pickle → Decoder → PickleValue AST → json.rs → serde_json → JSON string
+3. **Direct JSON path**: pickle → Decoder → PickleValue AST → json_writer.rs → JSON string (GIL released)
+
+### Encode (structured input → pickle bytes)
+
+1. **Dict path**: Python dict → pyconv.rs → pickle bytes (direct, bypasses PickleValue)
+2. **JSON path**: JSON string → json.rs → PickleValue AST → encode.rs → pickle bytes
+
+### Key modules
+
+- `decode.rs` — Pickle VM: bytes → PickleValue AST (supports protocol 2-3)
+- `encode.rs` — PickleValue AST → pickle bytes
+- `pyconv.rs` — Direct PickleValue ↔ PyObject + direct PyObject → pickle bytes
+- `json.rs` — PickleValue ↔ serde_json::Value
+- `json_writer.rs` — Direct PickleValue → JSON string writer (no serde allocation)
+- `known_types.rs` — Handlers for datetime, date, time, timedelta, Decimal, UUID, set, frozenset
+- `btrees.rs` — BTree state flattening/reconstruction for all BTrees package types
+- `zodb.rs` — ZODB two-pickle record format (class + state with shared memo)
+- `types.rs` — PickleValue enum (48 bytes, boxed Instance variant)
+
+## Python API
+
+```python
+import zodb_json_codec
+
+# ZODB records (two concatenated pickles: class + state)
+record = zodb_json_codec.decode_zodb_record(data)
+data = zodb_json_codec.encode_zodb_record(record)
+
+# Single-pass decode for PostgreSQL storage
+class_mod, class_name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(data)
+
+# Direct JSON string path (GIL released, fastest for PG)
+class_mod, class_name, json_str, refs = zodb_json_codec.decode_zodb_record_for_pg_json(data)
+
+# Standalone pickle <-> Python dict
+result = zodb_json_codec.pickle_to_dict(pickle_bytes)
+pickle_bytes = zodb_json_codec.dict_to_pickle(result)
+
+# Standalone pickle <-> JSON string
+json_str = zodb_json_codec.pickle_to_json(pickle_bytes)
+pickle_bytes = zodb_json_codec.json_to_pickle(json_str)
+```
+
+## JSON Type Markers
+
+The codec uses compact marker keys to represent Python types without direct JSON equivalents:
+
+| Python Type | Marker | JSON Example |
+|---|---|---|
+| tuple | @t | `{"@t": [1, 2, 3]}` |
+| bytes | @b | `{"@b": "AQID"}` (base64) |
+| set | @set | `{"@set": [1, 2, 3]}` |
+| frozenset | @fset | `{"@fset": [1, 2, 3]}` |
+| datetime | @dt | `{"@dt": "2025-06-15T12:00:00"}` |
+| date | @date | `{"@date": "2025-06-15"}` |
+| time | @time | `{"@time": "12:30:45"}` |
+| timedelta | @td | `{"@td": [7, 3600, 0]}` |
+| Decimal | @dec | `{"@dec": "3.14"}` |
+| UUID | @uuid | `{"@uuid": "12345678-..."}` |
+| Persistent ref | @ref | `{"@ref": "0000000000000003"}` |
+| BTree map data | @kv | `{"@kv": [["a", 1], ["b", 2]]}` |
+| BTree set data | @ks | `{"@ks": [1, 2, 3]}` |
+| Unknown type | @pkl | `{"@pkl": "base64..."}` (escape hatch) |
+
+ZODB records use @cls (class) + @s (state) markers:
+```json
+{"@cls": ["myapp.models", "Document"], "@s": {"title": "Hello", "count": 42}}
+```
+
+## Performance
+
+Benchmarked against CPython's pickle module (C extension). The codec does more work
+(2 conversions + type transformation) yet beats pickle on most operations:
+
+- Encode: 1.7-9.2x faster (synthetic), 3-5x faster (real FileStorage)
+- Decode: 1.0-2.3x faster (synthetic), near parity on real-world data
+- PG JSON path: 1.3-3.3x faster end-to-end with GIL-free throughput
+- Full codec overhead: ~28 us per object (both directions)
+
+## Documentation Sections
+
+- [Tutorials](tutorials/index.md): Getting started, working with ZODB records
+- [How-To Guides](how-to/index.md): Install, integrate with pgjsonb, benchmarks, build from source
+- [Reference](reference/index.md): Python API, JSON format, BTree format, project structure, changelog
+- [Explanation](explanation/index.md): Why JSON, architecture, performance, optimization journal, security

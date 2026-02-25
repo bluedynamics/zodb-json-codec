@@ -1,0 +1,11 @@
+{# Extend the theme's layout to inject Open Graph meta #}
+{% extends "!layout.html" %}
+
+{% block metatags %}
+{{ super() }}
+<meta property="og:type" content="website">
+<meta property="og:title" content="{{ title }}">
+<meta property="og:description" content="Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.">
+<meta property="og:url" content="https://bluedynamics.github.io/zodb-json-codec/">
+<meta name="twitter:card" content="summary">
+{% endblock %}
