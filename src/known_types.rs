@@ -7,6 +7,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::CodecError;
+use crate::json_writer::JsonWriter;
 use crate::types::{InstanceData, PickleValue};
 
 // ---------------------------------------------------------------------------
@@ -48,6 +49,465 @@ pub fn try_instance_to_typed_json(
     match (module, name) {
         ("uuid", "UUID") => try_encode_uuid(state),
         _ => Ok(None),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Direct JSON writer variants (PickleValue → JsonWriter, no serde_json::Value)
+// ---------------------------------------------------------------------------
+
+/// Try to write a known REDUCE pattern directly as JSON.
+/// Returns Ok(true) if handled, Ok(false) if not recognized.
+pub fn try_write_reduce_typed(
+    w: &mut JsonWriter,
+    callable: &PickleValue,
+    args: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<bool, CodecError> {
+    let (module, name) = match callable {
+        PickleValue::Global { module, name } => (module.as_str(), name.as_str()),
+        _ => return Ok(false),
+    };
+
+    match (module, name) {
+        ("datetime", "datetime") => write_datetime(w, args, write_val),
+        ("datetime", "date") => write_date(w, args),
+        ("datetime", "time") => write_time(w, args, write_val),
+        ("datetime", "timedelta") => write_timedelta(w, args),
+        ("decimal", "Decimal") => write_decimal(w, args),
+        ("builtins", "set") => write_set(w, args, write_val),
+        ("builtins", "frozenset") => write_frozenset(w, args, write_val),
+        _ => Ok(false),
+    }
+}
+
+/// Try to write a known Instance pattern directly as JSON.
+/// Returns Ok(true) if handled, Ok(false) if not recognized.
+pub fn try_write_instance_typed(
+    w: &mut JsonWriter,
+    module: &str,
+    name: &str,
+    state: &PickleValue,
+) -> Result<bool, CodecError> {
+    match (module, name) {
+        ("uuid", "UUID") => write_uuid(w, state),
+        _ => Ok(false),
+    }
+}
+
+fn write_datetime(
+    w: &mut JsonWriter,
+    args: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) => items,
+        _ => return Ok(false),
+    };
+    let dt_bytes = match tuple_items.first() {
+        Some(PickleValue::Bytes(b)) if b.len() == 10 => b,
+        _ => return Ok(false),
+    };
+    let (year, month, day, hour, min, sec, us) = match decode_datetime_bytes(dt_bytes) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    let iso = format_datetime_iso(year, month, day, hour, min, sec, us);
+
+    if tuple_items.len() == 1 {
+        // Naive datetime: {"@dt": "iso"}
+        w.begin_object();
+        w.write_key_literal("@dt");
+        w.write_string_literal(&iso);
+        w.end_object();
+        Ok(true)
+    } else if tuple_items.len() == 2 {
+        // Use a dummy to_json that creates Value for tz extraction
+        let to_json_for_tz = |v: &PickleValue| -> Result<Value, CodecError> {
+            // For pytz args, we need to produce Values
+            match v {
+                PickleValue::String(s) => Ok(Value::String(s.clone())),
+                PickleValue::Int(i) => Ok(serde_json::json!(*i)),
+                _ => Ok(Value::Null),
+            }
+        };
+        match extract_tz_info(&tuple_items[1], &to_json_for_tz)? {
+            Some(TzInfo::FixedOffset(secs)) => {
+                let offset = format_offset(secs);
+                w.begin_object();
+                w.write_key_literal("@dt");
+                // Write "iso+offset" as a single string
+                w.write_raw("\"");
+                w.write_raw(&iso);
+                w.write_raw(&offset);
+                w.write_raw("\"");
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::PytzUtc) => {
+                w.begin_object();
+                w.write_key_literal("@dt");
+                w.write_raw("\"");
+                w.write_raw(&iso);
+                w.write_raw("+00:00\"");
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::Pytz { name, args: tz_args }) => {
+                // {"@dt": iso, "@tz": {"pytz": [...], "name": name}}
+                w.begin_object();
+                w.write_key_literal("@dt");
+                w.write_string_literal(&iso);
+                w.write_comma();
+                w.write_key_literal("@tz");
+                w.begin_object();
+                w.write_key_literal("pytz");
+                w.begin_array();
+                for (i, arg) in tz_args.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    // Write serde_json::Value directly
+                    write_serde_value(w, arg);
+                }
+                w.end_array();
+                w.write_comma();
+                w.write_key_literal("name");
+                w.write_string(&name);
+                w.end_object();
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::ZoneInfo(key)) => {
+                // {"@dt": iso, "@tz": {"zoneinfo": key}}
+                w.begin_object();
+                w.write_key_literal("@dt");
+                w.write_string_literal(&iso);
+                w.write_comma();
+                w.write_key_literal("@tz");
+                w.begin_object();
+                w.write_key_literal("zoneinfo");
+                w.write_string(&key);
+                w.end_object();
+                w.end_object();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+fn write_date(w: &mut JsonWriter, args: &PickleValue) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if items.len() == 1 => items,
+        _ => return Ok(false),
+    };
+    let bytes = match &tuple_items[0] {
+        PickleValue::Bytes(b) if b.len() == 4 => b,
+        _ => return Ok(false),
+    };
+    let year = (bytes[0] as u16) * 256 + bytes[1] as u16;
+    let month = bytes[2];
+    let day = bytes[3];
+
+    // {"@date": "YYYY-MM-DD"}
+    w.begin_object();
+    w.write_key_literal("@date");
+    w.write_string_literal(&format!("{year:04}-{month:02}-{day:02}"));
+    w.end_object();
+    Ok(true)
+}
+
+fn write_time(
+    w: &mut JsonWriter,
+    args: &PickleValue,
+    _write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if !items.is_empty() => items,
+        _ => return Ok(false),
+    };
+    let bytes = match &tuple_items[0] {
+        PickleValue::Bytes(b) if b.len() == 6 => b,
+        _ => return Ok(false),
+    };
+    let (hour, min, sec, us) = match decode_time_bytes(bytes) {
+        Some(v) => v,
+        None => return Ok(false),
+    };
+    let time_str = if us > 0 {
+        format!("{hour:02}:{min:02}:{sec:02}.{us:06}")
+    } else {
+        format!("{hour:02}:{min:02}:{sec:02}")
+    };
+
+    if tuple_items.len() == 1 {
+        w.begin_object();
+        w.write_key_literal("@time");
+        w.write_string_literal(&time_str);
+        w.end_object();
+        Ok(true)
+    } else if tuple_items.len() == 2 {
+        let to_json_for_tz = |v: &PickleValue| -> Result<Value, CodecError> {
+            match v {
+                PickleValue::String(s) => Ok(Value::String(s.clone())),
+                PickleValue::Int(i) => Ok(serde_json::json!(*i)),
+                _ => Ok(Value::Null),
+            }
+        };
+        match extract_tz_info(&tuple_items[1], &to_json_for_tz)? {
+            Some(TzInfo::FixedOffset(secs)) => {
+                let offset = format_offset(secs);
+                w.begin_object();
+                w.write_key_literal("@time");
+                w.write_raw("\"");
+                w.write_raw(&time_str);
+                w.write_raw(&offset);
+                w.write_raw("\"");
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::PytzUtc) => {
+                w.begin_object();
+                w.write_key_literal("@time");
+                w.write_raw("\"");
+                w.write_raw(&time_str);
+                w.write_raw("+00:00\"");
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::Pytz { name, args: tz_args }) => {
+                w.begin_object();
+                w.write_key_literal("@time");
+                w.write_string_literal(&time_str);
+                w.write_comma();
+                w.write_key_literal("@tz");
+                w.begin_object();
+                w.write_key_literal("pytz");
+                w.begin_array();
+                for (i, arg) in tz_args.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    write_serde_value(w, arg);
+                }
+                w.end_array();
+                w.write_comma();
+                w.write_key_literal("name");
+                w.write_string(&name);
+                w.end_object();
+                w.end_object();
+                Ok(true)
+            }
+            Some(TzInfo::ZoneInfo(key)) => {
+                w.begin_object();
+                w.write_key_literal("@time");
+                w.write_string_literal(&time_str);
+                w.write_comma();
+                w.write_key_literal("@tz");
+                w.begin_object();
+                w.write_key_literal("zoneinfo");
+                w.write_string(&key);
+                w.end_object();
+                w.end_object();
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    } else {
+        Ok(false)
+    }
+}
+
+fn write_timedelta(w: &mut JsonWriter, args: &PickleValue) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if items.len() == 3 => items,
+        _ => return Ok(false),
+    };
+    let days = match &tuple_items[0] {
+        PickleValue::Int(i) => *i,
+        _ => return Ok(false),
+    };
+    let secs = match &tuple_items[1] {
+        PickleValue::Int(i) => *i,
+        _ => return Ok(false),
+    };
+    let us = match &tuple_items[2] {
+        PickleValue::Int(i) => *i,
+        _ => return Ok(false),
+    };
+
+    // {"@td": [days, secs, us]}
+    w.begin_object();
+    w.write_key_literal("@td");
+    w.begin_array();
+    w.write_i64(days);
+    w.write_comma();
+    w.write_i64(secs);
+    w.write_comma();
+    w.write_i64(us);
+    w.end_array();
+    w.end_object();
+    Ok(true)
+}
+
+fn write_decimal(w: &mut JsonWriter, args: &PickleValue) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if items.len() == 1 => items,
+        _ => return Ok(false),
+    };
+    let s = match &tuple_items[0] {
+        PickleValue::String(s) => s,
+        _ => return Ok(false),
+    };
+
+    // {"@dec": "value"}
+    w.begin_object();
+    w.write_key_literal("@dec");
+    w.write_string(s);
+    w.end_object();
+    Ok(true)
+}
+
+fn write_set(
+    w: &mut JsonWriter,
+    args: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if items.len() == 1 => items,
+        _ => return Ok(false),
+    };
+    let list_items = match &tuple_items[0] {
+        PickleValue::List(items) => items,
+        _ => return Ok(false),
+    };
+
+    // {"@set": [...]}
+    w.begin_object();
+    w.write_key_literal("@set");
+    w.begin_array();
+    for (i, item) in list_items.iter().enumerate() {
+        if i > 0 {
+            w.write_comma();
+        }
+        write_val(w, item)?;
+    }
+    w.end_array();
+    w.end_object();
+    Ok(true)
+}
+
+fn write_frozenset(
+    w: &mut JsonWriter,
+    args: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<bool, CodecError> {
+    let tuple_items = match args {
+        PickleValue::Tuple(items) if items.len() == 1 => items,
+        _ => return Ok(false),
+    };
+    let list_items = match &tuple_items[0] {
+        PickleValue::List(items) => items,
+        _ => return Ok(false),
+    };
+
+    // {"@fset": [...]}
+    w.begin_object();
+    w.write_key_literal("@fset");
+    w.begin_array();
+    for (i, item) in list_items.iter().enumerate() {
+        if i > 0 {
+            w.write_comma();
+        }
+        write_val(w, item)?;
+    }
+    w.end_array();
+    w.end_object();
+    Ok(true)
+}
+
+fn write_uuid(w: &mut JsonWriter, state: &PickleValue) -> Result<bool, CodecError> {
+    let pairs = match state {
+        PickleValue::Dict(pairs) => pairs,
+        _ => return Ok(false),
+    };
+
+    for (k, v) in pairs {
+        if let PickleValue::String(key) = k {
+            if key == "int" {
+                let int_val = match v {
+                    PickleValue::Int(i) => *i as u128,
+                    PickleValue::BigInt(bi) => {
+                        let (_, bytes) = bi.to_bytes_be();
+                        let mut val: u128 = 0;
+                        for b in bytes {
+                            val = (val << 8) | b as u128;
+                        }
+                        val
+                    }
+                    _ => return Ok(false),
+                };
+
+                let hex = format!("{int_val:032x}");
+                let uuid_str = format!(
+                    "{}-{}-{}-{}-{}",
+                    &hex[0..8],
+                    &hex[8..12],
+                    &hex[12..16],
+                    &hex[16..20],
+                    &hex[20..32]
+                );
+                // {"@uuid": "..."}
+                w.begin_object();
+                w.write_key_literal("@uuid");
+                w.write_string_literal(&uuid_str);
+                w.end_object();
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+/// Write a serde_json::Value to the JsonWriter (bridge for tz args).
+fn write_serde_value(w: &mut JsonWriter, val: &Value) {
+    match val {
+        Value::Null => w.write_null(),
+        Value::Bool(b) => w.write_bool(*b),
+        Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                w.write_i64(i);
+            } else if let Some(f) = n.as_f64() {
+                w.write_f64(f);
+            } else {
+                w.write_null();
+            }
+        }
+        Value::String(s) => w.write_string(s),
+        Value::Array(arr) => {
+            w.begin_array();
+            for (i, item) in arr.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                write_serde_value(w, item);
+            }
+            w.end_array();
+        }
+        Value::Object(map) => {
+            w.begin_object();
+            for (i, (k, v)) in map.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                w.write_key(k);
+                write_serde_value(w, v);
+            }
+            w.end_object();
+        }
     }
 }
 

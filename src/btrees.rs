@@ -11,6 +11,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::CodecError;
+use crate::json_writer::JsonWriter;
 use crate::types::PickleValue;
 
 // ---------------------------------------------------------------------------
@@ -275,6 +276,196 @@ fn bucket_state_to_json(
 
     // Unknown pattern — fallback
     to_json(state)
+}
+
+// ---------------------------------------------------------------------------
+// Direct JSON writer variants (PickleValue → JsonWriter)
+// ---------------------------------------------------------------------------
+
+/// Convert a BTree state PickleValue to JSON written directly to a JsonWriter.
+pub fn btree_state_to_json_writer(
+    info: &BTreeClassInfo,
+    state: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    w: &mut JsonWriter,
+) -> Result<(), CodecError> {
+    if *state == PickleValue::None {
+        w.write_null();
+        return Ok(());
+    }
+    match info.kind {
+        BTreeNodeKind::BTree | BTreeNodeKind::TreeSet => {
+            btree_node_state_to_json_writer(info, state, write_val, w)
+        }
+        BTreeNodeKind::Bucket | BTreeNodeKind::Set => {
+            bucket_state_to_json_writer(info, state, write_val, w)
+        }
+    }
+}
+
+fn btree_node_state_to_json_writer(
+    info: &BTreeClassInfo,
+    state: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    w: &mut JsonWriter,
+) -> Result<(), CodecError> {
+    let outer = match state {
+        PickleValue::Tuple(items) => items,
+        _ => return write_val(w, state),
+    };
+
+    if outer.len() == 1 {
+        if let Some(flat_data) = unwrap_inline_btree(&outer[0]) {
+            return write_flat_data(info, flat_data, write_val, w);
+        }
+        return write_val(w, state);
+    }
+
+    if outer.len() == 2 {
+        if let PickleValue::Tuple(children) = &outer[0] {
+            if children_has_refs(children) {
+                return write_large_btree(children, &outer[1], write_val, w);
+            }
+        }
+        return write_val(w, state);
+    }
+
+    write_val(w, state)
+}
+
+fn bucket_state_to_json_writer(
+    info: &BTreeClassInfo,
+    state: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    w: &mut JsonWriter,
+) -> Result<(), CodecError> {
+    let outer = match state {
+        PickleValue::Tuple(items) => items,
+        _ => return write_val(w, state),
+    };
+
+    if outer.len() == 1 {
+        if let PickleValue::Tuple(flat_data) = &outer[0] {
+            return write_flat_data(info, flat_data, write_val, w);
+        }
+        return write_val(w, state);
+    }
+
+    if outer.len() == 2 {
+        if let PickleValue::Tuple(flat_data) = &outer[0] {
+            w.begin_object();
+            if info.is_map {
+                if flat_data.len() % 2 != 0 {
+                    return Err(CodecError::InvalidData(
+                        "BTree bucket has odd number of items for key-value pairs".to_string(),
+                    ));
+                }
+                w.write_key_literal("@kv");
+                w.begin_array();
+                let mut i = 0;
+                let mut first = true;
+                while i + 1 < flat_data.len() {
+                    if !first {
+                        w.write_comma();
+                    }
+                    first = false;
+                    w.begin_array();
+                    write_val(w, &flat_data[i])?;
+                    w.write_comma();
+                    write_val(w, &flat_data[i + 1])?;
+                    w.end_array();
+                    i += 2;
+                }
+                w.end_array();
+            } else {
+                w.write_key_literal("@ks");
+                w.begin_array();
+                for (i, item) in flat_data.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    write_val(w, item)?;
+                }
+                w.end_array();
+            }
+            w.write_comma();
+            w.write_key_literal("@next");
+            write_val(w, &outer[1])?;
+            w.end_object();
+            return Ok(());
+        }
+        return write_val(w, state);
+    }
+
+    write_val(w, state)
+}
+
+fn write_flat_data(
+    info: &BTreeClassInfo,
+    items: &[PickleValue],
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    w: &mut JsonWriter,
+) -> Result<(), CodecError> {
+    w.begin_object();
+    if info.is_map {
+        if items.len() % 2 != 0 {
+            return Err(CodecError::InvalidData(
+                "BTree bucket has odd number of items for key-value pairs".to_string(),
+            ));
+        }
+        w.write_key_literal("@kv");
+        w.begin_array();
+        let mut i = 0;
+        let mut first = true;
+        while i + 1 < items.len() {
+            if !first {
+                w.write_comma();
+            }
+            first = false;
+            w.begin_array();
+            write_val(w, &items[i])?;
+            w.write_comma();
+            write_val(w, &items[i + 1])?;
+            w.end_array();
+            i += 2;
+        }
+        w.end_array();
+    } else {
+        w.write_key_literal("@ks");
+        w.begin_array();
+        for (i, item) in items.iter().enumerate() {
+            if i > 0 {
+                w.write_comma();
+            }
+            write_val(w, item)?;
+        }
+        w.end_array();
+    }
+    w.end_object();
+    Ok(())
+}
+
+fn write_large_btree(
+    children: &[PickleValue],
+    firstbucket: &PickleValue,
+    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    w: &mut JsonWriter,
+) -> Result<(), CodecError> {
+    w.begin_object();
+    w.write_key_literal("@children");
+    w.begin_array();
+    for (i, child) in children.iter().enumerate() {
+        if i > 0 {
+            w.write_comma();
+        }
+        write_val(w, child)?;
+    }
+    w.end_array();
+    w.write_comma();
+    w.write_key_literal("@first");
+    write_val(w, firstbucket)?;
+    w.end_object();
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
