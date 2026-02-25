@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.5.0 (unreleased)
+## 1.6.0 (unreleased)
+
+## 1.5.0 (2026-02-25)
 
 - Direct PickleValue → JSON string writer (`json_writer.rs`), bypassing
   all `serde_json::Value` intermediate allocations (PG path 1.3-3.3x
