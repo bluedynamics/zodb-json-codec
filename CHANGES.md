@@ -1,14 +1,31 @@
 # Changelog
 
-## 1.4.0 (2026-02-24)
+## 1.4.0 (2026-02-25)
 
 - Add `decode_zodb_record_for_pg_json()` — converts ZODB pickle records
   directly to a JSON string entirely in Rust with the GIL released,
   eliminating the intermediate Python dict + `json.dumps()` step
-  (1.3x faster full pipeline on real-world data)
+- Direct PickleValue → JSON string writer (`json_writer.rs`), bypassing
+  all `serde_json::Value` intermediate allocations (PG path 1.3-3.3x
+  faster than dict + `json.dumps()`)
+- Direct known-type encoding for datetime, date, time, timedelta, and
+  Decimal — writes pickle opcodes inline, skipping PickleValue intermediate
+- Thread-local buffer reuse for both encode and JSON writer paths
+- Thread-local class pickle cache per (module, name) pair — single memcpy
+  replaces 7 opcode writes for ~99.6% of records
+- O(1) `@cls` hash lookup replaces O(n) key scan for marker detection
+- Direct i64 LONG1 encoding (eliminates BigInt heap allocation)
 - Enable thin LTO (`lto = "thin"`) and single codegen unit
-  (`codegen-units = 1`) in Cargo release profile for 6-9% faster
-  decode/encode
+  (`codegen-units = 1`) in release profile
+- Profile-guided optimization (PGO) support with real FileStorage +
+  synthetic data profiling (adds 5-15%)
+
+### Performance (PGO build, vs CPython pickle)
+
+- Encode: 1.7-9.2x faster (synthetic), 3-5x faster (real FileStorage)
+- Decode: 1.0-2.3x faster (synthetic), near parity on real-world data
+- PG JSON path: 1.4x faster at median on 1,692 real ZODB records
+- Full codec overhead: ~28 µs per object (both directions)
 
 ## 1.3.0 (2026-02-24)
 
