@@ -76,6 +76,9 @@ pub const MEMOIZE: u8 = 0x94; // store top in memo (auto-incrementing key)
 pub const FRAME: u8 = 0x95; // framing for protocol 4+
 
 // -- Protocol 5 --
+#[allow(dead_code)]
 pub const BYTEARRAY8: u8 = 0x96; // push bytearray
+#[allow(dead_code)]
 pub const NEXT_BUFFER: u8 = 0x97; // push next out-of-band buffer
+#[allow(dead_code)]
 pub const READONLY_BUFFER: u8 = 0x98; // make top-of-stack read-only

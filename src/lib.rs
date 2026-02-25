@@ -61,7 +61,7 @@ fn dict_to_pickle(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<PyByte
 #[pyfunction]
 fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     // Release GIL during pure-Rust pickle parsing
-    let (class_val, state_val, module, name) = py.detach(|| {
+    let (_class_val, state_val, module, name) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
         let (module, name) = zodb::extract_class_info(&class_val);
         Ok::<_, PyErr>((class_val, state_val, module, name))
@@ -95,7 +95,7 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
 fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     // Release GIL during pure-Rust pickle parsing + ref extraction.
     // This allows other Python threads to run during the CPU-bound phase.
-    let (class_val, state_val, module, name, refs) = py.detach(|| {
+    let (_class_val, state_val, module, name, refs) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
         let (module, name) = zodb::extract_class_info(&class_val);
         let mut refs = Vec::new();

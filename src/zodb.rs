@@ -1,3 +1,4 @@
+#[cfg(test)]
 use crate::error::CodecError;
 use crate::types::PickleValue;
 
@@ -20,6 +21,7 @@ use serde_json::{json, Value};
 ///
 /// We need to find the boundary between the two pickles.
 /// The first pickle ends at its STOP opcode (0x2e = '.').
+#[cfg(test)]
 pub fn split_zodb_record(data: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
     // We need to properly walk the first pickle to find its STOP opcode.
     // Simple approach: scan for STOP, but STOP byte (0x2e) can appear inside
@@ -31,6 +33,7 @@ pub fn split_zodb_record(data: &[u8]) -> Result<(&[u8], &[u8]), CodecError> {
 /// Find the end (exclusive) of the first pickle in the data.
 /// This walks the pickle opcodes to correctly skip over string/bytes
 /// data that might contain the STOP byte.
+#[cfg(test)]
 fn find_pickle_end(data: &[u8]) -> Result<usize, CodecError> {
     use crate::opcodes::*;
     let mut pos = 0;

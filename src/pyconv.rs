@@ -1780,20 +1780,17 @@ pub fn encode_pyobject_as_pickle(
     Ok(buf)
 }
 
-/// Encode a ZODB record (class + state) directly to concatenated pickle bytes.
-/// Writes both the class pickle and state pickle directly, skipping
-/// all PickleValue intermediate allocations.
-/// Thread-local reusable buffer for encode_zodb_record_direct.
-/// Avoids repeated Vec allocation + growth across calls — the buffer
-/// retains its capacity from previous calls, so subsequent encodes
-/// skip the initial growth phase.
+// Thread-local reusable buffer for encode_zodb_record_direct.
+// Avoids repeated Vec allocation + growth across calls — the buffer
+// retains its capacity from previous calls, so subsequent encodes
+// skip the initial growth phase.
 thread_local! {
     static ENCODE_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    /// Cache of class pickle bytes per (module, name) pair.
-    /// Uses Vec for linear search — with ~6 distinct classes in a typical
-    /// ZODB database, linear search is faster than hashing and avoids
-    /// allocating key strings on every lookup.
+    // Cache of class pickle bytes per (module, name) pair.
+    // Uses Vec for linear search — with ~6 distinct classes in a typical
+    // ZODB database, linear search is faster than hashing and avoids
+    // allocating key strings on every lookup.
     static CLASS_PICKLE_CACHE: std::cell::RefCell<Vec<(String, String, Vec<u8>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }

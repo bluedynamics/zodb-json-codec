@@ -98,7 +98,7 @@ pub fn try_write_instance_typed(
 fn write_datetime(
     w: &mut JsonWriter,
     args: &PickleValue,
-    write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+    _write_val: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
 ) -> Result<bool, CodecError> {
     let tuple_items = match args {
         PickleValue::Tuple(items) => items,

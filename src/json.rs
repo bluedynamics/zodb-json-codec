@@ -19,6 +19,7 @@ pub fn pickle_value_to_json(val: &PickleValue) -> Result<Value, CodecError> {
 /// Like `pickle_value_to_json` but with PG-specific transformations:
 /// - Null-byte sanitization: strings containing `\0` → `{"@ns": base64}`
 /// - Persistent ref compaction: `(oid_bytes, None)` → `{"@ref": "hex_oid"}`
+#[cfg(test)]
 pub fn pickle_value_to_json_pg(val: &PickleValue) -> Result<Value, CodecError> {
     pickle_value_to_json_impl(val, true, true, 0)
 }

@@ -2,6 +2,10 @@
 
 ## 1.6.0 (unreleased)
 
+- Clean up dead code and compiler warnings: gate test-only functions with
+  `#[cfg(test)]`, prefix unused variables, convert doc comments on macros
+  to regular comments
+
 ## 1.5.0 (2026-02-25)
 
 - Direct PickleValue → JSON string writer (`json_writer.rs`), bypassing

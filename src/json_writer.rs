@@ -9,6 +9,7 @@ pub struct JsonWriter {
 }
 
 impl JsonWriter {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self {
             buf: String::new(),
@@ -22,11 +23,13 @@ impl JsonWriter {
     }
 
     /// Consume the writer and return the JSON string.
+    #[cfg(test)]
     pub fn into_string(self) -> String {
         self.buf
     }
 
     /// Borrow the inner buffer (for length checks, etc.).
+    #[cfg(test)]
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.buf
