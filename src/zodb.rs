@@ -10,6 +10,8 @@ use crate::encode::encode_pickle;
 #[cfg(test)]
 use crate::json::{json_to_pickle_value, pickle_value_to_json};
 #[cfg(test)]
+use crate::pyconv;
+#[cfg(test)]
 use serde_json::{json, Value};
 
 /// A ZODB record consists of two concatenated pickles:
@@ -185,17 +187,7 @@ fn encode_zodb_record(mut json_val: Value) -> Result<Vec<u8>, CodecError> {
     // Check for BTree class before moving module/name into Global
     let btree_info = btrees::classify_btree(&module, &name);
 
-    // Encode class pickle as tuple: ((module, name), None)
-    // This is the format produced by ZODB's PersistentPickler and expected
-    // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
-    let class_val = PickleValue::Tuple(vec![
-        PickleValue::Tuple(vec![
-            PickleValue::String(module),
-            PickleValue::String(name),
-        ]),
-        PickleValue::None,
-    ]);
-    let class_bytes = encode_pickle(&class_val)?;
+    let class_bytes = pyconv::build_class_pickle(&module, &name);
 
     // Take ownership of @s to avoid cloning, then restore persistent refs
     let state = json_val

@@ -1790,6 +1790,28 @@ pub fn encode_pyobject_as_pickle(
 thread_local! {
     static ENCODE_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
+    /// Cache of class pickle bytes per (module, name) pair.
+    /// Uses Vec for linear search — with ~6 distinct classes in a typical
+    /// ZODB database, linear search is faster than hashing and avoids
+    /// allocating key strings on every lookup.
+    static CLASS_PICKLE_CACHE: std::cell::RefCell<Vec<(String, String, Vec<u8>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Build the class pickle bytes for a ZODB record: PROTO 2 + ((module, name), None) + STOP.
+/// This is the format produced by ZODB's PersistentPickler and expected
+/// by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
+pub(crate) fn build_class_pickle(module: &str, name: &str) -> Vec<u8> {
+    let cap = 8 + (5 + module.len()) + (5 + name.len());
+    let mut buf = Vec::with_capacity(cap);
+    buf.extend_from_slice(&[PROTO, 2]);
+    write_string(&mut buf, module);
+    write_string(&mut buf, name);
+    buf.push(TUPLE2); // inner tuple: (module, name)
+    buf.push(NONE);
+    buf.push(TUPLE2); // outer tuple: ((module, name), None)
+    buf.push(STOP);
+    buf
 }
 
 pub fn encode_zodb_record_direct(
@@ -1803,24 +1825,17 @@ pub fn encode_zodb_record_direct(
 
         let btree_info = btrees::classify_btree(module, name);
 
-        // Ensure minimum capacity for class pickle + reasonable state estimate.
-        // On first call this allocates; on subsequent calls it's usually a no-op.
-        let min_cap = 18 + module.len() + name.len() + 256;
-        if buf.capacity() < min_cap {
-            let needed = min_cap - buf.len();
-            buf.reserve(needed);
-        }
-
-        // Class pickle: PROTO 2 + ((module, name), None) as tuple + STOP
-        // This is the format produced by ZODB's PersistentPickler and expected
-        // by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
-        buf.extend_from_slice(&[PROTO, 2]);
-        write_string(&mut buf, module);
-        write_string(&mut buf, name);
-        buf.push(TUPLE2);  // inner tuple: (module, name)
-        buf.push(NONE);
-        buf.push(TUPLE2);  // outer tuple: ((module, name), None)
-        buf.push(STOP);
+        // Class pickle: use cached bytes (identical for all records of same class)
+        CLASS_PICKLE_CACHE.with(|cache_cell| {
+            let mut cache = cache_cell.borrow_mut();
+            if let Some((_, _, bytes)) = cache.iter().find(|(m, n, _)| m == module && n == name) {
+                buf.extend_from_slice(bytes);
+            } else {
+                let bytes = build_class_pickle(module, name);
+                buf.extend_from_slice(&bytes);
+                cache.push((module.to_string(), name.to_string(), bytes));
+            }
+        });
 
         // State pickle: PROTO 2 + state opcodes + STOP
         buf.extend_from_slice(&[PROTO, 2]);
@@ -2506,6 +2521,7 @@ fn encode_flat_keys_tuple(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::encode::encode_pickle;
     use crate::types::PickleValue;
 
     #[test]
@@ -2632,5 +2648,54 @@ mod tests {
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);
         assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn test_build_class_pickle_matches_pickle_value_encode() {
+        // Verify that build_class_pickle produces identical bytes to the
+        // PickleValue-based approach for various class names.
+        // Note: build_class_pickle uses PROTO 2 (matching production encode),
+        // encode_pickle uses PROTO 3. Both are valid; we compare after byte 1.
+        let cases = vec![
+            ("persistent.mapping", "PersistentMapping"),
+            ("BTrees.OOBTree", "OOBTree"),
+            ("BTrees.OOBTree", "OOBucket"),
+            ("BTrees.Length", "Length"),
+            ("myapp.models", "Article"),
+            ("a", "B"),  // short names
+            ("", ""),    // empty (edge case)
+        ];
+
+        for (module, name) in cases {
+            let cached = build_class_pickle(module, name);
+
+            // Build the same bytes via PickleValue + encode_pickle
+            let class_val = PickleValue::Tuple(vec![
+                PickleValue::Tuple(vec![
+                    PickleValue::String(module.to_string()),
+                    PickleValue::String(name.to_string()),
+                ]),
+                PickleValue::None,
+            ]);
+            let reference = encode_pickle(&class_val).unwrap();
+
+            // Protocol byte differs (2 vs 3), rest must be identical
+            assert_eq!(cached[0], PROTO);
+            assert_eq!(cached[1], 2);
+            assert_eq!(reference[1], 3);
+            assert_eq!(
+                &cached[2..], &reference[2..],
+                "class pickle body mismatch for ({}, {})",
+                module, name
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_class_pickle_starts_with_proto_ends_with_stop() {
+        let bytes = build_class_pickle("mod", "Cls");
+        assert_eq!(bytes[0], PROTO);
+        assert_eq!(bytes[1], 2);
+        assert_eq!(*bytes.last().unwrap(), STOP);
     }
 }

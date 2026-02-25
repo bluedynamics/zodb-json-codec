@@ -3,6 +3,7 @@ mod decode;
 mod encode;
 mod error;
 mod json;
+mod json_writer;
 mod known_types;
 mod opcodes;
 mod pyconv;
@@ -134,14 +135,7 @@ fn decode_zodb_record_for_pg_json(py: Python<'_>, data: &[u8]) -> PyResult<Py<Py
         let mut refs = Vec::new();
         pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
 
-        let state_json = if let Some(info) = btrees::classify_btree(&module, &name) {
-            btrees::btree_state_to_json(&info, &state_val, &json::pickle_value_to_json_pg)?
-        } else {
-            json::pickle_value_to_json_pg(&state_val)?
-        };
-
-        let json_str = serde_json::to_string(&state_json)
-            .map_err(|e| CodecError::Json(e.to_string()))?;
+        let json_str = json::pickle_value_to_json_string_pg(&state_val, &module, &name)?;
         Ok::<_, PyErr>((module, name, json_str, refs))
     })?;
 

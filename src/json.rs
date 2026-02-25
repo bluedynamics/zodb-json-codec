@@ -1,8 +1,11 @@
+use std::cell::RefCell;
+
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde_json::{json, Map, Value};
 
 use crate::btrees;
 use crate::error::CodecError;
+use crate::json_writer::JsonWriter;
 use crate::known_types;
 use crate::types::{InstanceData, PickleValue};
 
@@ -205,6 +208,381 @@ fn compact_ref_to_json(
     // Fallback: generic ref
     let inner_json = to_json(inner)?;
     Ok(json!({"@ref": inner_json}))
+}
+
+// ===========================================================================
+// Direct JSON string writer path (no serde_json::Value intermediate)
+// ===========================================================================
+
+thread_local! {
+    static JSON_BUF: RefCell<JsonWriter> = RefCell::new(JsonWriter::with_capacity(4096));
+}
+
+/// Convert a PickleValue AST directly to a JSON string for PostgreSQL JSONB.
+///
+/// This is the fast path that eliminates all serde_json::Value allocations.
+/// It handles BTree dispatch internally.
+pub fn pickle_value_to_json_string_pg(
+    val: &PickleValue,
+    module: &str,
+    name: &str,
+) -> Result<String, CodecError> {
+    JSON_BUF.with(|cell| {
+        let mut w = cell.borrow_mut();
+        w.clear();
+
+        if let Some(info) = btrees::classify_btree(module, name) {
+            btrees::btree_state_to_json_writer(&info, val, &write_value_pg_flat, &mut w)?;
+        } else {
+            write_value_pg_depth(&mut w, val, 0)?;
+        }
+
+        Ok(w.take())
+    })
+}
+
+/// Recursive walker: write a PickleValue as PG-compatible JSON to a JsonWriter.
+fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> Result<(), CodecError> {
+    if depth > MAX_DEPTH {
+        return Err(CodecError::InvalidData(
+            "maximum nesting depth exceeded in JSON conversion".to_string(),
+        ));
+    }
+    let recurse =
+        |w: &mut JsonWriter, v: &PickleValue| -> Result<(), CodecError> { write_value_pg_depth(w, v, depth + 1) };
+
+    match val {
+        PickleValue::None => {
+            w.write_null();
+        }
+        PickleValue::Bool(b) => {
+            w.write_bool(*b);
+        }
+        PickleValue::Int(i) => {
+            w.write_i64(*i);
+        }
+        PickleValue::BigInt(bi) => {
+            // {"@bi": "..."}
+            w.begin_object();
+            w.write_key_literal("@bi");
+            w.write_string(&bi.to_string());
+            w.end_object();
+        }
+        PickleValue::Float(f) => {
+            w.write_f64(*f);
+        }
+        PickleValue::String(s) => {
+            if s.contains('\0') {
+                // PG JSONB cannot store \u0000 — base64-encode with @ns marker
+                w.begin_object();
+                w.write_key_literal("@ns");
+                w.write_string_literal(&BASE64.encode(s.as_bytes()));
+                w.end_object();
+            } else {
+                w.write_string(s);
+            }
+        }
+        PickleValue::Bytes(b) => {
+            // {"@b": base64}
+            w.begin_object();
+            w.write_key_literal("@b");
+            w.write_string_literal(&BASE64.encode(b));
+            w.end_object();
+        }
+        PickleValue::List(items) => {
+            w.begin_array();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                recurse(w, item)?;
+            }
+            w.end_array();
+        }
+        PickleValue::Tuple(items) => {
+            // {"@t": [...]}
+            w.begin_object();
+            w.write_key_literal("@t");
+            w.begin_array();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                recurse(w, item)?;
+            }
+            w.end_array();
+            w.end_object();
+        }
+        PickleValue::Dict(pairs) => {
+            let all_string_keys = pairs
+                .iter()
+                .all(|(k, _)| matches!(k, PickleValue::String(_)));
+            if all_string_keys {
+                w.begin_object();
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    if let PickleValue::String(key) = k {
+                        if key.contains('\0') {
+                            let encoded = format!("@ns:{}", BASE64.encode(key.as_bytes()));
+                            w.write_key(&encoded);
+                        } else {
+                            w.write_key(key);
+                        }
+                        recurse(w, v)?;
+                    }
+                }
+                w.end_object();
+            } else {
+                // {"@d": [[k, v], ...]}
+                w.begin_object();
+                w.write_key_literal("@d");
+                w.begin_array();
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    w.begin_array();
+                    recurse(w, k)?;
+                    w.write_comma();
+                    recurse(w, v)?;
+                    w.end_array();
+                }
+                w.end_array();
+                w.end_object();
+            }
+        }
+        PickleValue::Set(items) => {
+            // {"@set": [...]}
+            w.begin_object();
+            w.write_key_literal("@set");
+            w.begin_array();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                recurse(w, item)?;
+            }
+            w.end_array();
+            w.end_object();
+        }
+        PickleValue::FrozenSet(items) => {
+            // {"@fset": [...]}
+            w.begin_object();
+            w.write_key_literal("@fset");
+            w.begin_array();
+            for (i, item) in items.iter().enumerate() {
+                if i > 0 {
+                    w.write_comma();
+                }
+                recurse(w, item)?;
+            }
+            w.end_array();
+            w.end_object();
+        }
+        PickleValue::Global { module, name } => {
+            // {"@cls": ["module", "name"]}
+            w.begin_object();
+            w.write_key_literal("@cls");
+            w.begin_array();
+            w.write_string(module);
+            w.write_comma();
+            w.write_string(name);
+            w.end_array();
+            w.end_object();
+        }
+        PickleValue::Instance(inst) => {
+            let InstanceData {
+                module,
+                name,
+                state,
+                dict_items,
+                list_items,
+            } = inst.as_ref();
+
+            // Try known type handlers first
+            if known_types::try_write_instance_typed(w, module, name, state)? {
+                return Ok(());
+            }
+
+            // BTree handling
+            let has_btree = btrees::classify_btree(module, name);
+
+            if module.is_empty() && name.is_empty() {
+                // {"@inst": state}
+                w.begin_object();
+                w.write_key_literal("@inst");
+                if let Some(info) = &has_btree {
+                    btrees::btree_state_to_json_writer(info, state, &recurse, w)?;
+                } else {
+                    recurse(w, state)?;
+                }
+                w.end_object();
+            } else {
+                // {"@cls": [mod, name], "@s": state, ...}
+                w.begin_object();
+                w.write_key_literal("@cls");
+                w.begin_array();
+                w.write_string(module);
+                w.write_comma();
+                w.write_string(name);
+                w.end_array();
+                w.write_comma();
+                w.write_key_literal("@s");
+                if let Some(info) = &has_btree {
+                    btrees::btree_state_to_json_writer(info, state, &recurse, w)?;
+                } else {
+                    recurse(w, state)?;
+                }
+                if let Some(pairs) = dict_items {
+                    w.write_comma();
+                    w.write_key_literal("@items");
+                    w.begin_array();
+                    for (i, (k, v)) in pairs.iter().enumerate() {
+                        if i > 0 {
+                            w.write_comma();
+                        }
+                        w.begin_array();
+                        recurse(w, k)?;
+                        w.write_comma();
+                        recurse(w, v)?;
+                        w.end_array();
+                    }
+                    w.end_array();
+                }
+                if let Some(items) = list_items {
+                    w.write_comma();
+                    w.write_key_literal("@appends");
+                    w.begin_array();
+                    for (i, item) in items.iter().enumerate() {
+                        if i > 0 {
+                            w.write_comma();
+                        }
+                        recurse(w, item)?;
+                    }
+                    w.end_array();
+                }
+                w.end_object();
+            }
+        }
+        PickleValue::PersistentRef(inner) => {
+            // Compact ref: always use compact mode for PG path
+            write_compact_ref_pg(w, inner, &recurse)?;
+        }
+        PickleValue::Reduce {
+            callable,
+            args,
+            dict_items,
+            list_items,
+        } => {
+            // Try known types first
+            if known_types::try_write_reduce_typed(w, callable, args, &recurse)? {
+                return Ok(());
+            }
+            // Fallback: {"@reduce": {"callable": ..., "args": ..., ...}}
+            w.begin_object();
+            w.write_key_literal("@reduce");
+            w.begin_object();
+            w.write_key_literal("callable");
+            recurse(w, callable)?;
+            w.write_comma();
+            w.write_key_literal("args");
+            recurse(w, args)?;
+            if let Some(pairs) = dict_items {
+                w.write_comma();
+                w.write_key_literal("items");
+                w.begin_array();
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    w.begin_array();
+                    recurse(w, k)?;
+                    w.write_comma();
+                    recurse(w, v)?;
+                    w.end_array();
+                }
+                w.end_array();
+            }
+            if let Some(items) = list_items {
+                w.write_comma();
+                w.write_key_literal("appends");
+                w.begin_array();
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        w.write_comma();
+                    }
+                    recurse(w, item)?;
+                }
+                w.end_array();
+            }
+            w.end_object();
+            w.end_object();
+        }
+        PickleValue::RawPickle(data) => {
+            // {"@pkl": base64}
+            w.begin_object();
+            w.write_key_literal("@pkl");
+            w.write_string_literal(&BASE64.encode(data));
+            w.end_object();
+        }
+    }
+    Ok(())
+}
+
+/// Wrapper for BTree callbacks — they take (w, val) not (w, val, depth).
+fn write_value_pg_flat(w: &mut JsonWriter, val: &PickleValue) -> Result<(), CodecError> {
+    write_value_pg_depth(w, val, 0)
+}
+
+/// Write a compact persistent ref for PG path.
+fn write_compact_ref_pg(
+    w: &mut JsonWriter,
+    inner: &PickleValue,
+    recurse: &dyn Fn(&mut JsonWriter, &PickleValue) -> Result<(), CodecError>,
+) -> Result<(), CodecError> {
+    if let PickleValue::Tuple(items) = inner {
+        if items.len() == 2 {
+            if let PickleValue::Bytes(oid) = &items[0] {
+                let hex = hex::encode(oid);
+                match &items[1] {
+                    PickleValue::None => {
+                        // {"@ref": "hex_oid"}
+                        w.begin_object();
+                        w.write_key_literal("@ref");
+                        w.write_string_literal(&hex);
+                        w.end_object();
+                        return Ok(());
+                    }
+                    PickleValue::Global { module, name } => {
+                        let class_path = if module.is_empty() {
+                            name.clone()
+                        } else {
+                            format!("{module}.{name}")
+                        };
+                        // {"@ref": ["hex_oid", "class_path"]}
+                        w.begin_object();
+                        w.write_key_literal("@ref");
+                        w.begin_array();
+                        w.write_string_literal(&hex);
+                        w.write_comma();
+                        w.write_string(&class_path);
+                        w.end_array();
+                        w.end_object();
+                        return Ok(());
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // Fallback: generic ref
+    w.begin_object();
+    w.write_key_literal("@ref");
+    recurse(w, inner)?;
+    w.end_object();
+    Ok(())
 }
 
 /// Convert a serde_json Value back to a PickleValue AST.
@@ -692,5 +1070,797 @@ mod tests {
             pg_json,
             json!({"@ref": ["0000000000000001", "SomeClass"]})
         );
+    }
+
+    // ── Direct JSON writer path tests ────────────────────────────────
+
+    /// Helper: compare old path (serde_json::Value → to_string) vs new path (direct writer).
+    /// Compares via parsed serde_json::Value since key order may differ (serde_json
+    /// sorts alphabetically, direct writer preserves insertion order — both are valid JSON).
+    fn assert_pg_paths_match(val: &PickleValue, module: &str, name: &str) {
+        // Old path
+        let state_json = if let Some(info) = crate::btrees::classify_btree(module, name) {
+            crate::btrees::btree_state_to_json(&info, val, &pickle_value_to_json_pg).unwrap()
+        } else {
+            pickle_value_to_json_pg(val).unwrap()
+        };
+
+        // New path
+        let new_str = pickle_value_to_json_string_pg(val, module, name).unwrap();
+
+        // Parse new_str back to Value for order-insensitive comparison
+        let new_val: Value = serde_json::from_str(&new_str).unwrap_or_else(|e| {
+            panic!("new path produced invalid JSON: {e}\nJSON: {new_str}")
+        });
+
+        assert_eq!(state_json, new_val, "PG paths differ for module={module}, name={name}\nold: {}\nnew: {new_str}", serde_json::to_string(&state_json).unwrap());
+    }
+
+    // -- Primitives --
+
+    #[test]
+    fn test_direct_none() {
+        assert_pg_paths_match(&PickleValue::None, "", "");
+    }
+
+    #[test]
+    fn test_direct_bool() {
+        assert_pg_paths_match(&PickleValue::Bool(true), "", "");
+        assert_pg_paths_match(&PickleValue::Bool(false), "", "");
+    }
+
+    #[test]
+    fn test_direct_int() {
+        assert_pg_paths_match(&PickleValue::Int(42), "", "");
+        assert_pg_paths_match(&PickleValue::Int(-1), "", "");
+        assert_pg_paths_match(&PickleValue::Int(0), "", "");
+        assert_pg_paths_match(&PickleValue::Int(i64::MAX), "", "");
+        assert_pg_paths_match(&PickleValue::Int(i64::MIN), "", "");
+    }
+
+    #[test]
+    fn test_direct_bigint() {
+        let bi = num_bigint::BigInt::from(1234567890123456789_i128);
+        assert_pg_paths_match(&PickleValue::BigInt(bi), "", "");
+    }
+
+    #[test]
+    fn test_direct_float() {
+        assert_pg_paths_match(&PickleValue::Float(3.14), "", "");
+        assert_pg_paths_match(&PickleValue::Float(0.0), "", "");
+        assert_pg_paths_match(&PickleValue::Float(-1.5), "", "");
+        assert_pg_paths_match(&PickleValue::Float(f64::NAN), "", "");
+        assert_pg_paths_match(&PickleValue::Float(f64::INFINITY), "", "");
+        assert_pg_paths_match(&PickleValue::Float(f64::NEG_INFINITY), "", "");
+    }
+
+    #[test]
+    fn test_direct_string() {
+        assert_pg_paths_match(&PickleValue::String("hello".into()), "", "");
+        assert_pg_paths_match(&PickleValue::String("".into()), "", "");
+        assert_pg_paths_match(&PickleValue::String("日本語".into()), "", "");
+    }
+
+    #[test]
+    fn test_direct_string_with_escapes() {
+        assert_pg_paths_match(&PickleValue::String("a\"b\\c\nd\re\tf".into()), "", "");
+    }
+
+    #[test]
+    fn test_direct_string_null_byte() {
+        assert_pg_paths_match(&PickleValue::String("hello\0world".into()), "", "");
+    }
+
+    #[test]
+    fn test_direct_string_control_chars() {
+        assert_pg_paths_match(&PickleValue::String("\x01\x1f".into()), "", "");
+    }
+
+    #[test]
+    fn test_direct_bytes() {
+        assert_pg_paths_match(&PickleValue::Bytes(vec![1, 2, 3, 255]), "", "");
+        assert_pg_paths_match(&PickleValue::Bytes(vec![]), "", "");
+    }
+
+    // -- Containers --
+
+    #[test]
+    fn test_direct_list() {
+        assert_pg_paths_match(
+            &PickleValue::List(vec![PickleValue::Int(1), PickleValue::String("x".into())]),
+            "",
+            "",
+        );
+        assert_pg_paths_match(&PickleValue::List(vec![]), "", "");
+    }
+
+    #[test]
+    fn test_direct_tuple() {
+        assert_pg_paths_match(
+            &PickleValue::Tuple(vec![PickleValue::Int(1), PickleValue::Bool(true)]),
+            "",
+            "",
+        );
+        assert_pg_paths_match(&PickleValue::Tuple(vec![]), "", "");
+    }
+
+    #[test]
+    fn test_direct_dict_string_keys() {
+        assert_pg_paths_match(
+            &PickleValue::Dict(vec![
+                (PickleValue::String("a".into()), PickleValue::Int(1)),
+                (PickleValue::String("b".into()), PickleValue::Int(2)),
+            ]),
+            "",
+            "",
+        );
+    }
+
+    #[test]
+    fn test_direct_dict_null_key() {
+        assert_pg_paths_match(
+            &PickleValue::Dict(vec![(
+                PickleValue::String("key\0null".into()),
+                PickleValue::Int(42),
+            )]),
+            "",
+            "",
+        );
+    }
+
+    #[test]
+    fn test_direct_dict_nonstring_keys() {
+        assert_pg_paths_match(
+            &PickleValue::Dict(vec![
+                (PickleValue::Int(1), PickleValue::String("a".into())),
+                (PickleValue::Int(2), PickleValue::String("b".into())),
+            ]),
+            "",
+            "",
+        );
+    }
+
+    #[test]
+    fn test_direct_dict_empty() {
+        assert_pg_paths_match(&PickleValue::Dict(vec![]), "", "");
+    }
+
+    #[test]
+    fn test_direct_set() {
+        assert_pg_paths_match(
+            &PickleValue::Set(vec![PickleValue::Int(1), PickleValue::Int(2)]),
+            "",
+            "",
+        );
+    }
+
+    #[test]
+    fn test_direct_frozenset() {
+        assert_pg_paths_match(
+            &PickleValue::FrozenSet(vec![PickleValue::Int(1), PickleValue::Int(2)]),
+            "",
+            "",
+        );
+    }
+
+    // -- Globals, Instances, Refs --
+
+    #[test]
+    fn test_direct_global() {
+        assert_pg_paths_match(
+            &PickleValue::Global {
+                module: "mymod".into(),
+                name: "MyClass".into(),
+            },
+            "",
+            "",
+        );
+    }
+
+    #[test]
+    fn test_direct_instance() {
+        let inst = PickleValue::Instance(Box::new(InstanceData {
+            module: "myapp".into(),
+            name: "MyClass".into(),
+            state: Box::new(PickleValue::Dict(vec![(
+                PickleValue::String("x".into()),
+                PickleValue::Int(42),
+            )])),
+            dict_items: None,
+            list_items: None,
+        }));
+        assert_pg_paths_match(&inst, "", "");
+    }
+
+    #[test]
+    fn test_direct_instance_with_dict_items() {
+        let inst = PickleValue::Instance(Box::new(InstanceData {
+            module: "collections".into(),
+            name: "OrderedDict".into(),
+            state: Box::new(PickleValue::None),
+            dict_items: Some(Box::new(vec![
+                (PickleValue::String("a".into()), PickleValue::Int(1)),
+            ])),
+            list_items: None,
+        }));
+        assert_pg_paths_match(&inst, "", "");
+    }
+
+    #[test]
+    fn test_direct_instance_with_list_items() {
+        let inst = PickleValue::Instance(Box::new(InstanceData {
+            module: "mymod".into(),
+            name: "MyList".into(),
+            state: Box::new(PickleValue::None),
+            dict_items: None,
+            list_items: Some(Box::new(vec![PickleValue::Int(10)])),
+        }));
+        assert_pg_paths_match(&inst, "", "");
+    }
+
+    #[test]
+    fn test_direct_persistent_ref_oid_only() {
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 3]),
+            PickleValue::None,
+        ])));
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_persistent_ref_with_class() {
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 5]),
+            PickleValue::Global {
+                module: "myapp.models".into(),
+                name: "Document".into(),
+            },
+        ])));
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_persistent_ref_fallback() {
+        // Non-standard ref: just an int
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Int(42)));
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    // -- Known types --
+
+    fn make_reduce(module: &str, name: &str, args: PickleValue) -> PickleValue {
+        PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global {
+                module: module.into(),
+                name: name.into(),
+            }),
+            args: Box::new(args),
+            dict_items: None,
+            list_items: None,
+        }
+    }
+
+    #[test]
+    fn test_direct_datetime_naive() {
+        let bytes = vec![0x07, 0xE9, 6, 15, 12, 0, 0, 0, 0, 0];
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_with_microseconds() {
+        let us: u32 = 123456;
+        let bytes = vec![
+            0x07, 0xE9, 6, 15, 12, 30, 45,
+            ((us >> 16) & 0xff) as u8,
+            ((us >> 8) & 0xff) as u8,
+            (us & 0xff) as u8,
+        ];
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_utc() {
+        let bytes = vec![0x07, 0xE9, 1, 1, 0, 0, 0, 0, 0, 0];
+        let tz = make_reduce(
+            "datetime",
+            "timezone",
+            PickleValue::Tuple(vec![make_reduce(
+                "datetime",
+                "timedelta",
+                PickleValue::Tuple(vec![
+                    PickleValue::Int(0),
+                    PickleValue::Int(0),
+                    PickleValue::Int(0),
+                ]),
+            )]),
+        );
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_offset() {
+        let bytes = vec![0x07, 0xE9, 1, 1, 0, 0, 0, 0, 0, 0];
+        let tz = make_reduce(
+            "datetime",
+            "timezone",
+            PickleValue::Tuple(vec![make_reduce(
+                "datetime",
+                "timedelta",
+                PickleValue::Tuple(vec![
+                    PickleValue::Int(0),
+                    PickleValue::Int(19800), // +05:30
+                    PickleValue::Int(0),
+                ]),
+            )]),
+        );
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_negative_offset() {
+        let bytes = vec![0x07, 0xE9, 1, 1, 0, 0, 0, 0, 0, 0];
+        let tz = make_reduce(
+            "datetime",
+            "timezone",
+            PickleValue::Tuple(vec![make_reduce(
+                "datetime",
+                "timedelta",
+                PickleValue::Tuple(vec![
+                    PickleValue::Int(0),
+                    PickleValue::Int(-18000), // -05:00
+                    PickleValue::Int(0),
+                ]),
+            )]),
+        );
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_pytz_utc() {
+        let bytes = vec![0x07, 0xE9, 1, 1, 0, 0, 0, 0, 0, 0];
+        let tz = make_reduce("pytz", "_UTC", PickleValue::Tuple(vec![]));
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_datetime_pytz_named() {
+        let bytes = vec![0x07, 0xE9, 1, 1, 0, 0, 0, 0, 0, 0];
+        let tz = make_reduce(
+            "pytz",
+            "_p",
+            PickleValue::Tuple(vec![
+                PickleValue::String("US/Eastern".into()),
+                PickleValue::Int(-18000),
+                PickleValue::Int(0),
+                PickleValue::String("EST".into()),
+            ]),
+        );
+        let val = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_date() {
+        let bytes = vec![0x07, 0xE9, 6, 15];
+        let val = make_reduce(
+            "datetime",
+            "date",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_time_naive() {
+        let bytes = vec![12, 30, 45, 0, 0, 0];
+        let val = make_reduce(
+            "datetime",
+            "time",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_time_with_microseconds() {
+        let us: u32 = 500000;
+        let bytes = vec![
+            12, 30, 45,
+            ((us >> 16) & 0xff) as u8,
+            ((us >> 8) & 0xff) as u8,
+            (us & 0xff) as u8,
+        ];
+        let val = make_reduce(
+            "datetime",
+            "time",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_time_with_offset() {
+        let bytes = vec![12, 30, 45, 0, 0, 0];
+        let tz = make_reduce(
+            "datetime",
+            "timezone",
+            PickleValue::Tuple(vec![make_reduce(
+                "datetime",
+                "timedelta",
+                PickleValue::Tuple(vec![
+                    PickleValue::Int(0),
+                    PickleValue::Int(3600),
+                    PickleValue::Int(0),
+                ]),
+            )]),
+        );
+        let val = make_reduce(
+            "datetime",
+            "time",
+            PickleValue::Tuple(vec![PickleValue::Bytes(bytes), tz]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_timedelta() {
+        let val = make_reduce(
+            "datetime",
+            "timedelta",
+            PickleValue::Tuple(vec![
+                PickleValue::Int(7),
+                PickleValue::Int(3600),
+                PickleValue::Int(500000),
+            ]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_decimal() {
+        let val = make_reduce(
+            "decimal",
+            "Decimal",
+            PickleValue::Tuple(vec![PickleValue::String("3.14159".into())]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_set_reduce() {
+        let val = make_reduce(
+            "builtins",
+            "set",
+            PickleValue::Tuple(vec![PickleValue::List(vec![
+                PickleValue::Int(1),
+                PickleValue::Int(2),
+            ])]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_frozenset_reduce() {
+        let val = make_reduce(
+            "builtins",
+            "frozenset",
+            PickleValue::Tuple(vec![PickleValue::List(vec![
+                PickleValue::Int(1),
+            ])]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_uuid() {
+        let int_val: u128 = 0x12345678_1234_5678_1234_5678_1234_5678;
+        let bi = num_bigint::BigInt::from(int_val);
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "uuid".into(),
+            name: "UUID".into(),
+            state: Box::new(PickleValue::Dict(vec![(
+                PickleValue::String("int".into()),
+                PickleValue::BigInt(bi),
+            )])),
+            dict_items: None,
+            list_items: None,
+        }));
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_uuid_small_int() {
+        // UUID with int fitting in i64
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "uuid".into(),
+            name: "UUID".into(),
+            state: Box::new(PickleValue::Dict(vec![(
+                PickleValue::String("int".into()),
+                PickleValue::Int(12345),
+            )])),
+            dict_items: None,
+            list_items: None,
+        }));
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    // -- Unknown REDUCE (fallback) --
+
+    #[test]
+    fn test_direct_unknown_reduce() {
+        let val = make_reduce(
+            "mymod",
+            "myfunc",
+            PickleValue::Tuple(vec![PickleValue::Int(1)]),
+        );
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_reduce_with_dict_items() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global {
+                module: "collections".into(),
+                name: "OrderedDict".into(),
+            }),
+            args: Box::new(PickleValue::Tuple(vec![])),
+            dict_items: Some(Box::new(vec![
+                (PickleValue::String("x".into()), PickleValue::Int(1)),
+            ])),
+            list_items: None,
+        };
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_reduce_with_list_items() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global {
+                module: "mymod".into(),
+                name: "MyList".into(),
+            }),
+            args: Box::new(PickleValue::Tuple(vec![])),
+            dict_items: None,
+            list_items: Some(Box::new(vec![PickleValue::Int(5)])),
+        };
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    // -- RawPickle --
+
+    #[test]
+    fn test_direct_raw_pickle() {
+        let val = PickleValue::RawPickle(vec![0x80, 0x03, 0x4e, 0x2e]);
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    // -- BTree types --
+
+    #[test]
+    fn test_direct_btree_empty() {
+        assert_pg_paths_match(&PickleValue::None, "BTrees.OOBTree", "OOBTree");
+    }
+
+    #[test]
+    fn test_direct_btree_small() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![PickleValue::Tuple(
+            vec![PickleValue::Tuple(vec![
+                PickleValue::String("a".into()),
+                PickleValue::Int(1),
+                PickleValue::String("b".into()),
+                PickleValue::Int(2),
+            ])],
+        )])]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBTree");
+    }
+
+    #[test]
+    fn test_direct_btree_bucket() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![
+            PickleValue::String("x".into()),
+            PickleValue::Int(10),
+            PickleValue::String("y".into()),
+            PickleValue::Int(20),
+        ])]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBucket");
+    }
+
+    #[test]
+    fn test_direct_btree_set() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![
+            PickleValue::String("a".into()),
+            PickleValue::String("b".into()),
+        ])]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOSet");
+    }
+
+    #[test]
+    fn test_direct_btree_treeset() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![PickleValue::Tuple(
+            vec![PickleValue::Tuple(vec![
+                PickleValue::Int(1),
+                PickleValue::Int(2),
+                PickleValue::Int(3),
+            ])],
+        )])]);
+        assert_pg_paths_match(&state, "BTrees.IIBTree", "IITreeSet");
+    }
+
+    #[test]
+    fn test_direct_btree_linked_bucket() {
+        let state = PickleValue::Tuple(vec![
+            PickleValue::Tuple(vec![
+                PickleValue::String("a".into()),
+                PickleValue::Int(1),
+            ]),
+            PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+                PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 3]),
+                PickleValue::None,
+            ]))),
+        ]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBucket");
+    }
+
+    #[test]
+    fn test_direct_btree_large_with_refs() {
+        let ref0 = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 2]),
+            PickleValue::None,
+        ])));
+        let ref1 = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 3]),
+            PickleValue::None,
+        ])));
+        let first = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 2]),
+            PickleValue::None,
+        ])));
+        let state = PickleValue::Tuple(vec![
+            PickleValue::Tuple(vec![ref0, PickleValue::String("sep".into()), ref1]),
+            first,
+        ]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBTree");
+    }
+
+    // -- Nested/complex structures --
+
+    #[test]
+    fn test_direct_nested_dict() {
+        let inner = PickleValue::Dict(vec![
+            (PickleValue::String("x".into()), PickleValue::Int(1)),
+        ]);
+        let outer = PickleValue::Dict(vec![
+            (PickleValue::String("nested".into()), inner),
+            (PickleValue::String("flat".into()), PickleValue::Bool(true)),
+        ]);
+        assert_pg_paths_match(&outer, "", "");
+    }
+
+    #[test]
+    fn test_direct_mixed_types_in_list() {
+        let val = PickleValue::List(vec![
+            PickleValue::None,
+            PickleValue::Bool(true),
+            PickleValue::Int(42),
+            PickleValue::Float(3.14),
+            PickleValue::String("text".into()),
+            PickleValue::Bytes(vec![1, 2, 3]),
+            PickleValue::Tuple(vec![PickleValue::Int(1)]),
+        ]);
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_deeply_nested() {
+        // 10 levels of nesting
+        let mut val = PickleValue::Int(42);
+        for i in 0..10 {
+            val = PickleValue::Dict(vec![(
+                PickleValue::String(format!("level_{i}")),
+                val,
+            )]);
+        }
+        assert_pg_paths_match(&val, "", "");
+    }
+
+    #[test]
+    fn test_direct_persistent_mapping_like() {
+        // Simulates a typical ZODB PersistentMapping state
+        let state = PickleValue::Dict(vec![
+            (PickleValue::String("title".into()), PickleValue::String("My Document".into())),
+            (PickleValue::String("count".into()), PickleValue::Int(42)),
+            (PickleValue::String("active".into()), PickleValue::Bool(true)),
+            (PickleValue::String("tags".into()), PickleValue::List(vec![
+                PickleValue::String("tag1".into()),
+                PickleValue::String("tag2".into()),
+            ])),
+            (PickleValue::String("ref".into()), PickleValue::PersistentRef(Box::new(
+                PickleValue::Tuple(vec![
+                    PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 7]),
+                    PickleValue::None,
+                ]),
+            ))),
+        ]);
+        assert_pg_paths_match(&state, "persistent.mapping", "PersistentMapping");
+    }
+
+    #[test]
+    fn test_direct_state_with_datetime_and_ref() {
+        // Realistic ZODB state: dict with datetime field + persistent ref
+        let dt_bytes = vec![0x07, 0xE9, 6, 15, 12, 0, 0, 0, 0, 0];
+        let dt = make_reduce(
+            "datetime",
+            "datetime",
+            PickleValue::Tuple(vec![PickleValue::Bytes(dt_bytes)]),
+        );
+        let state = PickleValue::Dict(vec![
+            (PickleValue::String("created".into()), dt),
+            (PickleValue::String("name".into()), PickleValue::String("test".into())),
+        ]);
+        assert_pg_paths_match(&state, "", "");
+    }
+
+    // -- Empty bucket BTree --
+
+    #[test]
+    fn test_direct_btree_empty_bucket() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![])]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBucket");
+    }
+
+    #[test]
+    fn test_direct_btree_empty_inline() {
+        let state = PickleValue::Tuple(vec![PickleValue::Tuple(vec![PickleValue::Tuple(
+            vec![PickleValue::Tuple(vec![])],
+        )])]);
+        assert_pg_paths_match(&state, "BTrees.OOBTree", "OOBTree");
+    }
+
+    // -- Instance inside BTree context --
+
+    #[test]
+    fn test_direct_instance_empty_module_name() {
+        let inst = PickleValue::Instance(Box::new(InstanceData {
+            module: "".into(),
+            name: "".into(),
+            state: Box::new(PickleValue::Int(42)),
+            dict_items: None,
+            list_items: None,
+        }));
+        assert_pg_paths_match(&inst, "", "");
     }
 }
