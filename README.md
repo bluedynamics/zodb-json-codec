@@ -4,149 +4,51 @@ Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.
 
 Converts ZODB pickle records into human-readable, JSONB-queryable JSON
 while maintaining full roundtrip fidelity. Designed as the codec layer for
-a RelStorage JSONB storage backend.
+[zodb-pgjsonb](https://github.com/bluedynamics/zodb-pgjsonb), a PostgreSQL
+JSONB storage backend for ZODB.
 
-## Why?
+**Key capabilities:**
 
-ZODB stores object state as Python pickle bytes. This is compact and fast,
-but completely opaque to SQL queries. By transcoding pickle to JSON, we
-enable PostgreSQL JSONB queries on ZODB object attributes — without changing
-the application code.
-
-The codec does **more work** than pickle (2 conversions + type-aware
-transformation vs pickle's single C-extension pass), yet the Rust
-implementation matches or beats CPython pickle on most operations.
+- Full roundtrip fidelity: encode to JSON and back produces identical pickle bytes
+- Human-readable JSON with compact type markers (`@dt`, `@ref`, `@kv`, ...)
+- JSONB-queryable output for PostgreSQL
+- Faster than CPython's C pickle extension on most operations
+- GIL released during Rust phases for multi-threaded Python
+- Escape hatch (`@pkl`) ensures any pickle data roundtrips safely
 
 ## Installation
 
-Requires Rust toolchain and [maturin](https://www.maturin.rs/):
-
 ```bash
-pip install maturin
-maturin develop          # debug build
-maturin develop --release  # optimized build
+pip install zodb-json-codec
 ```
 
-## Python API
+For building from source, see the
+[documentation](https://bluedynamics.github.io/zodb-json-codec/how-to/build-from-source.html).
+
+## Quick Example
 
 ```python
 import zodb_json_codec
 
 # ZODB records (two concatenated pickles: class + state)
-record: dict = zodb_json_codec.decode_zodb_record(data)
+record = zodb_json_codec.decode_zodb_record(data)
 # -> {"@cls": ["myapp.models", "Document"], "@s": {"title": "Hello", ...}}
-data: bytes = zodb_json_codec.encode_zodb_record(record)
-
-# Single-pass decode for PostgreSQL storage (decode + refs + null-byte sanitization)
-class_mod, class_name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(data)
-
-# Standalone pickle <-> Python dict
-result: dict = zodb_json_codec.pickle_to_dict(pickle_bytes)
-pickle_bytes: bytes = zodb_json_codec.dict_to_pickle(result)
+data = zodb_json_codec.encode_zodb_record(record)
 
 # Standalone pickle <-> JSON string
-json_str: str = zodb_json_codec.pickle_to_json(pickle_bytes)
-pickle_bytes: bytes = zodb_json_codec.json_to_pickle(json_str)
+json_str = zodb_json_codec.pickle_to_json(pickle_bytes)
+pickle_bytes = zodb_json_codec.json_to_pickle(json_str)
 ```
 
-## JSON Format
+## Documentation
 
-The codec uses compact marker keys (`@t`, `@b`, `@dt`, etc.) to represent
-Python types that have no direct JSON equivalent. All markers are designed
-for roundtrip safety: encode to JSON and decode back produces identical
-pickle bytes.
+Full documentation is available at
+**https://bluedynamics.github.io/zodb-json-codec/**
 
-### Quick Reference
-
-| Python Type | Marker | JSON Example |
-|---|---|---|
-| `tuple` | `@t` | `{"@t": [1, 2, 3]}` |
-| `bytes` | `@b` | `{"@b": "AQID"}` (base64) |
-| `set` | `@set` | `{"@set": [1, 2, 3]}` |
-| `frozenset` | `@fset` | `{"@fset": [1, 2, 3]}` |
-| `datetime` | `@dt` | `{"@dt": "2025-06-15T12:00:00"}` |
-| `date` | `@date` | `{"@date": "2025-06-15"}` |
-| `time` | `@time` | `{"@time": "12:30:45"}` |
-| `timedelta` | `@td` | `{"@td": [7, 3600, 0]}` |
-| `Decimal` | `@dec` | `{"@dec": "3.14"}` |
-| `UUID` | `@uuid` | `{"@uuid": "12345678-..."}` |
-| Persistent ref | `@ref` | `{"@ref": "0000000000000003"}` |
-| BTree map data | `@kv` | `{"@kv": [["a", 1], ["b", 2]]}` |
-| BTree set data | `@ks` | `{"@ks": [1, 2, 3]}` |
-| Unknown type | `@pkl` | `{"@pkl": "base64..."}` (escape hatch) |
-
-For the complete type mapping reference, see [TYPE_MAPPING.md](https://github.com/bluedynamics/zodb-json-codec/blob/main/TYPE_MAPPING.md).
-
-## Performance
-
-Benchmarked against CPython's `pickle` module (C extension) on synthetic
-ZODB records (`maturin develop --release`). The codec does fundamentally
-more work (2 conversions + type transformation) yet beats pickle on most
-categories:
-
-| Operation | Best | Worst | Typical ZODB |
-|---|---|---|---|
-| Decode | **2.1x faster** | 1.1x slower | 1.5x faster |
-| Encode | **7.5x faster** | 1.7x faster | 5.0x faster |
-| Roundtrip | **3.2x faster** | 1.1x faster | 2.0x faster |
-
-On a generated Wikipedia database (1,692 records, 6 types, 0 errors):
-decode is near parity (1.1x median), encode is **3.3x faster** (median).
-
-For detailed numbers and optimization history, see [BENCHMARKS.md](https://github.com/bluedynamics/zodb-json-codec/blob/main/BENCHMARKS.md).
-
-## Development
-
-### Prerequisites
-
-- Rust 1.70+ (`rustup` recommended)
-- Python 3.10+
-- maturin (`pip install maturin` or `uv tool install maturin`)
-
-### Build & Test
-
-```bash
-# Rust unit tests (75 tests)
-cargo test
-
-# Build Python extension (debug)
-maturin develop
-
-# Python integration tests (149 tests)
-pytest tests/ -v
-
-# Build optimized for benchmarking
-maturin develop --release
-
-# Run benchmarks
-python benchmarks/bench.py synthetic --iterations 1000
-python benchmarks/bench.py generate  # create benchmark FileStorage
-python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-```
-
-### Project Structure
-
-```
-src/
-  lib.rs          # PyO3 module: Python-facing functions
-  decode.rs       # Pickle bytes -> PickleValue AST
-  encode.rs       # PickleValue AST -> pickle bytes
-  pyconv.rs       # Direct PickleValue <-> PyObject (fast path)
-  json.rs         # PickleValue <-> serde_json (JSON string path)
-  known_types.rs  # Known REDUCE handlers (datetime, Decimal, etc.)
-  btrees.rs       # BTree state flattening/reconstruction
-  zodb.rs         # ZODB two-pickle record handling
-  types.rs        # PickleValue enum definition
-  opcodes.rs      # Pickle opcode constants
-  error.rs        # Error types
-python/
-  zodb_json_codec/
-    __init__.py   # Re-exports from Rust extension
-tests/
-  test_*.py       # Python integration tests
-benchmarks/
-  bench.py        # Performance benchmarks vs CPython pickle
-```
+- [Tutorials](https://bluedynamics.github.io/zodb-json-codec/tutorials/) — Getting started, working with ZODB records
+- [How-To Guides](https://bluedynamics.github.io/zodb-json-codec/how-to/) — Install, integrate, benchmark, build from source
+- [Reference](https://bluedynamics.github.io/zodb-json-codec/reference/) — Python API, JSON format, BTree format, project structure
+- [Explanation](https://bluedynamics.github.io/zodb-json-codec/explanation/) — Architecture, performance, optimization journal, security
 
 ## Source Code and Contributions
 
