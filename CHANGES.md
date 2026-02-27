@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.6.0 (unreleased)
+## 1.6.0 (2026-02-27)
 
 - CRITICAL!
   Fix shared reference data loss in pickle memo for mutable containers:
