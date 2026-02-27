@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.6.1 (2026-02-27)
+
+- CRITICAL Linux!
+  The 1.6.0 build failed for Linux and wheels were not uploaded!
+
 ## 1.6.0 (2026-02-27)
 
 - CRITICAL!
