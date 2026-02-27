@@ -2,6 +2,13 @@
 
 ## 1.6.0 (unreleased)
 
+- CRITICAL!
+  Fix shared reference data loss in pickle memo for mutable containers:
+  BINPUT stored empty snapshot before SETITEMS/APPENDS populated the
+  container, causing BINGET to return stale empty values [#18]
+- Optimize memo sync with lazy dirty flags: mark memo entries as stale
+  after mutations, resolve only on BINGET read or stack pop (eliminates
+  unnecessary clones for memo entries never re-read)
 - Clean up dead code and compiler warnings: gate test-only functions with
   `#[cfg(test)]`, prefix unused variables, convert doc comments on macros
   to regular comments
