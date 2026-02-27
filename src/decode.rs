@@ -35,6 +35,13 @@ struct Decoder<'a> {
     memo: Vec<PickleValue>,
     /// Metastack for MARK-based operations (saves/restores stack at MARK)
     metastack: Vec<Vec<PickleValue>>,
+    /// Tracks which memo indices are bound to each stack slot (parallel to stack).
+    /// When BINPUT stores from stack top, the memo index is recorded here.
+    /// After in-place mutations (SETITEMS, APPENDS, etc.), stale memo entries
+    /// are updated via sync_memo_top().
+    stack_memo: Vec<Vec<usize>>,
+    /// Saved stack_memo during MARK (parallel to metastack).
+    meta_stack_memo: Vec<Vec<Vec<usize>>>,
 }
 
 impl<'a> Decoder<'a> {
@@ -45,6 +52,8 @@ impl<'a> Decoder<'a> {
             stack: Vec::with_capacity(16),
             memo: Vec::with_capacity(16),
             metastack: Vec::with_capacity(4),
+            stack_memo: Vec::with_capacity(16),
+            meta_stack_memo: Vec::with_capacity(4),
         }
     }
 
@@ -244,6 +253,8 @@ impl<'a> Decoder<'a> {
                     // Save current stack, start a new one
                     let old_stack = std::mem::take(&mut self.stack);
                     self.metastack.push(old_stack);
+                    let old_sm = std::mem::take(&mut self.stack_memo);
+                    self.meta_stack_memo.push(old_sm);
                     // Don't push Mark itself; everything above the mark
                     // is captured by the current stack being empty
                 }
@@ -299,6 +310,7 @@ impl<'a> Decoder<'a> {
                             ));
                         }
                     }
+                    self.sync_memo_top()?;
                 }
                 APPENDS => {
                     let items = self.pop_mark()?;
@@ -323,6 +335,7 @@ impl<'a> Decoder<'a> {
                             ));
                         }
                     }
+                    self.sync_memo_top()?;
                 }
 
                 // -- Dict --
@@ -356,6 +369,7 @@ impl<'a> Decoder<'a> {
                             ));
                         }
                     }
+                    self.sync_memo_top()?;
                 }
                 SETITEMS => {
                     let items = self.pop_mark()?;
@@ -381,6 +395,7 @@ impl<'a> Decoder<'a> {
                             ));
                         }
                     }
+                    self.sync_memo_top()?;
                 }
 
                 // -- Set/FrozenSet (protocol 4) --
@@ -395,6 +410,7 @@ impl<'a> Decoder<'a> {
                             "ADDITEMS on non-set".to_string(),
                         ));
                     }
+                    self.sync_memo_top()?;
                 }
                 FROZENSET => {
                     let items = self.pop_mark()?;
@@ -493,9 +509,9 @@ impl<'a> Decoder<'a> {
                 }
                 BUILD => {
                     let state = self.pop_value()?;
-                    let obj = self.pop_value()?;
-                    // Save pre-BUILD value so we can update stale memo entries.
-                    let old_obj = obj.clone();
+                    // Pop object and its memo bindings (so we can transfer them)
+                    let obj_bindings = self.stack_memo.pop().unwrap_or_default();
+                    let obj = self.stack.pop().ok_or(CodecError::StackUnderflow)?;
                     match obj {
                         PickleValue::Global { module, name } => {
                             self.push(PickleValue::Instance(Box::new(InstanceData {
@@ -588,15 +604,12 @@ impl<'a> Decoder<'a> {
                             })));
                         }
                     }
-                    // Update memo: replace stale pre-BUILD entries with the
-                    // new post-BUILD value so BINGET returns the correct form.
-                    // Move new_val on first match (typically only one entry).
-                    let new_val = self.peek_value()?.clone();
-                    for entry in self.memo.iter_mut() {
-                        if *entry == old_obj {
-                            *entry = new_val.clone();
-                        }
+                    // Transfer memo bindings from the old object to the new
+                    // stack top and update memo entries.
+                    if let Some(top_bindings) = self.stack_memo.last_mut() {
+                        top_bindings.extend(obj_bindings);
                     }
+                    self.sync_memo_top()?;
                 }
                 NEWOBJ => {
                     let args = self.pop_value()?;
@@ -645,16 +658,19 @@ impl<'a> Decoder<'a> {
                     let idx = self.read_u8()? as usize;
                     let val = self.peek_value()?.clone();
                     self.memo_put(idx, val)?;
+                    self.record_memo_binding(idx);
                 }
                 LONG_BINPUT => {
                     let idx = self.read_u32()? as usize;
                     let val = self.peek_value()?.clone();
                     self.memo_put(idx, val)?;
+                    self.record_memo_binding(idx);
                 }
                 MEMOIZE => {
                     let val = self.peek_value()?.clone();
                     let idx = self.memo.len();
                     self.memo_put(idx, val)?;
+                    self.record_memo_binding(idx);
                 }
                 BINGET => {
                     let idx = self.read_u8()? as usize;
@@ -675,6 +691,7 @@ impl<'a> Decoder<'a> {
                         .map_err(|e| CodecError::InvalidData(format!("PUT index: {e}")))?;
                     let val = self.peek_value()?.clone();
                     self.memo_put(idx, val)?;
+                    self.record_memo_binding(idx);
                 }
                 GET => {
                     let line = self.read_line()?;
@@ -761,10 +778,12 @@ impl<'a> Decoder<'a> {
     #[inline]
     fn push(&mut self, val: PickleValue) {
         self.stack.push(val);
+        self.stack_memo.push(Vec::new());
     }
 
     #[inline]
     fn pop_value(&mut self) -> Result<PickleValue, CodecError> {
+        self.stack_memo.pop();
         self.stack.pop().ok_or(CodecError::StackUnderflow)
     }
 
@@ -784,9 +803,15 @@ impl<'a> Decoder<'a> {
         // This is a pointer swap — no element-by-element drain needed.
         let items = std::mem::take(&mut self.stack);
 
+        // Also discard the memo bindings for popped items
+        self.stack_memo.clear();
+
         // Restore the previous stack from metastack
         if let Some(old_stack) = self.metastack.pop() {
             self.stack = old_stack;
+        }
+        if let Some(old_sm) = self.meta_stack_memo.pop() {
+            self.stack_memo = old_sm;
         }
 
         Ok(items)
@@ -810,6 +835,31 @@ impl<'a> Decoder<'a> {
             .get(idx)
             .cloned()
             .ok_or_else(|| CodecError::InvalidData(format!("memo index {idx} not found")))
+    }
+
+    /// Record that the current stack top was stored in memo at `idx`.
+    #[inline]
+    fn record_memo_binding(&mut self, idx: usize) {
+        if let Some(bindings) = self.stack_memo.last_mut() {
+            bindings.push(idx);
+        }
+    }
+
+    /// After an in-place mutation of the stack top (SETITEMS, APPENDS, etc.),
+    /// update any memo entries that were cloned from the pre-mutation state.
+    fn sync_memo_top(&mut self) -> Result<(), CodecError> {
+        if let Some(bindings) = self.stack_memo.last() {
+            if !bindings.is_empty() {
+                let new_val = self.stack.last()
+                    .ok_or(CodecError::StackUnderflow)?.clone();
+                for &idx in bindings {
+                    if idx < self.memo.len() {
+                        self.memo[idx] = new_val.clone();
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -975,6 +1025,97 @@ mod tests {
         } else {
             panic!("expected Tuple, got {:?}", result);
         }
+    }
+
+    #[test]
+    fn test_memo_updated_after_setitems() {
+        // Reproduces issue #18: EMPTY_DICT + BINPUT + SETITEMS leaves stale
+        // empty dict in memo. When the same dict is referenced twice (once in
+        // a list, once as a dict value), the second reference via BINGET returns
+        // the empty snapshot.
+        //
+        // Pickle VM sequence:
+        //   PROTO 3
+        //   EMPTY_DICT             -> outer dict
+        //   MARK
+        //     BINUNICODE "a"
+        //     EMPTY_DICT           -> inner dict (shared)
+        //     BINPUT 0             -> memo[0] = empty clone
+        //     MARK
+        //       BINUNICODE "x"
+        //       BININT1 1
+        //     SETITEMS              -> inner dict = {"x": 1}
+        //     BINUNICODE "b"
+        //     BINGET 0             -> should be {"x": 1} (was {} before fix)
+        //   SETITEMS               -> outer = {"a": {"x": 1}, "b": {"x": 1}}
+        //   STOP
+        let data: &[u8] = &[
+            0x80, 0x03,                                                 // PROTO 3
+            b'}',                                                       // EMPTY_DICT (outer)
+            b'(',                                                       // MARK
+            b'X', 0x01, 0x00, 0x00, 0x00, b'a',                       // BINUNICODE "a"
+            b'}',                                                       // EMPTY_DICT (inner)
+            b'q', 0x00,                                                 // BINPUT 0
+            b'(',                                                       // MARK
+            b'X', 0x01, 0x00, 0x00, 0x00, b'x',                       // BINUNICODE "x"
+            b'K', 0x01,                                                 // BININT1 1
+            b'u',                                                       // SETITEMS (fills inner)
+            b'X', 0x01, 0x00, 0x00, 0x00, b'b',                       // BINUNICODE "b"
+            b'h', 0x00,                                                 // BINGET 0
+            b'u',                                                       // SETITEMS (fills outer)
+            b'.',                                                       // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+
+        let inner = PickleValue::Dict(vec![(
+            PickleValue::String("x".to_string()),
+            PickleValue::Int(1),
+        )]);
+        let expected = PickleValue::Dict(vec![
+            (PickleValue::String("a".to_string()), inner.clone()),
+            (PickleValue::String("b".to_string()), inner),
+        ]);
+        assert_eq!(
+            result, expected,
+            "BINGET after SETITEMS should return populated dict, not empty"
+        );
+    }
+
+    #[test]
+    fn test_memo_updated_after_appends() {
+        // Same pattern but for lists: EMPTY_LIST + BINPUT + APPENDS.
+        //
+        // Pickle VM sequence:
+        //   PROTO 3
+        //   EMPTY_LIST             -> inner list (shared)
+        //   BINPUT 0               -> memo[0] = empty clone
+        //   MARK
+        //     BININT1 1
+        //     BININT1 2
+        //   APPENDS                -> inner list = [1, 2]
+        //   BINGET 0               -> should be [1, 2]
+        //   TUPLE2                 -> ([1,2], [1,2])
+        //   STOP
+        let data: &[u8] = &[
+            0x80, 0x03,                     // PROTO 3
+            b']',                           // EMPTY_LIST
+            b'q', 0x00,                     // BINPUT 0
+            b'(',                           // MARK
+            b'K', 0x01,                     // BININT1 1
+            b'K', 0x02,                     // BININT1 2
+            b'e',                           // APPENDS
+            b'h', 0x00,                     // BINGET 0
+            0x86,                           // TUPLE2
+            b'.',                           // STOP
+        ];
+        let result = decode_pickle(data).unwrap();
+
+        let inner = PickleValue::List(vec![PickleValue::Int(1), PickleValue::Int(2)]);
+        let expected = PickleValue::Tuple(vec![inner.clone(), inner]);
+        assert_eq!(
+            result, expected,
+            "BINGET after APPENDS should return populated list, not empty"
+        );
     }
 
     #[test]

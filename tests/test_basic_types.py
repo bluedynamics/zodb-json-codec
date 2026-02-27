@@ -165,6 +165,46 @@ class TestDict:
         assert pickle.loads(restored_pickle) == val
 
 
+class TestSharedReferences:
+    """Test that pickle memo sharing (same object in multiple places) roundtrips.
+
+    Regression tests for https://github.com/bluedynamics/zodb-json-codec/issues/18
+    """
+
+    def test_dict_values_shared_with_list(self):
+        """Dict values that are also list elements must preserve content."""
+        sizes = [
+            {"height": 75, "label": "Square", "width": 75},
+            {"height": 683, "label": "Large", "width": 1024},
+        ]
+        # sizes_dict values are the SAME objects as in sizes list
+        sizes_dict = {item["label"]: item for item in sizes}
+        val = {"sizes": sizes, "sizes_dict": sizes_dict}
+
+        data = pickle.dumps(val, protocol=3)
+        json_str = zodb_json_codec.pickle_to_json(data)
+        parsed = json.loads(json_str)
+        # Verify sizes_dict values are NOT empty
+        assert parsed["sizes_dict"]["Square"] == sizes[0]
+        assert parsed["sizes_dict"]["Large"] == sizes[1]
+
+        # Full roundtrip
+        restored_pickle = zodb_json_codec.json_to_pickle(json_str)
+        result = pickle.loads(restored_pickle)
+        assert result == val
+
+    def test_list_shared_reference(self):
+        """Same list appearing twice via memo must preserve content."""
+        inner = [1, 2, 3]
+        val = {"a": inner, "b": inner}  # same object
+
+        data = pickle.dumps(val, protocol=3)
+        json_str = zodb_json_codec.pickle_to_json(data)
+        parsed = json.loads(json_str)
+        assert parsed["a"] == [1, 2, 3]
+        assert parsed["b"] == [1, 2, 3]
+
+
 class TestTuple:
     def test_empty(self):
         data = pickle.dumps((), protocol=3)
