@@ -45,7 +45,6 @@ jobs:
           # PGO: Profile-guided optimization. Both targets build natively
           # on their respective runners, so PGO works for all Linux wheels.
           before-script-linux: |
-            set -e
             echo "::group::PGO: Instrumented build + profiling"
             # Find best available Python (prefer 3.13, fallback to newest 3.x)
             PYDIR=$(find /opt/python -maxdepth 1 -name 'cp313-cp313' -type d 2>/dev/null | head -1)
@@ -55,32 +54,32 @@ jobs:
             if [ -z "$PYDIR" ] || [ ! -x "$PYDIR/bin/python" ]; then
               echo "PGO: No suitable Python found in container, skipping PGO"
               echo "::endgroup::"
-              exit 0
-            fi
-            PYTHON="$PYDIR/bin/python"
-            echo "PGO: Using $PYTHON"
-
-            # 1. Install ZODB+BTrees for FileStorage benchmarks
-            $PYTHON -m pip install --quiet ZODB BTrees
-
-            # 2. Instrumented build
-            RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release -i $PYTHON
-
-            # 3. Generate profile data with real + synthetic workloads
-            gunzip -k benchmarks/bench_data/Data.fs.gz
-            $PYTHON benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
-            $PYTHON benchmarks/bench.py synthetic --iterations 2000
-
-            # 4. Merge profiles and set RUSTFLAGS for the final build
-            LLVM_PROFDATA=$(find /root/.rustup -name llvm-profdata 2>/dev/null | head -1 || true)
-            if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
-              $LLVM_PROFDATA merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
-              export RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"
-              echo "PGO: Building with merged profile data"
             else
-              echo "PGO: No profile data found, building without PGO"
+              PYTHON="$PYDIR/bin/python"
+              echo "PGO: Using $PYTHON"
+
+              # 1. Install ZODB+BTrees for FileStorage benchmarks
+              $PYTHON -m pip install --quiet ZODB BTrees
+
+              # 2. Instrumented build
+              RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release -i $PYTHON
+
+              # 3. Generate profile data with real + synthetic workloads
+              gunzip -k benchmarks/bench_data/Data.fs.gz || true
+              $PYTHON benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+              $PYTHON benchmarks/bench.py synthetic --iterations 2000
+
+              # 4. Merge profiles and set RUSTFLAGS for the final build
+              LLVM_PROFDATA=$(find /root/.rustup -name llvm-profdata 2>/dev/null | head -1 || true)
+              if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
+                $LLVM_PROFDATA merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
+                export RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata"
+                echo "PGO: Building with merged profile data"
+              else
+                echo "PGO: No profile data found, building without PGO"
+              fi
+              echo "::endgroup::"
             fi
-            echo "::endgroup::"
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux-${{ matrix.target }}
