@@ -10,7 +10,7 @@ there are no pure-Python fallbacks.
 import zodb_json_codec
 ```
 
-## ZODB Record Functions
+## ZODB record functions
 
 These functions work with ZODB's two-pickle record format: a class pickle
 followed by a state pickle, concatenated as a single `bytes` object.
@@ -196,7 +196,7 @@ cursor.execute(
 )
 ```
 
-## Standalone Pickle Functions
+## Standalone pickle functions
 
 These functions work with individual pickle byte streams (not ZODB
 two-pickle records). They are useful for general pickle-to-JSON
@@ -302,7 +302,7 @@ Raises
 : `ValueError`
   : If the JSON is malformed or contains invalid marker structures.
 
-## Error Handling
+## Error handling
 
 All functions raise `ValueError` on failure. Common error conditions:
 
@@ -316,7 +316,7 @@ All functions raise `ValueError` on failure. Common error conditions:
   path.
 - **Invalid UTF-8** -- non-UTF-8 bytes in a pickle string.
 
-## Safety Limits
+## Safety limits
 
 The codec enforces several limits to prevent resource exhaustion from
 malicious or malformed pickle data:

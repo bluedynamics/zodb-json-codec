@@ -63,7 +63,7 @@ Designed as the codec layer for a PostgreSQL JSONB storage backend.
 
 ::::
 
-## Quick Start
+## Quick start
 
 1. {doc}`Install zodb-json-codec <how-to/install>`
 2. {doc}`Encode and decode your first pickle <tutorials/getting-started>`

@@ -1,4 +1,4 @@
-# Getting Started
+# Getting started
 
 <!-- diataxis: tutorial -->
 
@@ -70,7 +70,7 @@ This is faster when you need to work with the data in Python:
 ```python
 result = zodb_json_codec.pickle_to_dict(pickled)
 print(result)
-# {'active': True, 'age': 30, 'name': 'Alice'}
+# {'active': true, 'age': 30, 'name': 'Alice'}
 ```
 
 ## Understanding type markers

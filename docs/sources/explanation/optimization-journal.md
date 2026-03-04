@@ -1,4 +1,4 @@
-# Optimization Journal
+# Optimization journal
 
 <!-- diataxis: explanation -->
 
@@ -31,7 +31,7 @@ of cloning avoids a deep copy of the entire PickleValue tree.
 
 **Impact:** ~1.8x faster encode path.
 
-### 2. Bypass serde_json intermediate
+### 2. bypass serde_json intermediate
 
 **Technique:** Added `src/pyconv.rs` for direct `PickleValue` to/from
 `PyObject` conversion, eliminating `serde_json::Value` as an intermediate
@@ -47,7 +47,7 @@ allocation and traversal.
 
 **Impact:** 2-3.5x faster across most categories.
 
-### 3. Decode path tuning
+### 3. decode path tuning
 
 **Technique:** Single-pass Dict decode, pre-allocated `Vec::with_capacity()`,
 set/frozenset move semantics (no `Vec` clone), `StackItem` removal, `@`
@@ -62,7 +62,7 @@ keys like `"title"`, `"description"`) skip all 15+ marker key comparisons.
 
 **Impact:** Codec competitive with CPython pickle decode.
 
-### 4. Encode marker fast path
+### 4. encode marker fast path
 
 **Technique:** Single-key dicts use direct key extraction plus match instead
 of 15 sequential `dict.get_item()` calls. 2-4 key dicts use a single-pass
@@ -81,7 +81,7 @@ prefixed keys and matches on the first character after `@`.
 
 **Impact:** Reduced `get_item()` calls for `@cls` + `@s` from ~16 to 2.
 
-### 5. Direct PyObject encoder
+### 5. direct PyObject encoder
 
 **Technique:** `pyconv.rs` encode path writes pickle opcodes straight from
 Python objects, bypassing the PickleValue tree allocation. Handles common
@@ -95,7 +95,7 @@ we eliminate the entire intermediate tree.
 
 **Impact:** Encode competitive with CPython C pickler.
 
-### 6. Shared ZODB memo
+### 6. shared ZODB memo
 
 **Technique:** Single Decoder instance processes both class and state pickles,
 preserving memo entries across the boundary.
@@ -124,7 +124,7 @@ requests concurrently.
 single-thread speedup, but significant throughput improvement in
 multi-threaded deployments.
 
-### 8. Single-pass PG decode
+### 8. single-pass PG decode
 
 **Technique:** `decode_zodb_record_for_pg()` combines decode + persistent
 reference extraction + null-byte sanitization in one function, eliminating two
@@ -141,7 +141,7 @@ two full traversals.
 
 ## v1.3.0
 
-### 9. Box Instance variant
+### 9. box instance variant
 
 **Technique:** Changed `Instance(InstanceData)` to `Instance(Box<InstanceData>)`
 in the `PickleValue` enum.
@@ -164,7 +164,7 @@ utilization.
 
 ## v1.3.1
 
-### 10. Thin LTO + codegen-units=1
+### 10. thin LTO + codegen-units=1
 
 **Technique:** Set `lto = "thin"` and `codegen-units = 1` in the Cargo release
 profile.
@@ -185,7 +185,7 @@ increase is modest and the performance gain is consistent.
 
 ## v1.4.0
 
-### 11. Direct pickle-to-JSON string path
+### 11. direct pickle-to-JSON string path
 
 **Technique:** `decode_zodb_record_for_pg_json()` converts ZODB pickle records
 entirely in Rust, producing a JSON string directly. The GIL is released for
@@ -204,7 +204,7 @@ allocation.
 **Impact:** 1.3x faster full pipeline on real-world data, plus improved
 multi-threaded throughput from GIL release.
 
-## v1.5.0 -- Encode Performance Rounds 1-4
+## v1.5.0 -- encode performance rounds 1-4
 
 ### Round 1
 
@@ -232,7 +232,7 @@ this replaces ~20 string comparisons with a single hash probe.
 **Impact:** Measurable improvement across all encode benchmarks, especially
 for integer-heavy and large-dict payloads.
 
-#### 13. Profile-Guided Optimization (PGO)
+#### 13. profile-guided optimization (PGO)
 
 **Technique:** Two-pass instrumented build. First pass collects execution
 profiles using real FileStorage data (5 MB Wikipedia database, 1,692 records)
@@ -259,7 +259,7 @@ can exploit.
 
 ### Round 2
 
-#### 14. Direct known-type encoding
+#### 14. direct known-type encoding
 
 **Technique:** For `@dt`, `@date`, `@time`, `@td`, `@dec` markers: write
 pickle opcodes directly to the output buffer instead of allocating
@@ -279,7 +279,7 @@ sequence of buffer writes.
 
 **Impact:** special_types **9.2x faster** than Python pickle.
 
-#### 15. Thread-local buffer reuse
+#### 15. thread-local buffer reuse
 
 **Technique:** `ENCODE_BUF` thread-local `Vec<u8>` retains capacity across
 calls. On each encode, the buffer is cleared (length reset to 0) but the
@@ -305,7 +305,7 @@ sharing), and the memory cost is bounded (one buffer per thread).
 
 ### Round 3
 
-#### 16. Direct JSON string writer
+#### 16. direct JSON string writer
 
 **Technique:** `json_writer.rs` writes JSON tokens directly from the
 `PickleValue` AST to a `String` buffer. Fast-path string escaping (scan for
@@ -333,7 +333,7 @@ floats to strings without going through `format!()`, avoiding a temporary
 
 ### Round 4
 
-#### 17. Class pickle cache
+#### 17. class pickle cache
 
 **Technique:** Thread-local cache per `(module, name)` pair. Linear search
 over ~6 entries (faster than `HashMap` for small sets). First call builds and

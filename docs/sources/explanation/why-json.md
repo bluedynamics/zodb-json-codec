@@ -1,4 +1,4 @@
-# Why Convert Pickle to JSON?
+# Why convert pickle to JSON?
 
 <!-- diataxis: explanation -->
 

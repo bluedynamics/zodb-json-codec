@@ -1,11 +1,11 @@
-# Project Structure
+# Project structure
 
 <!-- diataxis: reference -->
 
 Source layout and module responsibilities for the zodb-json-codec Rust
 crate and Python package.
 
-## Directory Layout
+## Directory layout
 
 ```
 src/
@@ -34,9 +34,9 @@ benchmarks/
   bench.py          # Performance benchmarks vs CPython pickle
 ```
 
-## Rust Modules
+## Rust modules
 
-### `lib.rs` -- PyO3 Module
+### `lib.rs` -- PyO3 module
 
 Defines the Python-facing functions (`#[pyfunction]`) that are exported
 as the `zodb_json_codec._rust` extension module. Each function
@@ -56,7 +56,7 @@ Also defines `InstanceData` (module, name, state, plus optional
 `dict_items` and `list_items` for subclass support). The `Instance`
 variant is boxed to keep the enum size at 48 bytes.
 
-### `decode.rs` -- Pickle Decoder
+### `decode.rs` -- pickle decoder
 
 Implements a subset of the pickle virtual machine sufficient for ZODB
 records (protocol 2-3, partial protocol 4). Reads pickle bytes and
@@ -71,7 +71,7 @@ Key functions:
 Safety limits: memo capped at 100,000 entries, binary allocations capped
 at 256 MB, LONG text at 10,000 characters.
 
-### `encode.rs` -- Pickle Encoder
+### `encode.rs` -- pickle encoder
 
 Converts a `PickleValue` AST back to pickle bytes in protocol 3 (the
 maximum supported by zodbpickle). Handles all value types including
@@ -80,7 +80,7 @@ maximum supported by zodbpickle). Handles all value types including
 Recursion depth is limited to 1,000 levels. Integers are encoded with
 minimal byte length for signed little-endian representation.
 
-### `pyconv.rs` -- Direct PyObject Bridge
+### `pyconv.rs` -- direct PyObject bridge
 
 The fast path for the Python dict API. Converts between `PickleValue`
 AST and Python objects directly, bypassing the `serde_json::Value`
@@ -98,7 +98,7 @@ Provides both standard and PG-specific variants:
   BTree-aware decode.
 - `collect_refs_from_pickle_value` -- extract persistent reference OIDs.
 
-### `json.rs` -- JSON String Path
+### `json.rs` -- JSON string path
 
 Converts between `PickleValue` AST and `serde_json::Value` for the JSON
 string API (`pickle_to_json`, `json_to_pickle`). Also provides the
@@ -114,7 +114,7 @@ Key functions:
 - `pickle_value_to_json_string_pg` -- direct string output for PG
   (uses `json_writer.rs`).
 
-### `json_writer.rs` -- Direct JSON String Writer
+### `json_writer.rs` -- direct JSON string writer
 
 A low-level JSON token writer that appends directly to a `String`
 buffer. Used by the PG JSON path to avoid allocating intermediate
@@ -122,7 +122,7 @@ buffer. Used by the PG JSON path to avoid allocating intermediate
 close, array open/close, strings, numbers, booleans, null) as raw
 characters.
 
-### `known_types.rs` -- Known Type Handlers
+### `known_types.rs` -- known type handlers
 
 Intercepts common Python REDUCE patterns at the PickleValue/JSON
 boundary and produces compact typed markers instead of generic `@reduce`
@@ -139,7 +139,7 @@ output. Handles both directions:
 Full timezone support: naive, fixed-offset (`datetime.timezone`),
 pytz (including named zones with full constructor args), and zoneinfo.
 
-### `btrees.rs` -- BTree State Handling
+### `btrees.rs` -- BTree state handling
 
 Classifies BTree classes by module/name and flattens their deeply nested
 tuple state into queryable JSON. Handles both directions:
@@ -151,7 +151,7 @@ tuple state into queryable JSON. Handles both directions:
 - **Classification**: `classify_btree` -- identify BTree class and node
   kind from module/name strings.
 
-### `zodb.rs` -- ZODB Record Handling
+### `zodb.rs` -- ZODB record handling
 
 Handles the ZODB two-pickle record format. Provides:
 
@@ -164,19 +164,19 @@ Handles the ZODB two-pickle record format. Provides:
 Also contains `#[cfg(test)]` encode functions for ZODB record
 roundtrip testing.
 
-### `opcodes.rs` -- Pickle Opcode Constants
+### `opcodes.rs` -- pickle opcode constants
 
 Defines constants for all pickle opcodes from protocol 0 through 5. The
 codec focuses on protocol 2-3 (ZODB standard) but includes protocol 4-5
 opcodes for partial forward compatibility.
 
-### `error.rs` -- Error Types
+### `error.rs` -- error types
 
 Defines `CodecError` with variants for all failure modes: unexpected
 EOF, unknown opcode, stack underflow, invalid data, JSON errors, and
 invalid UTF-8. Implements conversion to Python `ValueError` via PyO3.
 
-## Data Flow
+## Data flow
 
 The following diagram shows the three conversion paths through the
 codebase:

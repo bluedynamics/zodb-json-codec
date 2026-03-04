@@ -1,4 +1,4 @@
-# JSON Format
+# JSON format
 
 <!-- diataxis: reference -->
 
@@ -6,7 +6,7 @@ This page describes how Python types are represented in JSON by
 zodb-json-codec. All representations are **roundtrip-safe**: encoding to
 JSON and decoding back produces identical pickle bytes.
 
-## Native JSON Types
+## Native JSON types
 
 These Python types map directly to JSON without any markers:
 
@@ -20,12 +20,12 @@ These Python types map directly to JSON without any markers:
 | `list` | array | `[1, 2, 3]` |
 | `dict` (string keys) | object | `{"key": "value"}` |
 
-## Structural Markers
+## Structural markers
 
 These markers preserve Python types that have no direct JSON equivalent.
 Each uses a single-key dict with a `@`-prefixed key.
 
-### `@t` -- Tuple
+### `@t` -- tuple
 
 ```json
 {"@t": [1, 2, 3]}

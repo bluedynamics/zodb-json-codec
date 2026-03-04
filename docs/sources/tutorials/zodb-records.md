@@ -1,4 +1,4 @@
-# Working with ZODB Records
+# Working with ZODB records
 
 <!-- diataxis: tutorial -->
 
@@ -265,7 +265,7 @@ Not all ZODB objects use dict state. The codec handles whatever
 `__getstate__()` returns:
 
 ```python
-# Dict state (most common) -- PersistentMapping, custom Persistent classes
+# Dict state (most common) -- PersistentMapping, custom persistent classes
 {"@cls": ["myapp", "Doc"], "@s": {"title": "Hello"}}
 
 # Tuple state -- DateTime objects
@@ -309,7 +309,7 @@ data = zodb_json_codec.encode_zodb_record(record_dict)
 # Single-pass decode
 mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(data)
 print(mod, name)
-# myapp Container
+# myapp container
 
 print(state)
 # {'child_a': {'@ref': '0000000000000001'},

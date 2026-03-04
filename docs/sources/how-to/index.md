@@ -1,4 +1,4 @@
-# How-To Guides
+# How-to guides
 
 <!-- diataxis: how-to -->
 

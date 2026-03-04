@@ -79,13 +79,13 @@ All benchmark commands accept:
 
 Profile-Guided Optimization (PGO) produces the most accurate performance numbers by optimizing based on actual benchmark workloads.
 
-### 1. Install LLVM tools
+### 1. install LLVM tools
 
 ```bash
 rustup component add llvm-tools
 ```
 
-### 2. Instrumented build
+### 2. instrumented build
 
 Build with profiling instrumentation enabled:
 
@@ -93,7 +93,7 @@ Build with profiling instrumentation enabled:
 RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
 ```
 
-### 3. Generate profiles
+### 3. generate profiles
 
 Run both benchmark types to capture representative workload data:
 
@@ -102,13 +102,13 @@ python benchmarks/bench.py synthetic --iterations 5000
 python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
 ```
 
-### 4. Merge profile data
+### 4. merge profile data
 
 ```bash
 llvm-profdata merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
 ```
 
-### 5. Final PGO build
+### 5. final PGO build
 
 ```bash
 RUSTFLAGS="-Cprofile-use=/tmp/pgo-data/merged.profdata" maturin develop --release

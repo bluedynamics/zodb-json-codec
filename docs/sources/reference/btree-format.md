@@ -1,4 +1,4 @@
-# BTree Format
+# BTree format
 
 <!-- diataxis: reference -->
 
@@ -6,7 +6,7 @@ BTrees from the `BTrees` package store their state as deeply nested
 tuples in pickle. The codec flattens these into human-readable,
 JSONB-queryable JSON while preserving full roundtrip fidelity.
 
-## Supported BTree Classes
+## Supported BTree classes
 
 All classes matching the pattern `BTrees.{PREFIX}BTree.{PREFIX}{Type}`
 are recognized, where `{Type}` is one of `BTree`, `Bucket`, `TreeSet`,
@@ -28,7 +28,7 @@ or `Set`.
 | `QQ` | unsigned long | unsigned long |
 | `fs` | FileStorage | (internal) |
 
-### Node Types
+### Node types
 
 BTree
 : Tree node for maps. Small trees use 4-level tuple nesting for inline
@@ -44,7 +44,7 @@ TreeSet
 Set
 : Leaf node for sets. Same structure as Bucket but stores keys only.
 
-## `@kv` -- Key-Value Pairs
+## `@kv` -- key-value pairs
 
 Used for map-type BTree nodes (BTree, Bucket). Contains an array of
 `[key, value]` pairs.

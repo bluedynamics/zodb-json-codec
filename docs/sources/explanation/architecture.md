@@ -42,7 +42,7 @@ flowchart LR
     JW --> JS2["JSON string<br/>(direct write)"]
 ```
 
-### Step 1: Pickle parsing (decode.rs)
+### Step 1: pickle parsing (decode.rs)
 
 The decoder implements a pickle virtual machine that reads opcodes and builds
 up the `PickleValue` tree. It maintains a stack, a memo (for shared
