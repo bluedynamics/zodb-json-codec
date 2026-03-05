@@ -27,3 +27,10 @@ dist/
 # Generated benchmark data (keep .gz seed files for CI/PGO)
 benchmarks/bench_data/*
 !benchmarks/bench_data/Data.fs.gz
+
+# Docs
+docs/html/
+docs/.mxmake/
+docs/.venv/
+docs/.vale/styles/Microsoft/
+docs/.vale/styles/write-good/
