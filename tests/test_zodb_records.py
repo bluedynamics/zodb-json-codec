@@ -5,13 +5,12 @@ ZODB stores each object as two concatenated pickles:
 2. State pickle: the object's __getstate__() result
 """
 
-import json
-import pickle
 from datetime import datetime
-
-import pytest
 from persistent import Persistent
 
+import json
+import pickle
+import pytest
 import zodb_json_codec
 
 
@@ -159,6 +158,7 @@ class TestRealZODB:
     @pytest.fixture
     def zodb(self):
         from ZODB import DB
+
         import transaction
 
         db = DB(None)
@@ -171,9 +171,10 @@ class TestRealZODB:
 
     def test_persistent_mapping(self, zodb):
         from persistent.mapping import PersistentMapping
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         root["test"] = PersistentMapping({"key": "value", "num": 42})
         transaction.commit()
 
@@ -186,9 +187,10 @@ class TestRealZODB:
 
     def test_persistent_list(self, zodb):
         from persistent.list import PersistentList
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         root["test"] = PersistentList([10, 20, 30])
         transaction.commit()
 
@@ -201,9 +203,10 @@ class TestRealZODB:
     def test_persistent_reference_format(self, zodb):
         """Persistent refs should use compact hex oid format."""
         from persistent.mapping import PersistentMapping
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         child = PersistentMapping({"x": 1})
         root["child"] = child
         transaction.commit()
@@ -227,9 +230,10 @@ class TestRealZODB:
     def test_roundtrip_with_refs(self, zodb):
         """Encode a record with persistent refs, decode again."""
         from persistent.mapping import PersistentMapping
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         root["a"] = PersistentMapping({"val": 1})
         root["b"] = PersistentMapping({"val": 2})
         transaction.commit()
@@ -328,11 +332,11 @@ class TestSharedReferences:
         second = result["second"]
 
         assert "@cls" in first, (
-            "first occurrence should be Instance (@cls), got: %s" % first
+            f"first occurrence should be Instance (@cls), got: {first}"
         )
         assert "@cls" in second, (
             "second occurrence should be Instance (@cls), not @reduce. "
-            "This fails when memo is not updated after BUILD. Got: %s" % second
+            f"This fails when memo is not updated after BUILD. Got: {second}"
         )
         assert first["@s"]["name"] == "acl_users"
         assert second["@s"]["name"] == "acl_users"
@@ -355,7 +359,8 @@ class TestSharedReferences:
         """Shared references inside a ZODB record state are preserved."""
         obj = SharedRefHelper("hook_name")
         record = make_zodb_record(
-            "myapp", "Container",
+            "myapp",
+            "Container",
             {"hook_a": obj, "hook_b": obj},
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -364,9 +369,7 @@ class TestSharedReferences:
         hook_b = result["@s"]["hook_b"]
 
         assert "@cls" in hook_a, "hook_a should be Instance"
-        assert "@cls" in hook_b, (
-            "hook_b (shared ref) should be Instance, not @reduce"
-        )
+        assert "@cls" in hook_b, "hook_b (shared ref) should be Instance, not @reduce"
         assert hook_a["@s"]["name"] == "hook_name"
         assert hook_b["@s"]["name"] == "hook_name"
 
@@ -382,7 +385,7 @@ class TestDecodeZodbRecordForPg:
 
     def test_class_info_extracted(self):
         record = make_zodb_record("myapp.models", "Document", {"x": 1})
-        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(record)
+        mod, name, state, _refs = zodb_json_codec.decode_zodb_record_for_pg(record)
         assert mod == "myapp.models"
         assert name == "Document"
         assert state == {"x": 1}
@@ -422,6 +425,7 @@ class TestDecodeZodbRecordForPg:
     def test_null_byte_sanitized(self):
         """Strings with null bytes get @ns markers for PG JSONB compat."""
         import base64
+
         record = make_zodb_record("myapp", "Obj", {"data": "hello\x00world"})
         _, _, state, _ = zodb_json_codec.decode_zodb_record_for_pg(record)
         # Should be replaced with @ns marker
@@ -439,13 +443,14 @@ class TestDecodeZodbRecordForPg:
     def test_matches_decode_zodb_record_structure(self):
         """For normal data, state matches what decode_zodb_record returns."""
         record = make_zodb_record(
-            "myapp", "Doc",
+            "myapp",
+            "Doc",
             {"title": "Hello", "count": 42, "items": [1, 2, 3]},
         )
         # Regular decode
         regular = zodb_json_codec.decode_zodb_record(record)
         # PG decode
-        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(record)
+        mod, name, state, _refs = zodb_json_codec.decode_zodb_record_for_pg(record)
         assert mod == regular["@cls"][0]
         assert name == regular["@cls"][1]
         assert state == regular["@s"]
@@ -453,7 +458,7 @@ class TestDecodeZodbRecordForPg:
     def test_roundtrip_with_encode(self):
         """State from for_pg can be wrapped and re-encoded."""
         original = make_zodb_record("myapp", "Doc", {"title": "Test", "n": 99})
-        mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(original)
+        mod, name, state, _refs = zodb_json_codec.decode_zodb_record_for_pg(original)
         # Re-wrap for encoding
         wrapped = {"@cls": [mod, name], "@s": state}
         re_encoded = zodb_json_codec.encode_zodb_record(wrapped)

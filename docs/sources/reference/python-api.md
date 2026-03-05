@@ -3,7 +3,8 @@
 <!-- diataxis: reference -->
 
 All public functions are exported from the top-level `zodb_json_codec`
-package. The implementation is a compiled Rust extension (via PyO3);
+package.
+The implementation is a compiled Rust extension (via PyO3);
 there are no pure-Python fallbacks.
 
 ```python
@@ -38,7 +39,8 @@ Returns
 
   `"@s"`
   : The object state. Typically a dict, but can be any JSON-representable
-    value (including `None` for empty BTrees). BTree state is
+    value (including `None` for empty BTrees).
+    BTree state is
     automatically flattened using `@kv`/`@ks` markers.
 
 Raises
@@ -65,13 +67,15 @@ encode_zodb_record(record: dict) -> bytes
 Encode a Python dict back into a ZODB two-pickle record.
 
 Uses the direct PyObject-to-pickle encoder, bypassing the intermediate
-PickleValue AST for maximum speed. The output uses pickle protocol 3,
+PickleValue AST for maximum speed.
+The output uses pickle protocol 3,
 as required by zodbpickle.
 
 Parameters
 : `record`
   : A dict with `"@cls"` (list of `[module, name]`) and `"@s"` (state
-    value) keys. The state may contain any JSON marker dicts (`@t`,
+    value) keys.
+    The state may contain any JSON marker dicts (`@t`,
     `@b`, `@dt`, `@ref`, `@kv`, etc.).
 
 Returns
@@ -99,7 +103,8 @@ raw_bytes = encode_zodb_record({
 decode_zodb_record_for_pg(data: bytes) -> tuple
 ```
 
-Single-pass decode optimized for PostgreSQL JSONB storage. Combines
+Single-pass decode optimized for PostgreSQL JSONB storage.
+Combines
 pickle decoding, persistent reference extraction, and null-byte
 sanitization in one operation.
 
@@ -114,14 +119,14 @@ Returns
 : A 4-tuple:
 
   `class_mod` (`str`)
-  : The module name from the class pickle (e.g., `"persistent.mapping"`).
+  : The module name from the class pickle (for example, `"persistent.mapping"`).
 
   `class_name` (`str`)
-  : The class name from the class pickle (e.g., `"PersistentMapping"`).
+  : The class name from the class pickle (for example, `"PersistentMapping"`).
 
   `state` (`dict`)
   : The decoded object state as a Python dict with marker keys. Strings
-    containing null bytes (`\x00`) are replaced with `{"@ns": base64}`
+    containing null bytes (`\x00`) are replaced with `{"@ns:" base64}`
     markers, because PostgreSQL JSONB cannot store `\u0000`.
 
   `refs` (`list[int]`)
@@ -150,9 +155,11 @@ mod, name, state, refs = decode_zodb_record_for_pg(raw_bytes)
 decode_zodb_record_for_pg_json(data: bytes) -> tuple
 ```
 
-Direct JSON string path for PostgreSQL. The entire pipeline -- pickle
+Direct JSON string path for PostgreSQL.
+The entire pipeline -- pickle
 parsing, JSON conversion, null-byte sanitization, and reference
-extraction -- runs in Rust with the GIL released. No intermediate Python
+extraction -- runs in Rust with the GIL released.
+No intermediate Python
 dicts are created.
 
 This is the fastest path for storing ZODB records in PostgreSQL JSONB
@@ -174,7 +181,8 @@ Returns
 
   `state_json` (`str`)
   : The object state serialized as a JSON string, ready for PostgreSQL
-    JSONB insertion. Null bytes are sanitized.
+    JSONB insertion.
+    Null bytes are sanitized.
 
   `refs` (`list[int]`)
   : All persistent reference OIDs found in the state, as integers.
@@ -199,7 +207,8 @@ cursor.execute(
 ## Standalone pickle functions
 
 These functions work with individual pickle byte streams (not ZODB
-two-pickle records). They are useful for general pickle-to-JSON
+two-pickle records).
+They are useful for general pickle-to-JSON
 conversion outside of ZODB.
 
 ---
@@ -237,7 +246,8 @@ dict_to_pickle(data: dict) -> bytes
 ```
 
 Encode a Python dict into pickle bytes using the direct
-PyObject-to-pickle encoder. This is the inverse of `pickle_to_dict`.
+PyObject-to-pickle encoder.
+This is the inverse of `pickle_to_dict`.
 
 Parameters
 : `data`
@@ -285,7 +295,8 @@ Raises
 json_to_pickle(data: str) -> bytes
 ```
 
-Convert a JSON string back to pickle bytes. This is the inverse of
+Convert a JSON string back to pickle bytes.
+This is the inverse of
 `pickle_to_json`.
 
 All JSON markers (`@t`, `@b`, `@dt`, `@ref`, `@cls` + `@s`, etc.) are
@@ -304,7 +315,8 @@ Raises
 
 ## Error handling
 
-All functions raise `ValueError` on failure. Common error conditions:
+All functions raise `ValueError` on failure.
+Common error conditions:
 
 - **Unexpected end of pickle stream** -- truncated input data.
 - **Unknown pickle opcode** -- opcode not supported by the decoder.

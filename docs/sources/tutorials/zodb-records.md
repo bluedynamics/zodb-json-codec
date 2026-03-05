@@ -3,7 +3,8 @@
 <!-- diataxis: tutorial -->
 
 This tutorial shows you how to decode and encode ZODB's record format, work
-with persistent references, and handle BTree state. You will also learn about
+with persistent references, and handle BTree state.
+You will also learn about
 the single-pass PostgreSQL API.
 
 ## Prerequisites
@@ -60,7 +61,8 @@ Output:
 }
 ```
 
-The `@cls` key tells you this is a `myapp.models.Document` instance. The `@s`
+The `@cls` key tells you this is a `myapp.models.Document` instance.
+The `@s`
 key holds its state dict -- the same data that `__getstate__()` would return.
 
 ## Decoding a real ZODB object
@@ -104,7 +106,8 @@ The codec preserves this internal structure exactly.
 ## Persistent references
 
 When one ZODB object references another, the reference is stored as a
-persistent ref. The codec represents these with the `@ref` marker, using
+persistent ref.
+The codec represents these with the `@ref` marker, using
 compact 16-character hex OID strings:
 
 ```python
@@ -183,7 +186,8 @@ assert result1 == result2
 ## BTree state
 
 The BTrees package (OOBTree, IIBTree, IOBTree, etc.) stores state as deeply
-nested tuples. The codec flattens these into human-readable JSON using the
+nested tuples.
+The codec flattens these into human-readable JSON using the
 `@kv` and `@ks` markers.
 
 ### Map types use `@kv`
@@ -206,7 +210,8 @@ print(result["@s"])
 # {'@kv': [['alpha', 1], ['beta', 2], ['gamma', 3]]}
 ```
 
-The `@kv` marker holds an array of `[key, value]` pairs. This flattened format
+The `@kv` marker holds an array of `[key, value]` pairs.
+This flattened format
 is queryable as PostgreSQL JSONB and far easier to read than the original
 4-level tuple nesting.
 
@@ -239,7 +244,8 @@ print(result["@s"])
 ### Large BTrees
 
 When a BTree grows large enough to split into internal nodes, the state
-contains persistent references to child buckets. The codec represents this
+contains persistent references to child buckets.
+The codec represents this
 with `@children` and `@first` markers:
 
 ```python
@@ -261,7 +267,8 @@ The `@children` array alternates between child references and separator keys.
 
 ## Various state shapes
 
-Not all ZODB objects use dict state. The codec handles whatever
+Not all ZODB objects use dict state.
+The codec handles whatever
 `__getstate__()` returns:
 
 ```python
@@ -290,8 +297,8 @@ mod, name, state, refs = zodb_json_codec.decode_zodb_record_for_pg(data)
 
 This returns a 4-tuple:
 
-- `mod` (str) -- the module name (e.g., `"persistent.mapping"`)
-- `name` (str) -- the class name (e.g., `"PersistentMapping"`)
+- `mod` (str) -- the module name (for example, `"persistent.mapping"`)
+- `name` (str) -- the class name (for example, `"PersistentMapping"`)
 - `state` (dict) -- the decoded state (same as `@s` from `decode_zodb_record`)
 - `refs` (list[int]) -- all persistent reference OIDs as integers
 
@@ -320,11 +327,12 @@ print(sorted(refs))
 ```
 
 The `refs` list contains integer OIDs extracted from all `@ref` markers in
-the state tree. This is used by PostgreSQL storage backends for the `refs`
+the state tree.
+This is used by PostgreSQL storage backends for the `refs`
 column that enables pure-SQL garbage collection (pack).
 
 The PostgreSQL variant also sanitizes null bytes in strings (which PostgreSQL
-JSONB cannot store) by replacing them with `{"@ns": "<base64>"}` markers.
+JSONB cannot store) by replacing them with `{"@ns:" "<base64>"}` markers.
 
 ## Cleanup
 
@@ -337,5 +345,6 @@ db.close()
 ## What's next
 
 You now know how to decode and encode ZODB records, work with persistent
-references, and handle BTree state. For the complete list of markers and type
+references, and handle BTree state.
+For the complete list of markers and type
 mappings, see the {doc}`reference documentation </reference/index>`.

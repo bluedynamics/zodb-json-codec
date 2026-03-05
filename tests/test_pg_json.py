@@ -3,14 +3,15 @@
 Verifies that the JSON string path produces identical output to the dict path.
 """
 
-import json
-import pickle
-from datetime import date, datetime, timedelta, timezone
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+from datetime import UTC
 from decimal import Decimal
 from uuid import UUID
 
-import pytest
-
+import json
+import pickle
 import zodb_json_codec
 
 
@@ -31,8 +32,12 @@ class TestPgJsonMatchesDict:
 
     def _assert_match(self, record):
         """Assert the JSON string path produces equivalent output to the dict path."""
-        mod1, name1, state_dict, refs1 = zodb_json_codec.decode_zodb_record_for_pg(record)
-        mod2, name2, state_json, refs2 = zodb_json_codec.decode_zodb_record_for_pg_json(record)
+        mod1, name1, state_dict, refs1 = zodb_json_codec.decode_zodb_record_for_pg(
+            record
+        )
+        mod2, name2, state_json, refs2 = zodb_json_codec.decode_zodb_record_for_pg_json(
+            record
+        )
 
         assert mod1 == mod2
         assert name1 == name2
@@ -41,7 +46,9 @@ class TestPgJsonMatchesDict:
         # state_json is a string, state_dict is a dict — compare as JSON
         actual = json.loads(state_json)
         expected = _normalize(state_dict)
-        assert actual == expected, f"Mismatch:\n  expected: {expected}\n  actual: {actual}"
+        assert actual == expected, (
+            f"Mismatch:\n  expected: {expected}\n  actual: {actual}"
+        )
 
     def test_simple_dict(self):
         record = make_zodb_record("myapp", "Obj", {"title": "Hello", "count": 42})
@@ -49,7 +56,8 @@ class TestPgJsonMatchesDict:
 
     def test_nested_dict(self):
         record = make_zodb_record(
-            "myapp", "Obj",
+            "myapp",
+            "Obj",
             {"items": [1, 2, 3], "meta": {"key": "value"}},
         )
         self._assert_match(record)
@@ -76,7 +84,8 @@ class TestPgJsonMatchesDict:
 
     def test_bool_none_mixed(self):
         record = make_zodb_record(
-            "myapp", "Obj",
+            "myapp",
+            "Obj",
             {"flag": True, "empty": None, "num": 3.14},
         )
         self._assert_match(record)
@@ -91,8 +100,12 @@ class TestPgJsonKnownTypes:
     """Verify known type markers are identical between paths."""
 
     def _assert_match(self, record):
-        mod1, name1, state_dict, refs1 = zodb_json_codec.decode_zodb_record_for_pg(record)
-        mod2, name2, state_json, refs2 = zodb_json_codec.decode_zodb_record_for_pg_json(record)
+        mod1, name1, state_dict, refs1 = zodb_json_codec.decode_zodb_record_for_pg(
+            record
+        )
+        mod2, name2, state_json, refs2 = zodb_json_codec.decode_zodb_record_for_pg_json(
+            record
+        )
         assert mod1 == mod2
         assert name1 == name2
         assert refs1 == refs2
@@ -101,7 +114,7 @@ class TestPgJsonKnownTypes:
         assert actual == expected
 
     def test_datetime(self):
-        dt = datetime(2024, 6, 15, 12, 30, 45, tzinfo=timezone.utc)
+        dt = datetime(2024, 6, 15, 12, 30, 45, tzinfo=UTC)
         record = make_zodb_record("myapp", "Obj", {"created": dt})
         self._assert_match(record)
 
@@ -110,7 +123,9 @@ class TestPgJsonKnownTypes:
         self._assert_match(record)
 
     def test_timedelta(self):
-        record = make_zodb_record("myapp", "Obj", {"duration": timedelta(days=7, hours=2)})
+        record = make_zodb_record(
+            "myapp", "Obj", {"duration": timedelta(days=7, hours=2)}
+        )
         self._assert_match(record)
 
     def test_decimal(self):
@@ -119,7 +134,8 @@ class TestPgJsonKnownTypes:
 
     def test_uuid(self):
         record = make_zodb_record(
-            "myapp", "Obj",
+            "myapp",
+            "Obj",
             {"id": UUID("12345678-1234-5678-1234-567812345678")},
         )
         self._assert_match(record)
@@ -127,7 +143,7 @@ class TestPgJsonKnownTypes:
     def test_mixed_types(self):
         state = {
             "title": "Test",
-            "created": datetime(2024, 1, 1, tzinfo=timezone.utc),
+            "created": datetime(2024, 1, 1, tzinfo=UTC),
             "score": Decimal("3.14"),
             "tags": frozenset(["a", "b"]),
             "coords": (1.0, 2.0),

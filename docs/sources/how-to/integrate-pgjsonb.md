@@ -58,7 +58,7 @@ This is the fastest path: no intermediate Python dicts are allocated, and other 
 ## Null-byte sanitization
 
 PostgreSQL JSONB cannot store `\u0000` (null bytes) in strings.
-Both PG decode functions automatically replace strings containing null bytes with `{"@ns": "<base64>"}` markers.
+Both PG decode functions automatically replace strings containing null bytes with `{"@ns:" "<base64>"}` markers.
 On encode, these markers are transparently converted back to the original byte sequences.
 
 ## Persistent reference extraction

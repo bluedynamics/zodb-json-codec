@@ -10,9 +10,7 @@ For each type, we:
 
 import json
 import pickle
-
 import pytest
-
 import zodb_json_codec
 
 

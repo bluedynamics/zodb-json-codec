@@ -11,14 +11,14 @@ The codec has built-in handlers for these types:
 
 | Python type              | JSON marker | Example JSON value                               |
 |--------------------------|-------------|--------------------------------------------------|
-| `datetime.datetime`      | `@dt`       | `{"@dt": "2024-01-15T10:30:00+00:00"}`          |
-| `datetime.date`          | `@date`     | `{"@date": "2024-01-15"}`                        |
-| `datetime.time`          | `@time`     | `{"@time": "10:30:00"}`                          |
-| `datetime.timedelta`     | `@td`       | `{"@td": [86400, 0, 0]}`                         |
-| `decimal.Decimal`        | `@dec`      | `{"@dec": "3.14"}`                               |
-| `uuid.UUID`              | `@uuid`     | `{"@uuid": "550e8400-e29b-41d4-a716-446655440000"}` |
-| `builtins.set`           | `@set`      | `{"@set": [1, 2, 3]}`                            |
-| `builtins.frozenset`     | `@fset`     | `{"@fset": [1, 2, 3]}`                           |
+| `datetime.datetime`      | `@dt`       | `{"@dt:" "2024-01-15T10:30:00+00:00"}`          |
+| `datetime.date`          | `@date`     | `{"@date:" "2024-01-15"}`                        |
+| `datetime.time`          | `@time`     | `{"@time:" "10:30:00"}`                          |
+| `datetime.timedelta`     | `@td`       | `{"@td:" [86400, 0, 0]}`                         |
+| `decimal.Decimal`        | `@dec`      | `{"@dec:" "3.14"}`                               |
+| `uuid.UUID`              | `@uuid`     | `{"@uuid:" "550e8400-e29b-41d4-a716-446655440000"}` |
+| `builtins.set`           | `@set`      | `{"@set:" [1, 2, 3]}`                            |
+| `builtins.frozenset`     | `@fset`     | `{"@fset:" [1, 2, 3]}`                           |
 | All `BTrees.*` types     | `@kv`, `@children`, etc. | Flattened key-value and tree structure |
 
 These markers are queryable in PostgreSQL JSONB and decode back to the exact original pickle bytes.

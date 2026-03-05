@@ -3,7 +3,8 @@
 <!-- diataxis: reference -->
 
 BTrees from the `BTrees` package store their state as deeply nested
-tuples in pickle. The codec flattens these into human-readable,
+tuples in pickle.
+The codec flattens these into human-readable,
 JSONB-queryable JSON while preserving full roundtrip fidelity.
 
 ## Supported BTree classes
@@ -46,7 +47,8 @@ Set
 
 ## `@kv` -- key-value pairs
 
-Used for map-type BTree nodes (BTree, Bucket). Contains an array of
+Used for map-type BTree nodes (BTree, Bucket).
+Contains an array of
 `[key, value]` pairs.
 
 **Small BTree (inline data):**
@@ -78,7 +80,8 @@ Used for map-type BTree nodes (BTree, Bucket). Contains an array of
 
 ## `@ks` -- Keys Only
 
-Used for set-type BTree nodes (TreeSet, Set). Contains a plain array of
+Used for set-type BTree nodes (TreeSet, Set).
+Contains a plain array of
 keys.
 
 **TreeSet:**
@@ -143,7 +146,8 @@ nodes with persistent references to child buckets.
 ```
 
 The `@children` array has the structure:
-`[child_ref, key, child_ref, key, ..., child_ref]`. The number of child
+`[child_ref, key, child_ref, key, ..., child_ref]`.
+The number of child
 references is always one more than the number of separator keys.
 
 ## Empty BTree
@@ -154,9 +158,10 @@ An empty BTree has `null` state:
 {"@cls": ["BTrees.OOBTree", "OOBTree"], "@s": null}
 ```
 
-## BTrees.Length
+## `BTrees.Length`
 
-`BTrees.Length.Length` objects store a plain integer. No special markers
+`BTrees.Length.Length` objects store a plain integer.
+No special markers
 are needed:
 
 ```json
@@ -170,11 +175,11 @@ and how the codec represents it:
 
 | Node Type | Pickle State | JSON Representation |
 |---|---|---|
-| Small BTree (map) | 4-level nested tuples | `{"@kv": [[k, v], ...]}` |
-| Small TreeSet (set) | 4-level nested tuples | `{"@ks": [k, ...]}` |
-| Bucket (map) | 2-level nested tuples | `{"@kv": [[k, v], ...]}` |
-| Set (set) | 2-level nested tuples | `{"@ks": [k, ...]}` |
-| Large BTree | persistent refs | `{"@children": [...], "@first": ref}` |
-| Bucket with next | 2-level + ref | `{"@kv": [...], "@next": ref}` |
+| Small BTree (map) | 4-level nested tuples | `{"@kv:" [[k, v], ...]}` |
+| Small TreeSet (set) | 4-level nested tuples | `{"@ks:" [k, ...]}` |
+| Bucket (map) | 2-level nested tuples | `{"@kv:" [[k, v], ...]}` |
+| Set (set) | 2-level nested tuples | `{"@ks:" [k, ...]}` |
+| Large BTree | persistent refs | `{"@children:" [...], "@first:" ref}` |
+| Bucket with next | 2-level + ref | `{"@kv:" [...], "@next:" ref}` |
 | Empty BTree | `None` | `null` |
-| BTrees.Length | integer | integer |
+| `BTrees.Length` | integer | integer |

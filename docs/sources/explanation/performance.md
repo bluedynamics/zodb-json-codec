@@ -3,7 +3,8 @@
 <!-- diataxis: explanation -->
 
 This page summarizes the codec's current benchmark results and provides context
-for interpreting them. For the full optimization history, see
+for interpreting them.
+For the full optimization history, see
 {doc}`optimization-journal`. For instructions on running benchmarks yourself,
 see {doc}`/how-to/run-benchmarks`.
 
@@ -12,26 +13,30 @@ see {doc}`/how-to/run-benchmarks`.
 The codec does fundamentally more work than `pickle.loads` / `pickle.dumps`:
 
 - **Pickle** (CPython C extension): one conversion, bytes to Python objects or
-  back. A single C function call per direction.
+  back.
+  A single C function call per direction.
 - **Codec**: pickle bytes to Rust `PickleValue` AST to Python dict or JSON
   string (two conversions), plus type-aware transformation for datetimes,
   Decimals, BTrees, persistent references, and other types without direct JSON
   equivalents.
 
 The codec's value is not raw speed but **JSONB queryability** -- enabling SQL
-queries on ZODB object attributes in PostgreSQL. Despite the extra work, the
+queries on ZODB object attributes in PostgreSQL.
+Despite the extra work, the
 Rust implementation beats CPython pickle on encode and roundtrip across all
 categories, and on decode for all but the largest string-dominated payloads.
 
 :::{important}
-Always benchmark with release builds. Debug builds are 3-8x slower due to
+Always benchmark with release builds.
+Debug builds are 3-8x slower due to
 missing optimizations and inlining:
 
 ```bash
 maturin develop --release
 ```
 
-For production-accurate numbers, use PGO builds. See {doc}`/how-to/run-benchmarks`.
+For production-accurate numbers, use PGO builds.
+See {doc}`/how-to/run-benchmarks`.
 :::
 
 ## Synthetic micro-benchmarks
@@ -55,7 +60,8 @@ build with LTO and `codegen-units=1`.
 | deep_nesting (379 B) | 6.9 us | 6.4 us | 1.0x |
 
 The codec is fastest on small to medium dicts with mixed types (the typical
-ZODB case). The advantage narrows on large string-dominated payloads where
+ZODB case).
+The advantage narrows on large string-dominated payloads where
 string allocation dominates -- the PyO3 boundary crossing cost for each
 Python `str` is the primary bottleneck.
 
@@ -77,14 +83,16 @@ Python `str` is the primary bottleneck.
 Encode is consistently faster because the Rust encoder writes pickle opcodes
 directly from Python objects, bypassing all intermediate data structures.
 Known types (`@dt`, `@date`, etc.) are encoded inline without allocating
-`PickleValue` nodes. Thread-local buffer reuse and class pickle caching
+`PickleValue` nodes.
+Thread-local buffer reuse and class pickle caching
 further reduce allocation overhead.
 
 ### Decode to JSON string (PG storage path)
 
 The direct path for PostgreSQL storage -- writes JSON tokens directly from the
 `PickleValue` AST to a `String` buffer, entirely in Rust with the GIL
-released. Compared against the dict path plus `json.dumps()`.
+released.
+Compared against the dict path plus `json.dumps()`.
 
 | Category | Dict+dumps | JSON str | Speedup |
 |---|---|---|---|
@@ -115,19 +123,20 @@ pipeline runs in Rust.
 
 Decode is slightly slower on real-world data (1.1x median) because these
 records are dominated by `PersistentMapping` with long text strings, where
-string allocation is the bottleneck. Encode is consistently **3.0-5.0x
+string allocation is the bottleneck.
+Encode is consistently **3.0-5.0x
 faster** because the Rust encoder writes pickle opcodes directly.
 
 ### Record type distribution
 
 | Record type | Count | % |
 |---|---|---|
-| persistent.mapping.PersistentMapping | 1,188 | 70.2% |
-| BTrees.OOBTree.OOBucket | 342 | 20.2% |
-| persistent.list.PersistentList | 100 | 5.9% |
-| BTrees.OOBTree.OOBTree | 55 | 3.3% |
-| BTrees.Length.Length | 5 | 0.3% |
-| BTrees.OIBTree.OIBTree | 2 | 0.1% |
+| `persistent.mapping.PersistentMapping` | 1,188 | 70.2% |
+| `BTrees.OOBTree.OOBucket` | 342 | 20.2% |
+| `persistent.list.PersistentList` | 100 | 5.9% |
+| `BTrees.OOBTree.OOBTree` | 55 | 3.3% |
+| `BTrees.Length.Length` | 5 | 0.3% |
+| `BTrees.OIBTree.OIBTree` | 2 | 0.1% |
 
 ## PG storage path (full pipeline)
 
@@ -147,7 +156,8 @@ JSON path:   pickle bytes -> Rust AST -> JSON string (direct write, GIL released
 | P95 | 62.0 us | 51.9 us | **1.2x faster** |
 
 The JSON string path is faster because it eliminates both the Python dict
-allocation and the `json.dumps()` serialization. It also releases the GIL for
+allocation and the `json.dumps()` serialization.
+It also releases the GIL for
 the entire conversion, improving multi-threaded throughput in Zope/Plone
 deployments.
 
@@ -164,7 +174,8 @@ deployments.
 | deep_nesting | 379 B | 586 B | 1.55x |
 
 JSON is typically smaller than pickle for string-heavy data (wide_dict is 42%
-smaller) because pickle includes per-string opcode overhead. JSON is larger for
+smaller) because pickle includes per-string opcode overhead.
+JSON is larger for
 binary data (base64 encoding adds ~33%) and deeply nested structures (marker
 key overhead).
 

@@ -96,7 +96,8 @@ Output:
 }
 ```
 
-The `@t` marker wraps the tuple elements in a JSON array. Without it, there
+The `@t` marker wraps the tuple elements in a JSON array.
+Without it, there
 would be no way to distinguish a tuple from a list after roundtripping.
 
 ### Bytes use `@b`
@@ -174,7 +175,8 @@ complete list.
 
 ### Dicts with non-string keys use `@d`
 
-JSON objects only support string keys. When a Python dict has non-string keys,
+JSON objects only support string keys.
+When a Python dict has non-string keys,
 the codec uses an array-of-pairs representation:
 
 ```python
@@ -216,7 +218,8 @@ assert pickled == restored_pickle2  # identical bytes
 ```
 
 Both paths -- JSON string and Python dict -- produce the exact same pickle
-bytes as the original. This guarantee means you can transcode ZODB data to JSON
+bytes as the original.
+This guarantee means you can transcode ZODB data to JSON
 for storage and querying, then reconstruct the original pickle when ZODB needs
 it back.
 
@@ -249,7 +252,8 @@ Output:
 ```
 
 Tuples inside a list each get their own `@t` marker, and bytes inside a nested
-dict get a `@b` marker. The structure is human-readable and fully queryable
+dict get a `@b` marker.
+The structure is human-readable and fully queryable
 when stored as PostgreSQL JSONB.
 
 ## What's next

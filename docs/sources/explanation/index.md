@@ -2,7 +2,8 @@
 
 <!-- diataxis: explanation -->
 
-Background knowledge, design decisions, and optimization history. These pages
+Background knowledge, design decisions, and optimization history.
+These pages
 help you understand *why* the codec works the way it does.
 
 ::::{grid} 2
@@ -20,7 +21,8 @@ costs you, and why JSONB queryability changes the equation.
 :link: architecture
 :link-type: doc
 
-Internal structure of the codec. Decode and encode pipelines, the
+Internal structure of the codec.
+Decode and encode pipelines, the
 PickleValue AST, known-type interception, and the three decode output
 paths.
 :::
@@ -29,7 +31,8 @@ paths.
 :link: performance
 :link-type: doc
 
-Current benchmark results with context. Synthetic micro-benchmarks,
+Current benchmark results with context.
+Synthetic micro-benchmarks,
 FileStorage scans, PG storage path comparisons, and output size data.
 :::
 
@@ -38,7 +41,8 @@ FileStorage scans, PG storage path comparisons, and output size data.
 :link-type: doc
 
 Chronological record of every performance optimization from v1.0.0
-through v1.5.0. Techniques, insights, measured impact, and lessons
+through v1.5.0.
+Techniques, insights, measured impact, and lessons
 learned.
 :::
 
@@ -46,7 +50,8 @@ learned.
 :link: security
 :link-type: doc
 
-Defense-in-depth measures against malformed pickle data. Length
+Defense-in-depth measures against malformed pickle data.
+Length
 validation, memo caps, recursion limits, and allocation guards.
 :::
 

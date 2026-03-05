@@ -3,7 +3,8 @@
 <!-- diataxis: reference -->
 
 This page describes how Python types are represented in JSON by
-zodb-json-codec. All representations are **roundtrip-safe**: encoding to
+zodb-json-codec.
+All representations are **roundtrip-safe**: encoding to
 JSON and decoding back produces identical pickle bytes.
 
 ## Native JSON types
@@ -18,7 +19,7 @@ These Python types map directly to JSON without any markers:
 | `bool` | boolean | `true` / `false` |
 | `None` | null | `null` |
 | `list` | array | `[1, 2, 3]` |
-| `dict` (string keys) | object | `{"key": "value"}` |
+| `dict` (string keys) | object | `{"key:" "value"}` |
 
 ## Structural markers
 
@@ -61,7 +62,7 @@ Array-of-pairs representation for dicts whose keys are not all strings.
 {"@d": [[1, "a"], [2, "b"]]}
 ```
 
-Python: `{1: "a", 2: "b"}`
+Python: `{1: "a," 2: "b"}`
 
 ### `@set` -- Set
 
@@ -91,7 +92,8 @@ purpose-built marker.
 
 ### `@dt` -- datetime.datetime
 
-ISO 8601 format. Naive datetimes have no offset; timezone-aware
+ISO 8601 format.
+Naive datetimes have no offset; timezone-aware
 datetimes include the UTC offset.
 
 ```json
@@ -108,21 +110,23 @@ Python: `datetime(2025, 6, 15, 12, 30, 45)`
 
 Fixed-offset timezones are embedded directly in the ISO 8601 string.
 Named timezones (pytz, zoneinfo) use a separate `@tz` key to preserve
-the zone name for exact roundtrip fidelity. These two forms are
+the zone name for exact roundtrip fidelity.
+These two forms are
 mutually exclusive:
 
 | Timezone Source | JSON Form |
 |---|---|
-| Naive (no tz) | `{"@dt": "2025-01-01T00:00:00"}` |
-| `datetime.timezone.utc` | `{"@dt": "2025-01-01T00:00:00+00:00"}` |
-| `datetime.timezone(offset)` | `{"@dt": "2025-01-01T00:00:00+05:30"}` |
-| `pytz.utc` | `{"@dt": "2025-01-01T00:00:00+00:00"}` |
-| `pytz.timezone("US/Eastern")` | `{"@dt": "...", "@tz": {"name": "US/Eastern", "pytz": [...]}}` |
-| `zoneinfo.ZoneInfo("US/Eastern")` | `{"@dt": "...", "@tz": {"zoneinfo": "US/Eastern"}}` |
+| Naive (no tz) | `{"@dt:" "2025-01-01T00:00:00"}` |
+| `datetime.timezone.utc` | `{"@dt:" "2025-01-01T00:00:00+00:00"}` |
+| `datetime.timezone(offset)` | `{"@dt:" "2025-01-01T00:00:00+05:30"}` |
+| `pytz.utc` | `{"@dt:" "2025-01-01T00:00:00+00:00"}` |
+| `pytz.timezone("US/Eastern")` | `{"@dt:" "...," "@tz:" {"name:" "US/Eastern," "pytz:" [...]}}` |
+| `zoneinfo.ZoneInfo("US/Eastern")` | `{"@dt:" "...," "@tz:" {"zoneinfo:" "US/Eastern"}}` |
 
 For pytz named timezones, the `@tz.pytz` array preserves the full
 constructor arguments (name, UTC offset in seconds, DST offset,
-abbreviation) for exact roundtrip fidelity. For zoneinfo, only the zone
+abbreviation) for exact roundtrip fidelity.
+For zoneinfo, only the zone
 key is needed.
 
 ### `@date` -- datetime.date
@@ -137,7 +141,8 @@ Python: `date(2025, 6, 15)`
 
 ### `@time` -- datetime.time
 
-ISO 8601 time format. Microseconds are included only when non-zero.
+ISO 8601 time format.
+Microseconds are included only when non-zero.
 
 ```json
 {"@time": "12:30:45"}
@@ -156,7 +161,7 @@ Array of `[days, seconds, microseconds]`.
 
 Python: `timedelta(days=7, seconds=3600, microseconds=500000)`
 
-### `@dec` -- decimal.Decimal
+### `@dec` -- `decimal.Decimal`
 
 String representation preserving exact decimal value.
 
@@ -168,7 +173,7 @@ String representation preserving exact decimal value.
 
 Python: `Decimal("3.14159")`
 
-### `@uuid` -- uuid.UUID
+### `@uuid` -- `uuid.UUID`
 
 Standard UUID string format (8-4-4-4-12 hex digits).
 
@@ -191,7 +196,8 @@ opcode.
 
 ### `@s` -- Object State
 
-The state value from `__getstate__()`. Always paired with `@cls` in a
+The state value from `__getstate__()`.
+Always paired with `@cls` in a
 ZODB record.
 
 ```json
@@ -218,7 +224,8 @@ The second form includes the class path for direct resolution.
 
 ### `@reduce` -- Generic REDUCE
 
-For REDUCE operations not handled by a known type handler. Preserves the
+For REDUCE operations not handled by a known type handler.
+Preserves the
 callable and arguments for roundtripping.
 
 ```json
@@ -233,7 +240,8 @@ callable and arguments for roundtripping.
 ### `@pkl` -- Raw Pickle Escape Hatch
 
 Base64-encoded pickle fragment for types that cannot be represented in
-JSON. This is the "never fails" fallback -- any pickle data can
+JSON.
+This is the "never fails" fallback -- any pickle data can
 roundtrip through this marker.
 
 ```json
@@ -260,7 +268,8 @@ order:
 ## Backward Compatibility
 
 If JSON data was stored using the generic `@reduce` format for types
-that now have dedicated markers (e.g., datetime stored as `@reduce`
+that now have dedicated markers (for example, datetime stored as `@reduce`
 before the known type handlers were added), the decoder still handles
-`@reduce` correctly. The new markers only affect the forward direction
+`@reduce` correctly.
+The new markers only affect the forward direction
 (pickle to JSON).

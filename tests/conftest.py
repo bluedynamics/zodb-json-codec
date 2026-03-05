@@ -1,7 +1,5 @@
 """Fixtures for zodb-json-codec tests."""
 
-import pickle
-
 import pytest
 
 

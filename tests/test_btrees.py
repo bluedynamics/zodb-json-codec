@@ -10,9 +10,7 @@ The codec flattens these into queryable JSON.
 
 import json
 import pickle
-
 import pytest
-
 import zodb_json_codec
 
 
@@ -28,7 +26,8 @@ class TestSmallOOBTree:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             (((("a", 1, "b", 2),),),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -38,7 +37,8 @@ class TestSmallOOBTree:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             (((("a", 1, "b", 2),),),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -52,7 +52,8 @@ class TestSmallIIBTree:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.IIBTree", "IIBTree",
+            "BTrees.IIBTree",
+            "IIBTree",
             ((((1, 100, 2, 200),),),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -61,7 +62,8 @@ class TestSmallIIBTree:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.IIBTree", "IIBTree",
+            "BTrees.IIBTree",
+            "IIBTree",
             ((((1, 100, 2, 200),),),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -75,7 +77,8 @@ class TestSmallIOBTree:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.IOBTree", "IOBTree",
+            "BTrees.IOBTree",
+            "IOBTree",
             ((((1, "hello", 2, "world"),),),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -84,7 +87,8 @@ class TestSmallIOBTree:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.IOBTree", "IOBTree",
+            "BTrees.IOBTree",
+            "IOBTree",
             ((((1, "hello", 2, "world"),),),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -98,7 +102,8 @@ class TestSmallTreeSet:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.IIBTree", "IITreeSet",
+            "BTrees.IIBTree",
+            "IITreeSet",
             ((((1, 2, 3),),),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -108,7 +113,8 @@ class TestSmallTreeSet:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.IIBTree", "IITreeSet",
+            "BTrees.IIBTree",
+            "IITreeSet",
             ((((1, 2, 3),),),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -122,7 +128,8 @@ class TestBucket:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBucket",
+            "BTrees.OOBTree",
+            "OOBucket",
             (("x", 10, "y", 20),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -131,7 +138,8 @@ class TestBucket:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBucket",
+            "BTrees.OOBTree",
+            "OOBucket",
             (("x", 10, "y", 20),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -145,7 +153,8 @@ class TestSet:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOSet",
+            "BTrees.OOBTree",
+            "OOSet",
             (("a", "b", "c"),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -154,7 +163,8 @@ class TestSet:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOSet",
+            "BTrees.OOBTree",
+            "OOSet",
             (("a", "b", "c"),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -168,7 +178,8 @@ class TestEmptyBTree:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             None,
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -177,7 +188,8 @@ class TestEmptyBTree:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             None,
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -191,7 +203,8 @@ class TestLength:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.Length", "Length",
+            "BTrees.Length",
+            "Length",
             42,
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -200,7 +213,8 @@ class TestLength:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.Length", "Length",
+            "BTrees.Length",
+            "Length",
             42,
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -214,7 +228,8 @@ class TestEmptyInlineBTree:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             ((((),),),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -222,7 +237,8 @@ class TestEmptyInlineBTree:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBTree",
+            "BTrees.OOBTree",
+            "OOBTree",
             ((((),),),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -236,7 +252,8 @@ class TestEmptyBucket:
 
     def test_format(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBucket",
+            "BTrees.OOBTree",
+            "OOBucket",
             ((),),
         )
         result = zodb_json_codec.decode_zodb_record(record)
@@ -244,7 +261,8 @@ class TestEmptyBucket:
 
     def test_roundtrip(self):
         record = make_zodb_record(
-            "BTrees.OOBTree", "OOBucket",
+            "BTrees.OOBTree",
+            "OOBucket",
             ((),),
         )
         decoded = zodb_json_codec.decode_zodb_record(record)
@@ -259,6 +277,7 @@ class TestRealZODB:
     @pytest.fixture
     def zodb(self):
         from ZODB import DB
+
         import transaction
 
         db = DB(None)
@@ -271,9 +290,10 @@ class TestRealZODB:
 
     def test_oobtree(self, zodb):
         from BTrees.OOBTree import OOBTree
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         tree = OOBTree()
         tree["alpha"] = "first"
         tree["beta"] = "second"
@@ -303,9 +323,10 @@ class TestRealZODB:
 
     def test_iibtree(self, zodb):
         from BTrees.IIBTree import IIBTree
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         tree = IIBTree()
         tree[1] = 100
         tree[2] = 200
@@ -330,9 +351,10 @@ class TestRealZODB:
 
     def test_iitreeset(self, zodb):
         from BTrees.IIBTree import IITreeSet
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         ts = IITreeSet()
         ts.insert(10)
         ts.insert(20)
@@ -354,9 +376,10 @@ class TestRealZODB:
 
     def test_length(self, zodb):
         from BTrees.Length import Length
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         length = Length()
         length.set(42)
         root["length"] = length
@@ -375,9 +398,10 @@ class TestRealZODB:
 
     def test_empty_oobtree(self, zodb):
         from BTrees.OOBTree import OOBTree
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         tree = OOBTree()
         root["empty"] = tree
         transaction.commit()
@@ -396,9 +420,10 @@ class TestRealZODB:
     def test_large_oobtree(self, zodb):
         """Large OOBTree with enough items to force bucket splits."""
         from BTrees.OOBTree import OOBTree
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         tree = OOBTree()
         for i in range(100):
             tree[f"key_{i:04d}"] = f"value_{i}"
@@ -427,9 +452,10 @@ class TestRealZODB:
 
     def test_ooset(self, zodb):
         from BTrees.OOBTree import OOSet
+
         import transaction
 
-        db, conn, root = zodb
+        db, _conn, root = zodb
         s = OOSet()
         s.insert("x")
         s.insert("y")

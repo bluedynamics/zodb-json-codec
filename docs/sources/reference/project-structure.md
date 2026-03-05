@@ -39,28 +39,34 @@ benchmarks/
 ### `lib.rs` -- PyO3 module
 
 Defines the Python-facing functions (`#[pyfunction]`) that are exported
-as the `zodb_json_codec._rust` extension module. Each function
+as the `zodb_json_codec._rust` extension module.
+Each function
 coordinates the decode/encode pipeline by calling into the appropriate
-internal modules. Handles GIL release (`py.detach()`) around pure-Rust
+internal modules.
+Handles GIL release (`py.detach()`) around pure-Rust
 phases.
 
 ### `types.rs` -- PickleValue AST
 
 Defines the `PickleValue` enum, the intermediate representation that
-sits between pickle bytes and JSON. Every pickle value is represented as
+sits between pickle bytes and JSON.
+Every pickle value is represented as
 one of: `None`, `Bool`, `Int`, `BigInt`, `Float`, `String`, `Bytes`,
 `List`, `Tuple`, `Dict`, `Set`, `FrozenSet`, `Global`, `Instance`,
 `PersistentRef`, `Reduce`, or `RawPickle`.
 
 Also defines `InstanceData` (module, name, state, plus optional
-`dict_items` and `list_items` for subclass support). The `Instance`
+`dict_items` and `list_items` for subclass support).
+The `Instance`
 variant is boxed to keep the enum size at 48 bytes.
 
 ### `decode.rs` -- pickle decoder
 
 Implements a subset of the pickle virtual machine sufficient for ZODB
-records (protocol 2-3, partial protocol 4). Reads pickle bytes and
-produces a `PickleValue` AST. No Python objects are constructed.
+records (protocol 2-3, partial protocol 4).
+Reads pickle bytes and
+produces a `PickleValue` AST.
+No Python objects are constructed.
 
 Key functions:
 
@@ -74,17 +80,21 @@ at 256 MB, LONG text at 10,000 characters.
 ### `encode.rs` -- pickle encoder
 
 Converts a `PickleValue` AST back to pickle bytes in protocol 3 (the
-maximum supported by zodbpickle). Handles all value types including
+maximum supported by zodbpickle).
+Handles all value types including
 `Instance`, `Reduce`, `Global`, and `PersistentRef`.
 
-Recursion depth is limited to 1,000 levels. Integers are encoded with
+Recursion depth is limited to 1,000 levels.
+Integers are encoded with
 minimal byte length for signed little-endian representation.
 
 ### `pyconv.rs` -- direct PyObject bridge
 
-The fast path for the Python dict API. Converts between `PickleValue`
+The fast path for the Python dict API.
+Converts between `PickleValue`
 AST and Python objects directly, bypassing the `serde_json::Value`
-intermediate layer. Handles all JSON markers, known type detection,
+intermediate layer.
+Handles all JSON markers, known type detection,
 BTree flattening, and persistent reference compact/expand in a single
 tree walk.
 
@@ -101,7 +111,8 @@ Provides both standard and PG-specific variants:
 ### `json.rs` -- JSON string path
 
 Converts between `PickleValue` AST and `serde_json::Value` for the JSON
-string API (`pickle_to_json`, `json_to_pickle`). Also provides the
+string API (`pickle_to_json`, `json_to_pickle`).
+Also provides the
 PG-specific `pickle_value_to_json_string_pg` which uses the
 `JsonWriter` for zero-allocation output.
 
@@ -117,8 +128,10 @@ Key functions:
 ### `json_writer.rs` -- direct JSON string writer
 
 A low-level JSON token writer that appends directly to a `String`
-buffer. Used by the PG JSON path to avoid allocating intermediate
-`serde_json::Value` nodes entirely. Writes JSON tokens (object open/
+buffer.
+Used by the PG JSON path to avoid allocating intermediate
+`serde_json::Value` nodes entirely.
+Writes JSON tokens (object open/
 close, array open/close, strings, numbers, booleans, null) as raw
 characters.
 
@@ -126,7 +139,8 @@ characters.
 
 Intercepts common Python REDUCE patterns at the PickleValue/JSON
 boundary and produces compact typed markers instead of generic `@reduce`
-output. Handles both directions:
+output.
+Handles both directions:
 
 - **Forward** (PickleValue to JSON): `try_reduce_to_typed_json` --
   recognizes `datetime.datetime`, `datetime.date`, `datetime.time`,
@@ -142,7 +156,8 @@ pytz (including named zones with full constructor args), and zoneinfo.
 ### `btrees.rs` -- BTree state handling
 
 Classifies BTree classes by module/name and flattens their deeply nested
-tuple state into queryable JSON. Handles both directions:
+tuple state into queryable JSON.
+Handles both directions:
 
 - **Forward**: `btree_state_to_json` -- flatten nested tuples to `@kv`,
   `@ks`, `@children`, `@first`, `@next` markers.
@@ -153,7 +168,8 @@ tuple state into queryable JSON. Handles both directions:
 
 ### `zodb.rs` -- ZODB record handling
 
-Handles the ZODB two-pickle record format. Provides:
+Handles the ZODB two-pickle record format.
+Provides:
 
 - `split_zodb_record` -- find the boundary between class and state
   pickles by walking the first pickle to its STOP opcode.
@@ -166,7 +182,8 @@ roundtrip testing.
 
 ### `opcodes.rs` -- pickle opcode constants
 
-Defines constants for all pickle opcodes from protocol 0 through 5. The
+Defines constants for all pickle opcodes from protocol 0 through 5.
+The
 codec focuses on protocol 2-3 (ZODB standard) but includes protocol 4-5
 opcodes for partial forward compatibility.
 
@@ -174,7 +191,8 @@ opcodes for partial forward compatibility.
 
 Defines `CodecError` with variants for all failure modes: unexpected
 EOF, unknown opcode, stack underflow, invalid data, JSON errors, and
-invalid UTF-8. Implements conversion to Python `ValueError` via PyO3.
+invalid UTF-8.
+Implements conversion to Python `ValueError` via PyO3.
 
 ## Data flow
 
@@ -204,7 +222,8 @@ flowchart LR
 
 **Path 1 -- Python dict API** (`decode_zodb_record`, `pickle_to_dict`):
 Pickle bytes go through `decode.rs` to `PickleValue`, then `pyconv.rs`
-converts directly to Python objects with marker dicts. The encode
+converts directly to Python objects with marker dicts.
+The encode
 direction goes from Python objects through `pyconv.rs` directly to
 pickle bytes, bypassing the AST.
 
@@ -217,7 +236,8 @@ The reverse path deserializes JSON, converts through `json.rs` back to
 **Path 3 -- PG JSON path** (`decode_zodb_record_for_pg_json`):
 Pickle bytes go through `decode.rs` to `PickleValue`, then
 `json_writer.rs` writes JSON tokens directly to a string buffer,
-skipping the `serde_json::Value` intermediate entirely. This is the
+skipping the `serde_json::Value` intermediate entirely.
+This is the
 fastest path.
 
 In all paths, `known_types.rs` and `btrees.rs` are consulted during

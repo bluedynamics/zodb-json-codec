@@ -10,6 +10,15 @@ All commands accept --output FILE (JSON export) and --format {table,json,both}.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from dataclasses import field
+from datetime import date
+from datetime import datetime
+from datetime import timedelta
+from datetime import UTC
+from decimal import Decimal
+from pathlib import Path
+
 import argparse
 import gzip
 import hashlib
@@ -20,10 +29,6 @@ import statistics
 import sys
 import time
 import uuid
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -251,9 +256,7 @@ def python_encode_zodb_record(
 # ---------------------------------------------------------------------------
 
 
-def bench_one(
-    fn, *args, iterations: int = 1000, warmup: int = 100
-) -> TimingStats:
+def bench_one(fn, *args, iterations: int = 1000, warmup: int = 100) -> TimingStats:
     """Time a function, return stats in microseconds."""
     for _ in range(warmup):
         fn(*args)
@@ -364,8 +367,9 @@ def run_filestorage_benchmark(
     max_records: int | None = None,
 ) -> FileStorageResult:
     """Scan a FileStorage and benchmark every record."""
-    import zodb_json_codec
     from ZODB.FileStorage import FileStorage
+
+    import zodb_json_codec
 
     storage = FileStorage(path, read_only=True)
     result = FileStorageResult(path=path)
@@ -470,19 +474,19 @@ def _speedup(baseline: float, candidate: float) -> str:
     ratio = baseline / candidate
     if ratio >= 1:
         return f"{ratio:.1f}x faster"
-    return f"{1/ratio:.1f}x slower"
+    return f"{1 / ratio:.1f}x slower"
 
 
 def _fmt_us(val: float) -> str:
     if val >= 1000:
-        return f"{val/1000:.1f} ms"
+        return f"{val / 1000:.1f} ms"
     return f"{val:.1f} us"
 
 
 def print_synthetic_results(results: list[BenchmarkResult]) -> None:
-    print(f"\n{HEADER}{'='*72}")
-    print(f" Synthetic Benchmarks")
-    print(f"{'='*72}{RESET}\n")
+    print(f"\n{HEADER}{'=' * 72}")
+    print(" Synthetic Benchmarks")
+    print(f"{'=' * 72}{RESET}\n")
 
     for r in results:
         ratio = r.json_size / r.pickle_size if r.pickle_size else 0
@@ -496,7 +500,7 @@ def print_synthetic_results(results: list[BenchmarkResult]) -> None:
             f"  {'Operation':<26} {'Mean':>10} {'Median':>10} "
             f"{'P95':>10} {'vs Python':>14}"
         )
-        print(f"  {'-'*70}")
+        print(f"  {'-' * 70}")
 
         rows = [
             ("Decode (Python)", r.decode_python, None),
@@ -518,13 +522,10 @@ def print_synthetic_results(results: list[BenchmarkResult]) -> None:
     # Size comparison summary
     print(f"{HEADER}Size Comparison{RESET}")
     print(f"  {'Category':<24} {'Pickle':>10} {'JSON':>10} {'Ratio':>8}")
-    print(f"  {'-'*52}")
+    print(f"  {'-' * 52}")
     for r in results:
         ratio = r.json_size / r.pickle_size if r.pickle_size else 0
-        print(
-            f"  {r.name:<24} {r.pickle_size:>10} {r.json_size:>10} "
-            f"{ratio:>7.2f}x"
-        )
+        print(f"  {r.name:<24} {r.pickle_size:>10} {r.json_size:>10} {ratio:>7.2f}x")
     print()
 
 
@@ -532,9 +533,9 @@ def print_filestorage_results(
     result: FileStorageResult,
     show_python_failures: bool = False,
 ) -> None:
-    print(f"\n{HEADER}{'='*72}")
+    print(f"\n{HEADER}{'=' * 72}")
     print(f" FileStorage Scan: {result.path}")
-    print(f"{'='*72}{RESET}\n")
+    print(f"{'=' * 72}{RESET}\n")
 
     ratio = (
         result.total_json_bytes / result.total_pickle_bytes
@@ -564,13 +565,9 @@ def print_filestorage_results(
             continue
         print(f"  {HEADER}{label}{RESET} ({stats.count:,} samples)")
         print(
-            f"    Mean: {_fmt_us(stats.mean):>12}   "
-            f"Median: {_fmt_us(stats.median):>12}"
+            f"    Mean: {_fmt_us(stats.mean):>12}   Median: {_fmt_us(stats.median):>12}"
         )
-        print(
-            f"    P95:  {_fmt_us(stats.p95):>12}   "
-            f"P99:    {_fmt_us(stats.p99):>12}"
-        )
+        print(f"    P95:  {_fmt_us(stats.p95):>12}   P99:    {_fmt_us(stats.p99):>12}")
         print(
             f"    Min:  {_fmt_us(stats.min_val):>12}   "
             f"Max:    {_fmt_us(stats.max_val):>12}"
@@ -601,7 +598,9 @@ def print_filestorage_results(
 
     # Python decode failures by class
     if show_python_failures and result.python_failed_classes:
-        print(f"  {HEADER}Python pickle failed to decode ({len(result.python_failed_classes)} classes){RESET}")
+        print(
+            f"  {HEADER}Python pickle failed to decode ({len(result.python_failed_classes)} classes){RESET}"
+        )
         sorted_fails = sorted(
             result.python_failed_classes.items(), key=lambda x: x[1], reverse=True
         )
@@ -644,7 +643,7 @@ def results_to_json(
     filestorage: FileStorageResult | None,
 ) -> dict:
     out: dict = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "python_version": sys.version,
     }
     try:
@@ -725,7 +724,6 @@ def _body_max_len(index: int) -> int:
 
 def run_generate(output_path: str, seed_path: str | None) -> None:
     """Generate a FileStorage populated with diverse ZODB objects."""
-    import transaction
     from BTrees.Length import Length
     from BTrees.OIBTree import OIBTree
     from BTrees.OOBTree import OOBTree
@@ -733,6 +731,8 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
     from persistent.mapping import PersistentMapping
     from ZODB import DB
     from ZODB.FileStorage import FileStorage
+
+    import transaction
 
     # Load seed data
     resolved = _find_seed_data(seed_path)
@@ -781,24 +781,32 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
     groups_map: dict[int, list] = {}
 
     tag_pool = [
-        "science", "history", "geography", "culture", "nature",
-        "politics", "economy", "society", "travel", "education",
+        "science",
+        "history",
+        "geography",
+        "culture",
+        "nature",
+        "politics",
+        "economy",
+        "society",
+        "travel",
+        "education",
     ]
 
     for i, seed in enumerate(articles):
         art = PersistentMapping()
         art["title"] = seed["title"]
         art["description"] = seed["description"]
-        art["body"] = seed["body"][:_body_max_len(i)]
+        art["body"] = seed["body"][: _body_max_len(i)]
         art["url"] = seed["url"]
         art["language"] = seed["language"]
         art["category"] = seed["category"]
         art["group_id"] = seed["group_id"]
 
         # Enriched type-diverse fields (deterministic from index)
-        art["created"] = datetime(
-            2024, 1, 1, tzinfo=timezone.utc
-        ) + timedelta(days=i % 365, hours=i % 24, minutes=i % 60)
+        art["created"] = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(
+            days=i % 365, hours=i % 24, minutes=i % 60
+        )
         art["modified"] = art["created"] + timedelta(
             days=i % 30 + 1, seconds=i * 37 % 86400
         )
@@ -858,9 +866,7 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
         grp["total_words"] = Decimal(
             str(sum(len(a["body"].split()) for a in group_articles))
         )
-        grp["created"] = datetime(
-            2024, 6, 1, tzinfo=timezone.utc
-        ) + timedelta(days=gid)
+        grp["created"] = datetime(2024, 6, 1, tzinfo=UTC) + timedelta(days=gid)
         root["groups"][str(gid)] = grp
         group_count += 1
     transaction.commit()
@@ -913,9 +919,7 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
 
     # Tuple-heavy
     root["tuple_obj"] = PersistentMapping()
-    root["tuple_obj"]["data"] = tuple(
-        (i, f"item_{i}", i * 0.1) for i in range(50)
-    )
+    root["tuple_obj"]["data"] = tuple((i, f"item_{i}", i * 0.1) for i in range(50))
 
     transaction.commit()
 
@@ -931,7 +935,7 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
     print(f"  Category BTrees: {len(cat_trees)}")
     print(f"  Language BTrees: {len(lang_trees)}")
     print(f"  Group summaries: {group_count}")
-    print(f"  Edge-case objects: 5")
+    print("  Edge-case objects: 5")
     print("\nRun benchmark with:")
     print(f"  python benchmarks/bench.py filestorage {out}")
 
@@ -941,9 +945,7 @@ def run_generate(output_path: str, seed_path: str | None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_pg_compare(
-    iterations: int = 1000, warmup: int = 100
-) -> list[dict]:
+def run_pg_compare(iterations: int = 1000, warmup: int = 100) -> list[dict]:
     """Compare decode_zodb_record_for_pg (dict) vs decode_zodb_record_for_pg_json (str).
 
     Measures both raw decode time and full pipeline time (decode + JSON serialization),
@@ -979,29 +981,28 @@ def run_pg_compare(
         def _json_pipeline(data=record_data):
             zodb_json_codec.decode_zodb_record_for_pg_json(data)
 
-        pipeline_dict = bench_one(
-            _dict_pipeline, iterations=iterations, warmup=warmup
-        )
-        pipeline_json = bench_one(
-            _json_pipeline, iterations=iterations, warmup=warmup
-        )
+        pipeline_dict = bench_one(_dict_pipeline, iterations=iterations, warmup=warmup)
+        pipeline_json = bench_one(_json_pipeline, iterations=iterations, warmup=warmup)
 
-        results.append({
-            "name": name,
-            "pickle_size": len(record_data),
-            "pg_dict": pg_dict,
-            "pg_json": pg_json,
-            "pipeline_dict": pipeline_dict,
-            "pipeline_json": pipeline_json,
-        })
+        results.append(
+            {
+                "name": name,
+                "pickle_size": len(record_data),
+                "pg_dict": pg_dict,
+                "pg_json": pg_json,
+                "pipeline_dict": pipeline_dict,
+                "pipeline_json": pipeline_json,
+            }
+        )
 
     return results
 
 
 def run_pg_compare_filestorage(path: str) -> dict:
     """Compare PG decode paths on real FileStorage data."""
-    import zodb_json_codec
     from ZODB.FileStorage import FileStorage
+
+    import zodb_json_codec
 
     storage = FileStorage(path, read_only=True)
     pg_dict_stats = TimingStats()
@@ -1059,62 +1060,50 @@ def print_pg_compare_results(
     synthetic: list[dict],
     filestorage: dict | None = None,
 ) -> None:
-    print(f"\n{HEADER}{'='*72}")
-    print(f" PG Decode: dict path vs JSON string path")
-    print(f"{'='*72}{RESET}\n")
+    print(f"\n{HEADER}{'=' * 72}")
+    print(" PG Decode: dict path vs JSON string path")
+    print(f"{'=' * 72}{RESET}\n")
 
     # Raw decode comparison
     print(f"  {HEADER}Raw decode (no JSON serialization){RESET}")
-    print(
-        f"  {'Category':<26} {'Dict (mean)':>12} {'JSON (mean)':>12} "
-        f"{'Speedup':>12}"
-    )
-    print(f"  {'-'*62}")
+    print(f"  {'Category':<26} {'Dict (mean)':>12} {'JSON (mean)':>12} {'Speedup':>12}")
+    print(f"  {'-' * 62}")
     for r in synthetic:
         d_mean = r["pg_dict"].mean
         j_mean = r["pg_json"].mean
         sp = _speedup(d_mean, j_mean)
-        print(
-            f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} "
-            f"{sp:>12}"
-        )
+        print(f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} {sp:>12}")
     print()
 
     # Full pipeline comparison (dict+json.dumps vs JSON string)
     print(f"  {HEADER}Full pipeline (decode + JSON serialization for PG){RESET}")
-    print(
-        f"  {'Category':<26} {'Dict+dumps':>12} {'JSON str':>12} "
-        f"{'Speedup':>12}"
-    )
-    print(f"  {'-'*62}")
+    print(f"  {'Category':<26} {'Dict+dumps':>12} {'JSON str':>12} {'Speedup':>12}")
+    print(f"  {'-' * 62}")
     for r in synthetic:
         d_mean = r["pipeline_dict"].mean
         j_mean = r["pipeline_json"].mean
         sp = _speedup(d_mean, j_mean)
-        print(
-            f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} "
-            f"{sp:>12}"
-        )
+        print(f"  {r['name']:<26} {_fmt_us(d_mean):>12} {_fmt_us(j_mean):>12} {sp:>12}")
     print()
 
     if filestorage:
         print(f"  {HEADER}FileStorage ({filestorage['records']:,} records){RESET}")
-        print(f"\n  Raw decode:")
+        print("\n  Raw decode:")
         d = filestorage["pg_dict"]
         j = filestorage["pg_json"]
         print(f"    {'Metric':<16} {'Dict':>12} {'JSON str':>12} {'Speedup':>12}")
-        print(f"    {'-'*52}")
+        print(f"    {'-' * 52}")
         for label, attr in [("Mean", "mean"), ("Median", "median"), ("P95", "p95")]:
             dv = getattr(d, attr)
             jv = getattr(j, attr)
             sp = _speedup(dv, jv)
             print(f"    {label:<16} {_fmt_us(dv):>12} {_fmt_us(jv):>12} {sp:>12}")
 
-        print(f"\n  Full pipeline (decode + JSON serialization):")
+        print("\n  Full pipeline (decode + JSON serialization):")
         d = filestorage["pipeline_dict"]
         j = filestorage["pipeline_json"]
         print(f"    {'Metric':<16} {'Dict+dumps':>12} {'JSON str':>12} {'Speedup':>12}")
-        print(f"    {'-'*52}")
+        print(f"    {'-' * 52}")
         for label, attr in [("Mean", "mean"), ("Median", "median"), ("P95", "p95")]:
             dv = getattr(d, attr)
             jv = getattr(j, attr)
@@ -1328,15 +1317,15 @@ def main() -> None:
     if args.command == "check" and synthetic_results:
         failures = check_regression(synthetic_results)
         if failures:
-            print(f"\n{'='*60}")
+            print(f"\n{'=' * 60}")
             print(f"PERFORMANCE REGRESSION DETECTED ({len(failures)} failures)")
-            print(f"{'='*60}")
+            print(f"{'=' * 60}")
             for f in failures:
                 print(f"  {f}")
             print()
             sys.exit(1)
         else:
-            print(f"\nPerformance check passed (all ratios within thresholds)")
+            print("\nPerformance check passed (all ratios within thresholds)")
 
 
 if __name__ == "__main__":
