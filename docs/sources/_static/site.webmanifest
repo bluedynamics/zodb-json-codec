@@ -1,0 +1,31 @@
+{
+    "name": "zodb-json-codec",
+    "short_name": "zodb-json-codec",
+    "description": "Pickle to JSON transcoder for ZODB, built in Rust with PyO3.",
+    "start_url": "/zodb-json-codec/",
+    "display": "browser",
+    "background_color": "#1a1a2e",
+    "theme_color": "#f97316",
+    "icons": [
+        {
+            "src": "logo-web.png",
+            "sizes": "200x133",
+            "type": "image/png"
+        },
+        {
+            "src": "apple-touch-icon.png",
+            "sizes": "180x120",
+            "type": "image/png"
+        },
+        {
+            "src": "logo-400.png",
+            "sizes": "400x267",
+            "type": "image/png"
+        },
+        {
+            "src": "logo.png",
+            "sizes": "512x341",
+            "type": "image/png"
+        }
+    ]
+}
