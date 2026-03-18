@@ -2,6 +2,12 @@
 
 <!-- diataxis: landing -->
 
+```{image} _static/logo-400.png
+:alt: zodb-json-codec logo
+:width: 200px
+:align: center
+```
+
 Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.
 
 Converts ZODB pickle records into human-readable, JSONB-queryable JSON while maintaining full roundtrip fidelity.
