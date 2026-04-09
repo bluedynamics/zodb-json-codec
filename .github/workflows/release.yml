@@ -1,7 +1,10 @@
 name: Release
 
 on:
-  push:
+  # Build dev package after CI passes on main (no duplicate test runs)
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
   release:
     types: [published]
@@ -17,11 +20,11 @@ env:
   PYTHON_TARGETS: "-i 3.10 -i 3.11 -i 3.12 -i 3.13 -i 3.14"
 
 jobs:
-  ci:
-    uses: ./.github/workflows/ci.yml
-
   linux:
-    needs: ci
+    # Skip if triggered by workflow_run and CI failed
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -86,7 +89,7 @@ jobs:
           path: dist
 
   macos:
-    needs: ci
+
     runs-on: ${{ matrix.runner }}
     strategy:
       matrix:
@@ -130,7 +133,7 @@ jobs:
           path: dist
 
   windows:
-    needs: ci
+
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -171,7 +174,7 @@ jobs:
           path: dist
 
   sdist:
-    needs: ci
+
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -188,7 +191,7 @@ jobs:
   # Upload to Test PyPI on every push to main
   release-test-pypi:
     name: Publish to test.pypi.org
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'workflow_run' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')
     needs: [linux, macos, windows, sdist]
     runs-on: ubuntu-latest
     environment: release-test-pypi
