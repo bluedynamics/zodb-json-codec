@@ -1,5 +1,11 @@
 # Changelog
 
+## unreleased
+
+- Fix Python 3.10 incompatibility in the test suite: replace the
+  Python 3.11+ `datetime.UTC` import with `timezone.utc` in
+  `tests/test_pg_json.py` and `tests/test_known_types.py` [#10]
+
 ## 1.6.1 (2026-02-27)
 
 - CRITICAL Linux!

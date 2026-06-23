@@ -9,7 +9,6 @@ from datetime import datetime
 from datetime import time
 from datetime import timedelta
 from datetime import timezone
-from datetime import UTC
 from decimal import Decimal
 
 import json
@@ -58,13 +57,13 @@ class TestDatetime:
         assert restored == dt
 
     def test_tz_stdlib_utc(self):
-        dt = datetime(2025, 1, 1, tzinfo=UTC)
+        dt = datetime(2025, 1, 1, tzinfo=timezone.utc)
         data = pickle.dumps(dt, protocol=3)
         result = json.loads(zodb_json_codec.pickle_to_json(data))
         assert result == {"@dt": "2025-01-01T00:00:00+00:00"}
 
     def test_roundtrip_tz_stdlib_utc(self):
-        dt = datetime(2025, 1, 1, tzinfo=UTC)
+        dt = datetime(2025, 1, 1, tzinfo=timezone.utc)
         data = pickle.dumps(dt, protocol=3)
         json_str = zodb_json_codec.pickle_to_json(data)
         restored = pickle.loads(zodb_json_codec.json_to_pickle(json_str))
