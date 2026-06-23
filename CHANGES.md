@@ -1,5 +1,9 @@
 # Changelog
 
+## unreleased
+
+- Add `cdk8s-plone` to the ecosystem navigation dropdown in the docs.
+
 ## 1.6.1 (2026-02-27)
 
 - CRITICAL Linux!
