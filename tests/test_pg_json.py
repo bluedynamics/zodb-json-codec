@@ -6,7 +6,7 @@ Verifies that the JSON string path produces identical output to the dict path.
 from datetime import date
 from datetime import datetime
 from datetime import timedelta
-from datetime import UTC
+from datetime import timezone
 from decimal import Decimal
 from uuid import UUID
 
@@ -114,7 +114,7 @@ class TestPgJsonKnownTypes:
         assert actual == expected
 
     def test_datetime(self):
-        dt = datetime(2024, 6, 15, 12, 30, 45, tzinfo=UTC)
+        dt = datetime(2024, 6, 15, 12, 30, 45, tzinfo=timezone.utc)
         record = make_zodb_record("myapp", "Obj", {"created": dt})
         self._assert_match(record)
 
@@ -143,7 +143,7 @@ class TestPgJsonKnownTypes:
     def test_mixed_types(self):
         state = {
             "title": "Test",
-            "created": datetime(2024, 1, 1, tzinfo=UTC),
+            "created": datetime(2024, 1, 1, tzinfo=timezone.utc),
             "score": Decimal("3.14"),
             "tags": frozenset(["a", "b"]),
             "coords": (1.0, 2.0),
