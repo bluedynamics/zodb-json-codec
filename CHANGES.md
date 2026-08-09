@@ -4,6 +4,9 @@
 
 - Add `cdk8s-plone` to the ecosystem navigation dropdown in the docs.
 
+- Add `cloud-vinyl` and `plone.observability` to the ecosystem navigation
+  dropdown in the docs.
+
 - Fix Python 3.10 incompatibility in the test suite: replace the
   Python 3.11+ `datetime.UTC` import with `timezone.utc` in
   `tests/test_pg_json.py` and `tests/test_known_types.py` [#10]
