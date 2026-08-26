@@ -2,6 +2,14 @@
 
 ## unreleased
 
+- Enable ruff's cyclomatic-complexity check (`C901`, mccabe) with
+  `max-complexity = 15`. `python/` and `tests/` pass as-is; `benchmarks/`
+  is exempted via per-file-ignores (CLI harness code, legitimately
+  branchy). The repo had no explicit ruff config before, so the lint rule
+  selection is now pinned in `pyproject.toml` (classic ruff defaults plus
+  `C901`) and Markdown files are excluded from `ruff format`, keeping
+  results stable across ruff releases.
+
 - Add `cdk8s-plone` to the ecosystem navigation dropdown in the docs.
 
 - Add `cloud-vinyl` and `plone.observability` to the ecosystem navigation
