@@ -129,22 +129,24 @@ fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>>
 #[pyfunction]
 fn decode_zodb_record_for_pg_json(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     // ENTIRE pipeline runs with GIL released: pickle decode + JSON conversion
-    let (module, name, json_str, refs) = py.detach(|| {
+    let (module, name, refs) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
         let (module, name) = zodb::extract_class_info(&class_val)?;
         let mut refs = Vec::new();
         pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
 
-        let json_str = json::pickle_value_to_json_string_pg(&state_val, &module, &name)?;
-        Ok::<_, PyErr>((module, name, json_str, refs))
+        json::write_json_string_pg_to_buf(&state_val, &module, &name)?;
+        Ok::<_, PyErr>((module, name, refs))
     })?;
 
-    // Only GIL-held work: build the 4-element return tuple
+    // Only GIL-held work: build the 4-element return tuple. The JSON text is
+    // copied straight from the thread-local buffer into the Python str.
     let refs_list = PyList::new(py, &refs)?;
+    let json_py = json::with_json_buf(|s| PyString::new(py, s));
     let result = (
         module.into_pyobject(py)?,
         name.into_pyobject(py)?,
-        json_str.into_pyobject(py)?,
+        json_py.into_any(),
         refs_list.into_any(),
     );
     Ok(result.into_pyobject(py)?.into_any().unbind())
@@ -180,8 +182,7 @@ fn encode_zodb_record(py: Python<'_>, obj: &Bound<'_, PyDict>) -> PyResult<Py<Py
         .unwrap_or_else(|| py.None().into_bound(py));
 
     // Direct encode: class pickle + state pickle, no PickleValue intermediates
-    let result = pyconv::encode_zodb_record_direct(module, name, &state_obj)?;
-    Ok(PyBytes::new(py, &result).into())
+    pyconv::encode_zodb_record_direct(py, module, name, &state_obj)
 }
 
 /// Python module definition

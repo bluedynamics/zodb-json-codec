@@ -11,7 +11,7 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use pyo3::prelude::*;
 use pyo3::intern;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::btrees;
 use crate::encode::{encode_value_into, write_bytes_val, write_global, write_int, write_string};
@@ -2017,10 +2017,11 @@ pub(crate) fn build_class_pickle(module: &str, name: &str) -> Vec<u8> {
 }
 
 pub fn encode_zodb_record_direct(
+    py: Python<'_>,
     module: &str,
     name: &str,
     state_obj: &Bound<'_, pyo3::PyAny>,
-) -> PyResult<Vec<u8>> {
+) -> PyResult<Py<PyBytes>> {
     ENCODE_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear(); // keep capacity from previous calls
@@ -2048,7 +2049,7 @@ pub fn encode_zodb_record_direct(
         }
         buf.push(STOP);
 
-        Ok(buf.to_vec())
+        Ok(PyBytes::new(py, &buf).into())
     })
 }
 

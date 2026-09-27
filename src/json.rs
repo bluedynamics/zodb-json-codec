@@ -236,6 +236,18 @@ pub fn pickle_value_to_json_string_pg(
     module: &str,
     name: &str,
 ) -> Result<String, CodecError> {
+    write_json_string_pg_to_buf(val, module, name)?;
+    Ok(with_json_buf(|s| s.to_string()))
+}
+
+/// Write the PG JSON for `val` into the thread-local buffer (capacity is
+/// retained across calls). Read it back with `with_json_buf` on the same
+/// thread before the next call overwrites it.
+pub fn write_json_string_pg_to_buf(
+    val: &PickleValue,
+    module: &str,
+    name: &str,
+) -> Result<(), CodecError> {
     JSON_BUF.with(|cell| {
         let mut w = cell.borrow_mut();
         w.clear();
@@ -245,9 +257,13 @@ pub fn pickle_value_to_json_string_pg(
         } else {
             write_value_pg_depth(&mut w, val, 0)?;
         }
-
-        Ok(w.take())
+        Ok(())
     })
+}
+
+/// Run `f` on the JSON produced by the last `write_json_string_pg_to_buf`.
+pub fn with_json_buf<R>(f: impl FnOnce(&str) -> R) -> R {
+    JSON_BUF.with(|cell| f(cell.borrow().as_str()))
 }
 
 /// Recursive walker: write a PickleValue as PG-compatible JSON to a JsonWriter.
