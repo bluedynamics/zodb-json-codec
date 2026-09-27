@@ -2031,12 +2031,19 @@ pub fn encode_zodb_record_direct(
         // Class pickle: use cached bytes (identical for all records of same class)
         CLASS_PICKLE_CACHE.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
-            if let Some((_, _, bytes)) = cache.iter().find(|(m, n, _)| m == module && n == name) {
-                buf.extend_from_slice(bytes);
+            if let Some(pos) = cache.iter().position(|(m, n, _)| m == module && n == name) {
+                buf.extend_from_slice(&cache[pos].2);
+                // Move-to-front: hot classes stay at the head of the scan.
+                if pos > 0 {
+                    cache[..=pos].rotate_right(1);
+                }
             } else {
                 let bytes = build_class_pickle(module, name);
                 buf.extend_from_slice(&bytes);
-                cache.push((module.to_string(), name.to_string(), bytes));
+                if cache.len() >= 32 {
+                    cache.pop();
+                }
+                cache.insert(0, (module.to_string(), name.to_string(), bytes));
             }
         });
 
