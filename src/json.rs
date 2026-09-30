@@ -320,7 +320,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                 // PG JSONB cannot store \u0000 — base64-encode with @ns marker
                 w.begin_object();
                 w.write_key_literal("@ns");
-                w.write_string_literal(&BASE64.encode(s.as_bytes()));
+                w.write_base64_string(s.as_bytes());
                 w.end_object();
             } else {
                 w.write_string(s);
@@ -330,7 +330,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
             // {"@b": base64}
             w.begin_object();
             w.write_key_literal("@b");
-            w.write_string_literal(&BASE64.encode(b));
+            w.write_base64_string(b);
             w.end_object();
         }
         PickleValue::List(items) => {
@@ -369,8 +369,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                     }
                     if let PickleValue::String(key) = k {
                         if key_needs_ns_escape(key, true) {
-                            let encoded = format!("@ns:{}", BASE64.encode(key.as_bytes()));
-                            w.write_key(&encoded);
+                            w.write_ns_key(key.as_bytes());
                         } else {
                             w.write_key(key);
                         }
@@ -580,7 +579,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
             // {"@pkl": base64}
             w.begin_object();
             w.write_key_literal("@pkl");
-            w.write_string_literal(&BASE64.encode(data));
+            w.write_base64_string(data);
             w.end_object();
         }
     }
@@ -601,29 +600,23 @@ fn write_compact_ref_pg(
     if let PickleValue::Tuple(items) = inner {
         if items.len() == 2 {
             if let PickleValue::Bytes(oid) = &items[0] {
-                let hex = hex::encode(oid);
                 match &items[1] {
                     PickleValue::None => {
                         // {"@ref": "hex_oid"}
                         w.begin_object();
                         w.write_key_literal("@ref");
-                        w.write_string_literal(&hex);
+                        w.write_hex_string(oid);
                         w.end_object();
                         return Ok(());
                     }
                     PickleValue::Global { module, name } => {
-                        let class_path = if module.is_empty() {
-                            name.clone()
-                        } else {
-                            format!("{module}.{name}")
-                        };
-                        // {"@ref": ["hex_oid", "class_path"]}
+                        // {"@ref": ["hex_oid", "module.name"]}, no temporaries (#26)
                         w.begin_object();
                         w.write_key_literal("@ref");
                         w.begin_array();
-                        w.write_string_literal(&hex);
+                        w.write_hex_string(oid);
                         w.write_comma();
-                        w.write_string(&class_path);
+                        w.write_class_path(module, name);
                         w.end_array();
                         w.end_object();
                         return Ok(());

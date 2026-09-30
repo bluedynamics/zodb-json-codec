@@ -31,18 +31,87 @@ pub fn decode_zodb_pickles(data: &[u8]) -> Result<(PickleValue, PickleValue), Co
     Ok((class_val, state_val))
 }
 
+/// The decoder's bookkeeping vectors, kept per thread and reused by every
+/// record decoded on it (#26): after the first few records they never
+/// allocate again. Vectors that grew past `MAX_SCRATCH_ELEMS` are dropped
+/// instead of kept, so one huge record does not pin memory for the thread's
+/// lifetime; the ceiling is about 8 MiB per thread (48-byte values in `stack`
+/// and `memo`, 24-byte binding vectors, the rest small).
+#[derive(Default)]
+struct Scratch {
+    stack: Vec<PickleValue>,
+    memo: Vec<PickleValue>,
+    stack_memo: Vec<Vec<usize>>,
+    marks: Vec<usize>,
+    dirty_memo: Vec<bool>,
+    depth: Vec<u32>,
+    memo_depth: Vec<u32>,
+}
+
+const MAX_SCRATCH_ELEMS: usize = 1 << 16;
+
+thread_local! {
+    static SCRATCH: std::cell::RefCell<Scratch> = std::cell::RefCell::new(Scratch::default());
+}
+
+impl Scratch {
+    fn take() -> Self {
+        // a re-entrant decode on the same thread (impossible today: the decoder
+        // runs no Python code) would simply get fresh vectors
+        let mut scratch = SCRATCH
+            .try_with(|cell| match cell.try_borrow_mut() {
+                Ok(mut held) => std::mem::take(&mut *held),
+                Err(_) => Scratch::default(),
+            })
+            .unwrap_or_default();
+        scratch.stack.clear();
+        scratch.memo.clear();
+        scratch.stack_memo.clear();
+        scratch.marks.clear();
+        scratch.dirty_memo.clear();
+        scratch.depth.clear();
+        scratch.memo_depth.clear();
+        scratch
+    }
+
+    fn give_back(mut self) {
+        self.stack.clear();
+        self.memo.clear();
+        self.stack_memo.clear();
+        self.marks.clear();
+        self.dirty_memo.clear();
+        self.depth.clear();
+        self.memo_depth.clear();
+        let oversized = self.stack.capacity() > MAX_SCRATCH_ELEMS
+            || self.memo.capacity() > MAX_SCRATCH_ELEMS
+            || self.stack_memo.capacity() > MAX_SCRATCH_ELEMS
+            || self.dirty_memo.capacity() > MAX_SCRATCH_ELEMS
+            || self.depth.capacity() > MAX_SCRATCH_ELEMS
+            || self.memo_depth.capacity() > MAX_SCRATCH_ELEMS
+            || self.marks.capacity() > MAX_SCRATCH_ELEMS;
+        if oversized {
+            return;
+        }
+        // try_with: never panic from Drop, even during thread-local destruction
+        let _ = SCRATCH.try_with(|cell| {
+            if let Ok(mut held) = cell.try_borrow_mut() {
+                *held = self;
+            }
+        });
+    }
+}
+
 struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
     stack: Vec<PickleValue>,
     memo: Vec<PickleValue>,
-    /// Metastack for MARK-based operations (saves/restores stack at MARK)
-    metastack: Vec<Vec<PickleValue>>,
     /// Tracks which memo indices are bound to each stack slot (parallel to stack).
     /// When BINPUT stores from stack top, the memo index is recorded here.
     stack_memo: Vec<Vec<usize>>,
-    /// Saved stack_memo during MARK (parallel to metastack).
-    meta_stack_memo: Vec<Vec<Vec<usize>>>,
+    /// Stack length at each open MARK: the values above the last one are
+    /// the current "sub-stack" (#26; CPython swaps in a fresh stack per MARK).
+    marks: Vec<usize>,
     /// Dirty flags parallel to memo: true means the memo entry is stale
     /// (the owning stack slot was mutated after BINPUT stored the value).
     /// Resolved lazily at BINGET or eagerly when the slot is popped.
@@ -53,8 +122,6 @@ struct Decoder<'a> {
     /// less). Lets container opcodes refuse a value deeper than MAX_DEPTH before
     /// it exists (its Drop/Clone would recurse).
     depth: Vec<u32>,
-    /// Saved `depth` during MARK (parallel to metastack).
-    meta_depth: Vec<Vec<u32>>,
     /// Depth of each memo entry (parallel to memo).
     memo_depth: Vec<u32>,
     /// Which memo indices are ever read by a GET/BINGET/LONG_BINGET in this
@@ -76,20 +143,34 @@ enum MemoNeeds {
     Only(Vec<bool>),
 }
 
+impl Drop for Decoder<'_> {
+    fn drop(&mut self) {
+        Scratch {
+            stack: std::mem::take(&mut self.stack),
+            memo: std::mem::take(&mut self.memo),
+            stack_memo: std::mem::take(&mut self.stack_memo),
+            marks: std::mem::take(&mut self.marks),
+            dirty_memo: std::mem::take(&mut self.dirty_memo),
+            depth: std::mem::take(&mut self.depth),
+            memo_depth: std::mem::take(&mut self.memo_depth),
+        }
+        .give_back();
+    }
+}
+
 impl<'a> Decoder<'a> {
     fn new(data: &'a [u8]) -> Self {
+        let scratch = Scratch::take();
         Self {
             data,
             pos: 0,
-            stack: Vec::with_capacity(16),
-            memo: Vec::with_capacity(16),
-            metastack: Vec::with_capacity(4),
-            stack_memo: Vec::with_capacity(16),
-            meta_stack_memo: Vec::with_capacity(4),
-            dirty_memo: Vec::with_capacity(16),
-            depth: Vec::with_capacity(16),
-            meta_depth: Vec::with_capacity(4),
-            memo_depth: Vec::with_capacity(16),
+            stack: scratch.stack,
+            memo: scratch.memo,
+            stack_memo: scratch.stack_memo,
+            marks: scratch.marks,
+            dirty_memo: scratch.dirty_memo,
+            depth: scratch.depth,
+            memo_depth: scratch.memo_depth,
             memo_needed: scan_memo_reads(data),
             memoize_count: 0,
         }
@@ -111,7 +192,9 @@ impl<'a> Decoder<'a> {
             let op = self.read_u8()?;
             match op {
                 STOP => {
-                    return self.pop_value();
+                    let value = self.pop_value()?;
+                    self.marks.clear();
+                    return Ok(value);
                 }
                 PROTO => {
                     // Skip protocol byte
@@ -176,11 +259,22 @@ impl<'a> Decoder<'a> {
                 LONG1 => {
                     let n = self.read_u8()? as usize;
                     let bytes = self.read_bytes(n)?;
-                    let val = BigInt::from_signed_bytes_le(bytes);
-                    if let Ok(v) = i64::try_from(&val) {
+                    if n == 0 {
+                        self.push(PickleValue::Int(0));
+                    } else if n <= 8 {
+                        // sign-extend the little-endian two's complement into i64
+                        // without going through BigInt (#26)
+                        let mut buf = [0u8; 8];
+                        buf[..n].copy_from_slice(bytes);
+                        let shift = 64 - 8 * n as u32;
+                        let v = (i64::from_le_bytes(buf) << shift) >> shift;
                         self.push(PickleValue::Int(v));
                     } else {
-                        self.push(PickleValue::BigInt(val));
+                        let val = BigInt::from_signed_bytes_le(bytes);
+                        match i64::try_from(&val) {
+                            Ok(v) => self.push(PickleValue::Int(v)),
+                            Err(_) => self.push(PickleValue::BigInt(val)),
+                        }
                     }
                 }
                 LONG4 => {
@@ -298,15 +392,17 @@ impl<'a> Decoder<'a> {
 
                 // -- Mark --
                 MARK => {
-                    // Save current stack, start a new one
-                    let old_stack = std::mem::take(&mut self.stack);
-                    self.metastack.push(old_stack);
-                    let old_sm = std::mem::take(&mut self.stack_memo);
-                    self.meta_stack_memo.push(old_sm);
-                    let old_depth = std::mem::take(&mut self.depth);
-                    self.meta_depth.push(old_depth);
-                    // Don't push Mark itself; everything above the mark
-                    // is captured by the current stack being empty
+                    // Every open mark ends in a container, so more open marks than
+                    // MAX_DEPTH cannot become a valid value: refuse here, before the
+                    // bookkeeping grows (a corrupt stream of MARKs would otherwise
+                    // grow `marks` without bound).
+                    if self.marks.len() >= MAX_DEPTH as usize {
+                        return Err(CodecError::InvalidData(
+                            "maximum nesting depth exceeded".to_string(),
+                        ));
+                    }
+                    // Everything pushed from here on is above the mark
+                    self.marks.push(self.stack.len());
                 }
 
                 // -- Tuple --
@@ -393,8 +489,7 @@ impl<'a> Decoder<'a> {
                 // -- Dict --
                 EMPTY_DICT => self.push(PickleValue::Dict(Vec::new())),
                 DICT => {
-                    let (items, d) = self.pop_mark_d()?;
-                    let pairs = items_to_pairs(items)?;
+                    let (pairs, d) = self.pop_mark_pairs_d()?;
                     self.push_at(PickleValue::Dict(pairs), Self::nest(d)?);
                 }
                 SETITEM => {
@@ -425,8 +520,7 @@ impl<'a> Decoder<'a> {
                     self.mark_top_dirty();
                 }
                 SETITEMS => {
-                    let (items, d) = self.pop_mark_d()?;
-                    let new_pairs = items_to_pairs(items)?;
+                    let (new_pairs, d) = self.pop_mark_pairs_d()?;
                     self.raise_top_depth(d)?;
                     let top = self.top_value_mut()?;
                     match top {
@@ -869,6 +963,9 @@ impl<'a> Decoder<'a> {
     /// Pop a value together with its nesting depth.
     #[inline]
     fn pop_value_d(&mut self) -> Result<(PickleValue, u32), CodecError> {
+        if self.stack.len() <= self.floor() {
+            return Err(CodecError::StackUnderflow);
+        }
         let bindings = self.stack_memo.pop().unwrap_or_default();
         let depth = self.depth.pop().unwrap_or(0);
         let val = self.stack.pop().ok_or(CodecError::StackUnderflow)?;
@@ -896,50 +993,79 @@ impl<'a> Decoder<'a> {
         Ok((val, depth))
     }
 
+    /// Index below which the current sub-stack ends (the last open MARK).
+    #[inline]
+    fn floor(&self) -> usize {
+        self.marks.last().copied().unwrap_or(0)
+    }
+
     #[inline]
     fn peek_value(&self) -> Result<&PickleValue, CodecError> {
+        if self.stack.len() <= self.floor() {
+            return Err(CodecError::StackUnderflow);
+        }
         self.stack.last().ok_or(CodecError::StackUnderflow)
     }
 
     #[inline]
     fn top_value_mut(&mut self) -> Result<&mut PickleValue, CodecError> {
+        if self.stack.len() <= self.floor() {
+            return Err(CodecError::StackUnderflow);
+        }
         self.stack.last_mut().ok_or(CodecError::StackUnderflow)
     }
 
     /// Pop all items above the last MARK together with their deepest nesting depth.
     fn pop_mark_d(&mut self) -> Result<(Vec<PickleValue>, u32), CodecError> {
-        // Take the current stack (everything since MARK) as the result.
-        // This is a pointer swap — no element-by-element drain needed.
-        let items = std::mem::take(&mut self.stack);
-        let slot_memos = std::mem::take(&mut self.stack_memo);
-        let depths = std::mem::take(&mut self.depth);
-        let max_depth = depths.iter().copied().max().unwrap_or(0);
+        let mark = self.begin_pop_mark()?;
+        let max_depth = self.depth[mark..].iter().copied().max().unwrap_or(0);
+        let items: Vec<PickleValue> = self.stack.drain(mark..).collect();
+        self.stack_memo.truncate(mark);
+        self.depth.truncate(mark);
+        Ok((items, max_depth))
+    }
 
-        // Sync dirty memo entries for all popped slots before values are consumed
-        for ((val, bindings), &d) in items.iter().zip(slot_memos.iter()).zip(depths.iter()) {
-            for &idx in bindings {
+    /// Like `pop_mark_d`, but pairs the drained slots up as dict items (DICT,
+    /// SETITEMS) without an intermediate vector.
+    fn pop_mark_pairs_d(&mut self) -> Result<(Vec<(PickleValue, PickleValue)>, u32), CodecError> {
+        let mark = self.begin_pop_mark()?;
+        if (self.stack.len() - mark) % 2 != 0 {
+            return Err(CodecError::InvalidData(
+                "odd number of items for dict".to_string(),
+            ));
+        }
+        let max_depth = self.depth[mark..].iter().copied().max().unwrap_or(0);
+        let mut pairs = Vec::with_capacity((self.stack.len() - mark) / 2);
+        let mut drained = self.stack.drain(mark..);
+        while let (Some(k), Some(v)) = (drained.next(), drained.next()) {
+            pairs.push((k, v));
+        }
+        drop(drained);
+        self.stack_memo.truncate(mark);
+        self.depth.truncate(mark);
+        Ok((pairs, max_depth))
+    }
+
+    /// Pop the last MARK and sync the dirty memo entries of every slot above it
+    /// before those values move out of the stack. Returns the mark position.
+    fn begin_pop_mark(&mut self) -> Result<usize, CodecError> {
+        let mark = self.marks.pop().ok_or(CodecError::StackUnderflow)?;
+        for si in mark..self.stack.len() {
+            if self.stack_memo[si].is_empty() {
+                continue;
+            }
+            for bi in 0..self.stack_memo[si].len() {
+                let idx = self.stack_memo[si][bi];
                 if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
                     if idx < self.memo.len() {
-                        self.memo[idx] = val.clone();
-                        self.memo_depth[idx] = d;
+                        self.memo[idx] = self.stack[si].clone();
+                        self.memo_depth[idx] = self.depth[si];
                     }
                     self.dirty_memo[idx] = false;
                 }
             }
         }
-
-        // Restore the previous stack from metastack
-        if let Some(old_stack) = self.metastack.pop() {
-            self.stack = old_stack;
-        }
-        if let Some(old_sm) = self.meta_stack_memo.pop() {
-            self.stack_memo = old_sm;
-        }
-        if let Some(old_depth) = self.meta_depth.pop() {
-            self.depth = old_depth;
-        }
-
-        Ok((items, max_depth))
+        Ok(mark)
     }
 
     /// Depth of the current stack top (0 when empty).
@@ -1021,24 +1147,15 @@ impl<'a> Decoder<'a> {
 
     /// Resolve a dirty memo entry by finding its live value on the stack.
     fn resolve_dirty_memo(&mut self, memo_idx: usize) {
-        // Search current stack for the slot that owns this memo binding
-        for (si, bindings) in self.stack_memo.iter().enumerate() {
+        // Search the stack (all frames, marks included) for the slot that
+        // owns this memo binding
+        // newest binding first: a re-PUT of the same index binds the newer slot
+        for (si, bindings) in self.stack_memo.iter().enumerate().rev() {
             if bindings.contains(&memo_idx) {
                 self.memo[memo_idx] = self.stack[si].clone();
                 self.memo_depth[memo_idx] = self.depth[si];
                 self.dirty_memo[memo_idx] = false;
                 return;
-            }
-        }
-        // Search metastack (values saved by MARK)
-        for (mi, meta_sm) in self.meta_stack_memo.iter().enumerate() {
-            for (si, bindings) in meta_sm.iter().enumerate() {
-                if bindings.contains(&memo_idx) {
-                    self.memo[memo_idx] = self.metastack[mi][si].clone();
-                    self.memo_depth[memo_idx] = self.meta_depth[mi][si];
-                    self.dirty_memo[memo_idx] = false;
-                    return;
-                }
             }
         }
         // Value was already consumed from stack — memo has the last stored value
@@ -1184,23 +1301,6 @@ fn scan_memo_reads(data: &[u8]) -> MemoNeeds {
         }
     }
     MemoNeeds::Only(needed)
-}
-
-/// Convert a flat list [k1, v1, k2, v2, ...] into pairs [(k1, v1), (k2, v2), ...].
-fn items_to_pairs(
-    items: Vec<PickleValue>,
-) -> Result<Vec<(PickleValue, PickleValue)>, CodecError> {
-    if items.len() % 2 != 0 {
-        return Err(CodecError::InvalidData(
-            "odd number of items for dict".to_string(),
-        ));
-    }
-    let mut pairs = Vec::with_capacity(items.len() / 2);
-    let mut iter = items.into_iter();
-    while let (Some(k), Some(v)) = (iter.next(), iter.next()) {
-        pairs.push((k, v));
-    }
-    Ok(pairs)
 }
 
 #[cfg(test)]
@@ -1844,5 +1944,117 @@ mod tests {
             MemoNeeds::Only(needed) => assert_eq!(needed, vec![true]),
             MemoNeeds::All => panic!("expected Only"),
         }
+    }
+
+    #[test]
+    fn test_long1_direct_matches_bigint() {
+        // every length 0..=9, four fill bytes: the direct i64 path and BigInt agree
+        for n in 0..=9usize {
+            for fill in [0x00u8, 0x7f, 0x80, 0xff] {
+                let mut data = vec![0x80, 0x03, 0x8a, n as u8];
+                data.extend(std::iter::repeat_n(fill, n));
+                data.push(b'.');
+                let got = decode_pickle(&data).unwrap();
+                let expected = num_bigint::BigInt::from_signed_bytes_le(&data[4..4 + n]);
+                match got {
+                    PickleValue::Int(i) => {
+                        assert_eq!(num_bigint::BigInt::from(i), expected, "n={n} fill={fill:#x}")
+                    }
+                    PickleValue::BigInt(b) => {
+                        assert!(i64::try_from(&expected).is_err(), "n={n} fill={fill:#x} should be Int");
+                        assert_eq!(b, expected);
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        // i64::MIN is exactly 8 bytes; 2**63 needs 9 and stays a BigInt
+        let data = [&[0x80u8, 0x03, 0x8a, 8][..], &i64::MIN.to_le_bytes(), b"."].concat();
+        assert_eq!(decode_pickle(&data).unwrap(), PickleValue::Int(i64::MIN));
+        let data = [&[0x80u8, 0x03, 0x8a, 9][..], &[0, 0, 0, 0, 0, 0, 0, 0x80, 0], b"."].concat();
+        assert!(matches!(decode_pickle(&data).unwrap(), PickleValue::BigInt(_)));
+    }
+
+    #[test]
+    fn test_nested_marks_with_pop_and_dup() {
+        // MARK, 1, MARK, 2, 3, TUPLE, DUP, POP, TUPLE, STOP -> (1, (2, 3))
+        let data: &[u8] = &[0x80, 0x03, b'(', b'K', 1, b'(', b'K', 2, b'K', 3, b't', b'2', b'0', b't', b'.'];
+        assert_eq!(
+            decode_pickle(data).unwrap(),
+            PickleValue::Tuple(vec![
+                PickleValue::Int(1),
+                PickleValue::Tuple(vec![PickleValue::Int(2), PickleValue::Int(3)])
+            ])
+        );
+        // POP below the mark and a second POP on an empty stack must both error
+        assert!(decode_pickle(&[0x80, 0x03, b'K', 1, b'(', b'0', b't', b'.']).is_err());
+        assert!(decode_pickle(&[0x80, 0x03, b'(', b't', b'0', b'0', b'.']).is_err());
+        // BINPUT right after a MARK sees an empty sub-stack (CPython: IndexError)
+        assert!(decode_pickle(&[0x80, 0x03, b'K', 1, b'(', b'q', 0, b't', b'.']).is_err());
+        // TUPLE without any MARK errors instead of taking the whole stack
+        assert!(decode_pickle(&[0x80, 0x03, b'K', 1, b't', b'.']).is_err());
+    }
+
+    #[test]
+    fn test_marks_cleared_between_record_pickles() {
+        // a MARK left open by the first pickle must not poison the second one
+        let class_pickle: &[u8] = &[0x80, 0x03, b'(', b'K', 1, b'.'];
+        let state_pickle: &[u8] = &[0x80, 0x03, b'}', b'.'];
+        let data = [class_pickle, state_pickle].concat();
+        let (c, st) = decode_zodb_pickles(&data).unwrap();
+        assert_eq!(c, PickleValue::Int(1));
+        assert_eq!(st, PickleValue::Dict(vec![]));
+    }
+
+    #[test]
+    fn test_scratch_reused_and_capped() {
+        // a record leaves its capacity behind for the next one on this thread
+        let small: &[u8] = &[0x80, 0x03, b'}', b'q', 0x00, b'X', 1, 0, 0, 0, b'k', b'K', 1, b's', b'.'];
+        decode_pickle(small).unwrap();
+        let cap_after_small = SCRATCH.with(|c| c.borrow().stack.capacity());
+        assert!(cap_after_small >= 2);
+        // an error mid-way must not leak state into the next decode
+        assert!(decode_pickle(&[0x80, 0x03, b'(', b'K', 1, b'K', 2]).is_err());
+        assert_eq!(
+            decode_pickle(small).unwrap(),
+            PickleValue::Dict(vec![(PickleValue::String("k".into()), PickleValue::Int(1))])
+        );
+        // a huge stack is not kept: MARK then MAX_SCRATCH_ELEMS + 1 scalars
+        let mut huge = vec![0x80, 0x03, b'('];
+        huge.extend(std::iter::repeat_n(b'N', MAX_SCRATCH_ELEMS + 1));
+        huge.extend_from_slice(b"t.");
+        assert!(matches!(decode_pickle(&huge).unwrap(), PickleValue::Tuple(ref t) if t.len() == MAX_SCRATCH_ELEMS + 1));
+        assert!(SCRATCH.with(|c| c.borrow().stack.capacity()) <= MAX_SCRATCH_ELEMS);
+    }
+
+    #[test]
+    fn test_open_marks_bounded_by_depth_limit() {
+        // MAX_DEPTH open marks are fine to build up (each must close as a container)...
+        let mut ok = vec![0x80, 0x03];
+        ok.extend(std::iter::repeat_n(b'(', MAX_DEPTH as usize - 1));
+        ok.extend(std::iter::repeat_n(b't', MAX_DEPTH as usize - 1));
+        ok.push(b'.');
+        assert!(decode_pickle(&ok).is_ok());
+        // ... one more is refused at the MARK, before any vector grows further
+        let mut bad = vec![0x80, 0x03];
+        bad.extend(std::iter::repeat_n(b'(', MAX_DEPTH as usize + 1));
+        let err = decode_pickle(&bad).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidData(ref m) if m.contains("nesting depth")), "{err:?}");
+        SCRATCH.with(|c| assert!(c.borrow().marks.capacity() <= MAX_SCRATCH_ELEMS));
+    }
+
+    #[test]
+    fn test_dirty_memo_resolves_newest_binding() {
+        // list bound to memo 0, MARK, another list bound to 0, APPEND (dirty), BINGET 0:
+        // CPython gives ([1], [1]); the newest binding of index 0 must win
+        let data: &[u8] = b"\x80\x03]q\x00(]q\x00K\x01ah\x00t.";
+        let one = PickleValue::List(vec![PickleValue::Int(1)]);
+        assert_eq!(
+            decode_pickle(data).unwrap(),
+            PickleValue::Tuple(vec![one.clone(), one.clone()])
+        );
+        // same within one frame
+        let data: &[u8] = b"\x80\x03]q\x00]q\x00K\x01ah\x00\x86.";
+        assert_eq!(decode_pickle(data).unwrap(), PickleValue::Tuple(vec![one.clone(), one]));
     }
 }

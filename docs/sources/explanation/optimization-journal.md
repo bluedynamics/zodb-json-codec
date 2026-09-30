@@ -498,6 +498,53 @@ sample database produces byte-identical JSON and refs.
 benchmark as an optimization, against the previous release, before it ships.
 The release process gains that step in #39.
 
+### 20. decoder allocation follow-ups
+
+**Technique:** six candidate changes from the review's P2/P3/P4/P7 list, each
+measured on its own against the build with everything kept so far (one pinned
+core, minimum of medians over three interleaved rounds, all three `bench.py`
+modes) and kept only if FileStorage decode or the PG JSON median improved by at
+least 3% with no category slower by more than the noise floor.
+
+| Change | Result | Kept |
+|---|---|---|
+| `LONG1` up to 8 bytes sign-extended into `i64` (no `BigInt`) | corpus has no `LONG1`; a record of 2,500 such ints 184 to 152 µs | yes |
+| hex, base64, `@ns:` keys and class paths written into the JSON buffer | PG median 17.1 to 16.4 µs (9 refs and 12 bytes values per record) | yes |
+| datetime/date/time/uuid/offset through `Display` newtypes | PG median 16.4 to 16.2 µs, noise | no |
+| one value stack with mark positions instead of a metastack | alone: small records 15 to 20% faster, wide dicts 37% slower (the single stack grows by doubling while not at the top of the heap, so every growth copies; the per-frame sub-stack grew in place) | with the next |
+| decoder vectors reused per thread (scratch, capped at 65,536 entries each) | with the previous: FileStorage decode 0.94, PG median 0.85, deep_nesting 0.76, large_flat_dict 0.84, simple_flat_dict 0.85, wide_dict 0.99 | yes |
+| `PickleValue` down to 32 bytes by boxing `Global`, `Reduce`, `BigInt` | not tried: about 140 match sites in 7 files that every open PR edits, and the gap it targeted is closed | no |
+| `lto = "fat"` | FileStorage decode 0.97, large_flat_dict 0.90, binary 7% smaller, clean release build 16 to 19 s | yes |
+
+**Why it helps:** after the memo pre-scan (entry 19) the remaining cost on
+small and nested records was bookkeeping, not memo clones: every `MARK`
+swapped three vectors out and let three fresh ones grow from zero, every
+`Decoder` allocated nine vectors, and the PG writer built a temporary `String`
+for every persistent reference and every bytes value. The single stack keeps
+one allocation per vector per thread; the frame above a mark position is
+drained straight into the tuple, list or dict pairs.
+
+**Impact:** one pinned core, minimum of medians over three interleaved
+rounds, glibc malloc, `main` (1.6.1 plus fixes) to this branch (#19, #22 and
+these follow-ups): FileStorage decode 37.7 to 16.5 µs, PG JSON pipeline median
+38.2 to 14.5 µs and P95 70 to 44.5 µs, wide_dict 405 to 158 µs,
+large_flat_dict 29.9 to 13.8 µs, deep_nesting 25.2 to 7.7 µs, nested_dict
+2.90 to 1.79 µs, simple_flat_dict 1.67 to 1.10 µs, special_types 6.6 to
+2.9 µs. Against v1.5.0: FileStorage decode 25.1 to 16.3 µs (0.65), PG median
+25.2 to 14.7 µs (0.58), simple_flat_dict 1.13 to 1.00, nested_dict 1.96 to
+1.69, wide_dict 272 to 159; deep_nesting is within 7% of 1.5.0 (7.07 versus
+7.58 µs) and the two sub-microsecond scalar categories within 9%, the rest
+is ahead. The 1,692-record
+sample database produces byte-identical JSON and refs. Encode is unchanged by
+this work (0.92 to 1.09 against the #19 build); the encode difference to
+1.6.1 (deep_nesting 1.26 to 1.75 µs in this session, 1.26 to 1.44 µs in the
+#19 measurement) is the depth guard of #19.
+
+**Lesson:** measure each step against the previous kept build, not against the
+start; the single-stack change looked like a regression on wide records on its
+own and only the scratch reuse made it a win. A change whose code path the
+benchmark data never reaches (`LONG1`) needs its own record to be judged.
+
 ### 21. mimalloc as the global allocator
 
 **Technique:** `#[global_allocator] static GLOBAL: mimalloc::MiMalloc` in

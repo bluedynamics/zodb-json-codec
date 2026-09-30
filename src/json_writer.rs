@@ -1,6 +1,9 @@
 //! Direct JSON string writer — writes JSON tokens to a String buffer
 //! without allocating intermediate serde_json::Value nodes.
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+
+const HEX: &[u8; 16] = b"0123456789abcdef";
 /// A low-level JSON token writer that appends directly to a String buffer.
 /// Thread-local output buffers larger than this after a call are released
 /// instead of retained, so one huge record does not pin memory for the
@@ -97,6 +100,46 @@ impl JsonWriter {
     pub fn write_string_literal(&mut self, s: &str) {
         self.buf.push('"');
         self.buf.push_str(s);
+        self.buf.push('"');
+    }
+
+    /// `"<hex of bytes>"` written straight into the buffer (hex needs no escaping).
+    #[inline]
+    pub fn write_hex_string(&mut self, bytes: &[u8]) {
+        self.buf.reserve(bytes.len() * 2 + 2);
+        self.buf.push('"');
+        for &b in bytes {
+            self.buf.push(HEX[(b >> 4) as usize] as char);
+            self.buf.push(HEX[(b & 0x0f) as usize] as char);
+        }
+        self.buf.push('"');
+    }
+
+    /// `"<base64 of bytes>"` encoded straight into the buffer.
+    #[inline]
+    pub fn write_base64_string(&mut self, bytes: &[u8]) {
+        self.buf.push('"');
+        BASE64.encode_string(bytes, &mut self.buf);
+        self.buf.push('"');
+    }
+
+    /// `"@ns:<base64 of key>":` for a dict key that holds NUL bytes.
+    #[inline]
+    pub fn write_ns_key(&mut self, key: &[u8]) {
+        self.buf.push_str("\"@ns:");
+        BASE64.encode_string(key, &mut self.buf);
+        self.buf.push_str("\":");
+    }
+
+    /// `"<module>.<name>"` (just `"<name>"` for an empty module), escaped, as one string.
+    #[inline]
+    pub fn write_class_path(&mut self, module: &str, name: &str) {
+        self.buf.push('"');
+        if !module.is_empty() {
+            write_escaped(&mut self.buf, module);
+            self.buf.push('.');
+        }
+        write_escaped(&mut self.buf, name);
         self.buf.push('"');
     }
 
@@ -425,5 +468,23 @@ mod tests {
         w.write_string("2025-01-01");
         w.end_object();
         assert_eq!(w.into_string(), r#"{"@dt":"2025-01-01"}"#);
+    }
+
+    #[test]
+    fn test_allocation_free_writers() {
+        let mut w = JsonWriter::new();
+        w.write_hex_string(&[0x00, 0x0f, 0xf0, 0xff]);
+        w.write_comma();
+        w.write_base64_string(b"a\x00b");
+        w.write_comma();
+        w.write_class_path("mod.sub", "Cls\"q");
+        w.write_comma();
+        w.write_class_path("", "Bare");
+        w.write_comma();
+        w.write_ns_key(b"k\x00");
+        assert_eq!(
+            w.as_str(),
+            "\"000ff0ff\",\"YQBi\",\"mod.sub.Cls\\\"q\",\"Bare\",\"@ns:awA=\":"
+        );
     }
 }

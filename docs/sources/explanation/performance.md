@@ -198,23 +198,26 @@ One pinned core, minimum of medians over three interleaved rounds, non-PGO
 release builds with glibc malloc (measured without mimalloc, #24, whose gain
 overlaps with this one):
 
-| Benchmark | v1.5.0 | main (1.6.1 plus fixes) | pre-scan |
-|---|---|---|---|
-| FileStorage decode (per record) | 25.4 us | 37.9 us | 18.4 us |
-| PG JSON pipeline, median | 24.7 us | 37.9 us | 16.9 us |
-| PG JSON pipeline, P95 | 52.9 us | 69.8 us | 44.6 us |
-| wide_dict decode | 275 us | 410 us | 166 us |
-| large_flat_dict decode | 19.1 us | 29.7 us | 15.1 us |
-| special_types decode | 4.5 us | 6.5 us | 3.4 us |
-| nested_dict decode | 2.0 us | 3.1 us | 2.2 us |
-| simple_flat_dict decode | 1.20 us | 1.54 us | 1.35 us |
-| deep_nesting decode | 7.2 us | 25.4 us | 10.0 us |
+| Benchmark | v1.5.0 | main (1.6.1 plus fixes) | pre-scan | plus #26 |
+|---|---|---|---|---|
+| FileStorage decode (per record) | 25.4 us | 37.9 us | 18.4 us | 16.5 us |
+| PG JSON pipeline, median | 24.7 us | 37.9 us | 16.9 us | 14.5 us |
+| PG JSON pipeline, P95 | 52.9 us | 69.8 us | 44.6 us | 44.5 us |
+| wide_dict decode | 275 us | 410 us | 166 us | 158 us |
+| large_flat_dict decode | 19.1 us | 29.7 us | 15.1 us | 13.8 us |
+| special_types decode | 4.5 us | 6.5 us | 3.4 us | 2.9 us |
+| nested_dict decode | 2.0 us | 3.1 us | 2.2 us | 1.8 us |
+| simple_flat_dict decode | 1.20 us | 1.54 us | 1.35 us | 1.10 us |
+| deep_nesting decode | 7.2 us | 25.4 us | 10.0 us | 7.7 us |
 
-Large and wide records now decode 20 to 40% faster than v1.5.0; small and
-deeply nested ones are still 10 to 40% behind it, which is the per-slot
-bookkeeping the 1.6.0 fix keeps for the indices that are read plus the depth
-tracking of #19; the follow-ups in #26 target that gap.
-Encode is unchanged.
+The last column is the decoder allocation follow-ups of
+[#26](https://github.com/bluedynamics/zodb-json-codec/issues/26) (one value
+stack with mark positions, per-thread scratch vectors, allocation-free
+writers, fat LTO; journal entry 20): every category is now ahead of v1.5.0
+except deep_nesting (7% behind) and the two sub-microsecond scalar
+categories (9%).
+Encode is unchanged by the decoder work; the difference to 1.6.1 there is the
+depth guard of #19.
 The `bench.py check` gate passes again (`deep_nesting` 1.55x against CPython
 pickle, threshold 3.0x).
 
