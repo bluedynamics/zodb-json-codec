@@ -2,6 +2,20 @@
 
 ## unreleased
 
+- Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
+  (the profile-guided build put the end-of-slice check on the pointer step of
+  the string loop) and the performance page is re-measured with the fixed
+  writer, where the PGO build is the fastest on the storage path [#52]
+
+- PG JSON writer: strings are scanned eight bytes at a time with a SWAR mask
+  of the bytes that need escaping (below 0x20, `"`, `\`), so clean runs are
+  copied whole and each escape is reached directly. The byte loop it replaces
+  was compiled up to 1.8x slower for long strings in PGO builds, which made
+  the release wheels slower than a plain build on the storage path (P95 17 to
+  45% on the sample database, depending on the profile); the new scan is no
+  slower anywhere and faster on long strings in every build. Output is
+  unchanged [#52]
+
 - Docs: the round-trip claim now says what holds (an equal object, not
   identical bytes) and lists what differs; the tutorial example is run by a
   test; the architecture page names `decode_zodb_record_for_pg_json` as the
@@ -9,8 +23,10 @@
 
 - Docs: the performance page is re-measured on 1.7.0 against CPython pickle,
   v1.5.0 and 1.6.1, with and without PGO, one session, build and protocol
-  stated once for every table; the journal's cumulative table follows. PGO
-  turns out to slow the PG JSON pipeline on real records (see #52) [#27]
+  stated once for every table; the journal's cumulative table follows [#27]
+
+- Release wheels: the PGO profile now includes the PG JSON path
+  (`bench.py pg-compare`), which the profile used to leave out [#52]
 
 - Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
   3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage

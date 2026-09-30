@@ -40,8 +40,9 @@ unrounded values. Columns:
 - **v1.5.0**, **1.6.1**: the release tags, built from source without PGO
   (1.6.1 is the tree at `fe19ede`, the 1.6.1 release plus the first 1.7.0
   fixes that do not touch performance).
-- **1.7.0**: `main` at `7b26c79`, built without PGO: thin LTO for the tags,
-  fat LTO and mimalloc for 1.7.0, `codegen-units = 1` everywhere.
+- **1.7.0**: the 1.7.0 tree (`main` with #52 applied), built without PGO:
+  thin LTO for the tags, fat LTO and mimalloc for 1.7.0, `codegen-units = 1`
+  everywhere.
 - **1.7.0 PGO**: the same tree built the way the release wheels are built
   (`RUSTFLAGS=-Cprofile-generate`, the profiling workload of `release.yml`,
   then `-Cprofile-use`).
@@ -59,16 +60,16 @@ slower than release builds; always benchmark `maturin develop --release`.
 
 | Category | CPython pickle | v1.5.0 | 1.6.1 | 1.7.0 | 1.7.0 PGO | 1.7.0 vs pickle |
 |---|---|---|---|---|---|---|
-| simple_flat_dict (120 B) | 1.90 us | 1.28 us | 1.59 us | 0.99 us | 0.90 us | 1.9x |
-| nested_dict (187 B) | 3.05 us | 2.04 us | 3.11 us | 1.73 us | 1.48 us | 1.8x |
-| large_flat_dict (2,508 B) | 22.6 us | 19.2 us | 30.2 us | 11.8 us | 11.0 us | 1.9x |
-| bytes_in_state (1,087 B) | 1.67 us | 1.68 us | 2.02 us | 1.55 us | 1.37 us | 1.1x |
-| special_types (314 B) | 6.76 us | 4.53 us | 6.81 us | 2.77 us | 2.84 us | 2.4x |
-| btree_small (112 B) | 1.90 us | 1.69 us | 2.17 us | 1.07 us | 1.01 us | 1.8x |
-| btree_length (44 B) | 1.05 us | 0.49 us | 0.61 us | 0.50 us | 0.47 us | 2.1x |
-| scalar_string (72 B) | 1.14 us | 0.57 us | 0.68 us | 0.50 us | 0.51 us | 2.3x |
-| wide_dict (27,057 B) | 263.4 us | 278.3 us | 421.2 us | 130.2 us | 118.9 us | 2.0x |
-| deep_nesting (379 B) | 7.35 us | 7.14 us | 25.7 us | 7.46 us | 6.64 us | 1.0x (parity) |
+| simple_flat_dict (120 B) | 2.05 us | 1.39 us | 1.66 us | 1.10 us | 0.98 us | 1.9x |
+| nested_dict (187 B) | 3.14 us | 2.21 us | 3.23 us | 1.98 us | 1.58 us | 1.6x |
+| large_flat_dict (2,508 B) | 24.7 us | 20.6 us | 33.1 us | 13.0 us | 11.8 us | 1.9x |
+| bytes_in_state (1,087 B) | 1.78 us | 1.84 us | 2.05 us | 1.57 us | 1.47 us | 1.1x |
+| special_types (314 B) | 7.46 us | 4.99 us | 7.18 us | 3.09 us | 2.76 us | 2.4x |
+| btree_small (112 B) | 1.90 us | 1.82 us | 2.21 us | 1.29 us | 1.03 us | 1.5x |
+| btree_length (44 B) | 1.14 us | 0.51 us | 0.72 us | 0.56 us | 0.46 us | 2.0x |
+| scalar_string (72 B) | 1.26 us | 0.57 us | 0.77 us | 0.53 us | 0.51 us | 2.4x |
+| wide_dict (27,057 B) | 283.9 us | 304.5 us | 454.9 us | 149.4 us | 131.2 us | 1.9x |
+| deep_nesting (379 B) | 8.19 us | 8.04 us | 27.7 us | 8.44 us | 7.17 us | 1.0x (parity) |
 
 Parity means within 5% of CPython pickle: `deep_nesting`.
 
@@ -81,16 +82,16 @@ scratch vectors, and mimalloc (journal entries 19 to 21).
 
 | Category | CPython pickle | v1.5.0 | 1.6.1 | 1.7.0 | 1.7.0 PGO | 1.7.0 vs pickle |
 |---|---|---|---|---|---|---|
-| simple_flat_dict | 1.36 us | 0.25 us | 0.24 us | 0.24 us | 0.21 us | 5.6x |
-| nested_dict | 1.66 us | 0.33 us | 0.37 us | 0.40 us | 0.31 us | 4.2x |
-| large_flat_dict | 5.75 us | 1.62 us | 1.62 us | 1.81 us | 1.63 us | 3.2x |
-| bytes_in_state | 1.32 us | 0.84 us | 0.84 us | 0.80 us | 0.76 us | 1.7x |
-| special_types | 5.22 us | 0.58 us | 0.67 us | 0.63 us | 0.53 us | 8.3x |
-| btree_small | 1.42 us | 0.25 us | 0.25 us | 0.25 us | 0.21 us | 5.8x |
-| btree_length | 1.10 us | 0.15 us | 0.15 us | 0.14 us | 0.12 us | 8.0x |
-| scalar_string | 1.13 us | 0.16 us | 0.16 us | 0.14 us | 0.13 us | 8.2x |
-| wide_dict | 60.2 us | 15.4 us | 15.4 us | 15.6 us | 14.8 us | 3.9x |
-| deep_nesting | 2.71 us | 1.24 us | 1.24 us | 1.80 us | 1.34 us | 1.5x |
+| simple_flat_dict | 1.40 us | 0.25 us | 0.27 us | 0.24 us | 0.23 us | 5.8x |
+| nested_dict | 1.68 us | 0.37 us | 0.36 us | 0.38 us | 0.36 us | 4.4x |
+| large_flat_dict | 6.35 us | 1.74 us | 1.71 us | 1.96 us | 1.81 us | 3.2x |
+| bytes_in_state | 1.38 us | 0.93 us | 0.92 us | 0.80 us | 0.79 us | 1.7x |
+| special_types | 5.47 us | 0.59 us | 0.59 us | 0.59 us | 0.55 us | 9.3x |
+| btree_small | 1.49 us | 0.29 us | 0.26 us | 0.29 us | 0.22 us | 5.2x |
+| btree_length | 1.29 us | 0.17 us | 0.16 us | 0.16 us | 0.15 us | 8.3x |
+| scalar_string | 1.15 us | 0.17 us | 0.17 us | 0.14 us | 0.15 us | 8.4x |
+| wide_dict | 66.2 us | 16.6 us | 16.5 us | 17.1 us | 16.3 us | 3.9x |
+| deep_nesting | 2.96 us | 1.43 us | 1.27 us | 1.83 us | 1.54 us | 1.6x |
 
 The encoder changes of 1.7.0 were correctness work (see the changelog:
 subclass items, NUL markers, anonymous instances, big ints, unknown types,
@@ -111,16 +112,16 @@ PG variant, not the `decode_zodb_record` median of the decode table):
 
 | Category | `decode_zodb_record_for_pg` | plus `json.dumps` | `decode_zodb_record_for_pg_json` | Pipeline speedup |
 |---|---|---|---|---|
-| simple_flat_dict | 1.1 us | 2.7 us | 1.0 us | 2.7x |
-| nested_dict | 1.8 us | 3.8 us | 1.6 us | 2.4x |
-| large_flat_dict | 13.5 us | 28.8 us | 11.2 us | 2.6x |
-| bytes_in_state | 1.6 us | 5.5 us | 1.4 us | 3.9x |
-| special_types | 2.9 us | 5.6 us | 2.5 us | 2.2x |
-| btree_small | 1.1 us | 3.1 us | 1.1 us | 2.8x |
-| btree_length | 0.5 us | 1.5 us | 0.5 us | 3.0x |
-| scalar_string | 0.5 us | 0.9 us | 0.6 us | 1.5x |
-| wide_dict | 137.7 us | 208.2 us | 98.5 us | 2.1x |
-| deep_nesting | 7.7 us | 15.5 us | 6.6 us | 2.3x |
+| simple_flat_dict | 1.2 us | 3.1 us | 1.1 us | 2.8x |
+| nested_dict | 2.0 us | 4.6 us | 1.6 us | 2.9x |
+| large_flat_dict | 14.9 us | 32.6 us | 13.4 us | 2.4x |
+| bytes_in_state | 1.8 us | 6.2 us | 1.8 us | 3.4x |
+| special_types | 3.6 us | 6.5 us | 3.0 us | 2.2x |
+| btree_small | 1.4 us | 3.5 us | 1.1 us | 3.2x |
+| btree_length | 0.5 us | 1.7 us | 0.7 us | 2.4x |
+| scalar_string | 0.5 us | 0.9 us | 0.7 us | 1.3x |
+| wide_dict | 161.9 us | 239.5 us | 111.2 us | 2.2x |
+| deep_nesting | 9.4 us | 16.8 us | 7.1 us | 2.4x |
 
 ## FileStorage scan (real-world data)
 
@@ -128,9 +129,9 @@ PG variant, not the `decode_zodb_record` median of the decode table):
 
 | Operation | CPython pickle | v1.5.0 | 1.6.1 | 1.7.0 | 1.7.0 PGO | 1.7.0 vs pickle |
 |---|---|---|---|---|---|---|
-| decode | 22.3 us | 25.7 us | 38.6 us | 13.6 us | 12.9 us | 1.6x |
-| encode | 19.7 us | 4.70 us | 5.00 us | 4.37 us | 3.86 us | 4.5x |
-| roundtrip* | 42.0 us | 32.9 us | 47.5 us | 17.5 us | 16.1 us | 2.4x |
+| decode | 23.9 us | 28.1 us | 42.0 us | 15.3 us | 14.1 us | 1.6x |
+| encode | 21.1 us | 5.31 us | 5.50 us | 4.85 us | 4.20 us | 4.4x |
+| roundtrip* | 45.0 us | 36.2 us | 50.9 us | 19.4 us | 17.5 us | 2.3x |
 
 \* `bench.py` times no pickle round trip; the CPython value is the sum of its
 decode and encode medians, the codec values are one timing of decode plus
@@ -165,17 +166,17 @@ JSON path:   pickle bytes -> Rust AST -> JSON string (direct write, GIL released
 
 | Metric | Dict path + `json.dumps` | JSON path | Speedup |
 |---|---|---|---|
-| Mean | 29.0 us | 12.3 us | 2.4x |
-| Median | 22.8 us | 9.7 us | 2.4x |
-| P95 | 49.2 us | 25.8 us | 1.9x |
+| Mean | 33.8 us | 14.2 us | 2.4x |
+| Median | 25.9 us | 10.7 us | 2.4x |
+| P95 | 60.5 us | 29.0 us | 2.1x |
 
 ### 1,692 records, 1.7.0 PGO
 
 | Metric | Dict path + `json.dumps` | JSON path | Speedup |
 |---|---|---|---|
-| Mean | 30.5 us | 15.8 us | 1.9x |
-| Median | 22.9 us | 10.9 us | 2.1x |
-| P95 | 53.9 us | 37.4 us | 1.4x |
+| Mean | 32.9 us | 12.8 us | 2.6x |
+| Median | 24.9 us | 9.6 us | 2.6x |
+| P95 | 60.8 us | 28.1 us | 2.2x |
 
 Mean, median and P95 are each the minimum of that statistic over the three
 rounds.
@@ -183,18 +184,20 @@ rounds.
 ### PGO and the two paths
 
 The release wheels are PGO builds (`release.yml` profiles the FileStorage and
-synthetic dict-path benchmarks; the recipe is in {doc}`/how-to/run-benchmarks`).
-In this session PGO made the Python-dict paths 0 to 15% faster and encode up
-to 25% faster, but the PG JSON pipeline on the FileStorage sample slower:
-median 9.7 to 10.9 us, P95 25.8 to 37.4 us. The synthetic JSON-path categories
-show nothing beyond noise (at most 10% either way); the real records with long
-strings, persistent references and BTree buckets do. Two other profile mixes
-(adding the PG comparison run, and weighting the real-data runs) gave the same
-picture (P95 33.6 and 35.0 us), so it is not a matter of profile coverage. The
-cause is not identified; it is tracked in
-[#52](https://github.com/bluedynamics/zodb-json-codec/issues/52). Until it is,
-a build without PGO is the faster choice for the storage path, and the numbers
-zodb-pgjsonb will see from the PyPI wheels correspond to the PGO column.
+synthetic dict-path benchmarks and the PG comparison; the recipe is in
+{doc}`/how-to/run-benchmarks`). Until this release PGO made the Python-dict
+paths 0 to 15% faster and encode up to 25% faster, but the PG JSON pipeline on
+the FileStorage sample slower: median 9.7 to 10.9 us, P95 25.8 to 37.4 us,
+with every synthetic JSON category equal or faster. The cause was the byte
+loop of the JSON string writer, which the profile-guided build compiled up to
+1.8x slower for long strings without escapes
+([#52](https://github.com/bluedynamics/zodb-json-codec/issues/52), journal
+entry 22). The writer now scans eight bytes at a time with a SWAR mask, and
+the tables above are measured with that scan: the PGO build is the faster one
+on the storage path as well (JSON path median 10.7 to 9.6 us; the P95, 29.0
+to 28.1 us, is inside the noise floor) and the Python-dict paths keep their
+PGO gain. The PGO column is what
+the PyPI wheels deliver and what zodb-pgjsonb sees.
 
 ### Allocator notes for operators
 
@@ -252,8 +255,8 @@ and for deeply nested structures (marker keys). The FileStorage sample is
 | Operation | Best | Worst | FileStorage sample |
 |---|---|---|---|
 | Decode | 2.4x faster | 1.0x | 1.6x faster |
-| Encode | 8.3x faster | 1.5x faster | 4.5x faster |
-| PG JSON path vs dict path + `json.dumps` | 3.9x faster | 1.5x faster | 2.4x faster (median) |
+| Encode | 9.3x faster | 1.6x faster | 4.4x faster |
+| PG JSON path vs dict path + `json.dumps` | 3.4x faster | 1.3x faster | 2.4x faster (median) |
 
 The sweet spot is the typical ZODB object: 5 to 50 keys, mixed types,
 datetime fields, persistent references. The remaining cost on decode is the

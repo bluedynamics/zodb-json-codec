@@ -75,9 +75,9 @@ All benchmark commands accept:
 - `--output FILE` -- export results as JSON
 - `--format {table,json,both}` -- output format (default: `table`)
 
-## PGO builds for production-accurate numbers
+## PGO builds, the way the wheels are built
 
-Profile-Guided Optimization (PGO) produces the most accurate performance numbers by optimizing based on actual benchmark workloads.
+The release wheels are Profile-Guided Optimization (PGO) builds, so a local PGO build reproduces what users install. PGO is not simply faster for every path: until 1.7.0 it made the PG JSON pipeline on real records slower than a build without PGO (#52, a byte loop in the JSON string writer that the profile-guided build compiled worse; the performance page has the numbers before and after the fix). Measure both builds when a change touches the storage path.
 
 ### 1. install LLVM tools
 
@@ -95,11 +95,14 @@ RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
 
 ### 3. generate profiles
 
-Run both benchmark types to capture representative workload data:
+Run all three benchmark modes so the profile covers the Python-dict paths and
+the PG JSON path (the one zodb-pgjsonb runs; a profile without it leaves the
+JSON writer without counts, and the optimizer treats it as cold):
 
 ```bash
 python benchmarks/bench.py synthetic --iterations 5000
 python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+python benchmarks/bench.py pg-compare --iterations 2000 --filestorage benchmarks/bench_data/Data.fs
 ```
 
 ### 4. merge profile data
