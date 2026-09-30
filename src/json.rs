@@ -763,6 +763,15 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                 return Ok(pv);
             }
             // Check for instance: has both @cls and @s
+            if let (Some(v), 1) = (map.get("@inst"), map.len()) {
+                return Ok(PickleValue::Instance(Box::new(InstanceData {
+                    module: String::new(),
+                    name: String::new(),
+                    state: Box::new(json_to_pickle_value(v)?),
+                    dict_items: None,
+                    list_items: None,
+                })));
+            }
             if map.contains_key("@cls") && map.contains_key("@s") {
                 if let Some(Value::Array(cls)) = map.get("@cls") {
                     if cls.len() == 2 {

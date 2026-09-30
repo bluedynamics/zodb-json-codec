@@ -151,6 +151,50 @@ impl Encoder {
         self.buf.extend_from_slice(data);
     }
 
+    /// `@inst` forms. `{"@obj": o, "@state": s}` is BUILD applied to a value that
+    /// is not an instance, kept as `o s BUILD`. `{"@callable": c, "@args": a,
+    /// "@state": s}` is what releases before 1.7.0 stored for BUILD after a
+    /// REDUCE whose callable is not a global (now a Reduce with `state`); it
+    /// encodes as `c a REDUCE s BUILD`. Anything else is an error: an
+    /// Instance with empty module and name has no valid GLOBAL form.
+    fn encode_anonymous_instance(
+        &mut self,
+        state: &PickleValue,
+        depth: usize,
+    ) -> Result<(), CodecError> {
+        let PickleValue::Dict(pairs) = state else {
+            return Err(CodecError::InvalidData(
+                "anonymous instance (@inst) state must be a dict".to_string(),
+            ));
+        };
+        let get = |key: &str| {
+            pairs
+                .iter()
+                .find(|(k, _)| matches!(k, PickleValue::String(s) if s == key))
+                .map(|(_, v)| v)
+        };
+        match (get("@obj"), get("@callable"), get("@args"), get("@state")) {
+            (Some(obj), None, None, Some(st)) => {
+                self.encode_value(obj, depth + 1)?;
+                self.encode_value(st, depth + 1)?;
+                self.write_u8(BUILD);
+                Ok(())
+            }
+            (None, Some(callable), Some(args), Some(st)) => {
+                self.encode_value(callable, depth + 1)?;
+                self.encode_value(args, depth + 1)?;
+                self.write_u8(REDUCE);
+                self.encode_value(st, depth + 1)?;
+                self.write_u8(BUILD);
+                Ok(())
+            }
+            _ => Err(CodecError::InvalidData(
+                "anonymous instance (@inst) state must be {@obj, @state} or {@callable, @args, @state}"
+                    .to_string(),
+            )),
+        }
+    }
+
     fn encode_value(&mut self, val: &PickleValue, depth: usize) -> Result<(), CodecError> {
         if depth > MAX_DEPTH {
             return Err(CodecError::InvalidData("maximum nesting depth exceeded".to_string()));
@@ -295,6 +339,9 @@ impl Encoder {
             }
             PickleValue::Instance(inst) => {
                 let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+                if module.is_empty() && name.is_empty() {
+                    return self.encode_anonymous_instance(state, depth);
+                }
                 // Emit as: GLOBAL module\nname\n args NEWOBJ [items] state BUILD, where args is
                 // EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12).
                 let (args, state) = match newobj_args_state(state) {

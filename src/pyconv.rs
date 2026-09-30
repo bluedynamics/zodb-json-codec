@@ -1350,6 +1350,15 @@ fn try_decode_single_key_marker(
                 return Ok(Some(PickleValue::Dict(pairs)));
             }
         }
+        "@inst" => {
+            return Ok(Some(PickleValue::Instance(Box::new(InstanceData {
+                module: String::new(),
+                name: String::new(),
+                state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
+                dict_items: None,
+                list_items: None,
+            }))));
+        }
         "@set" => {
             if let Ok(list) = v.cast::<PyList>() {
                 let items: PyResult<Vec<PickleValue>> = list
@@ -2376,6 +2385,18 @@ fn try_encode_marker_to_pickle(
     expand_refs: bool,
 ) -> PyResult<bool> {
     match key {
+        "@inst" => {
+            // anonymous instance: defer to the PickleValue encoder like the other complex markers
+            let pv = PickleValue::Instance(Box::new(InstanceData {
+                module: String::new(),
+                name: String::new(),
+                state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
+                dict_items: None,
+                list_items: None,
+            }));
+            encode_value_into(&pv, buf)?;
+            Ok(true)
+        }
         "@ref" => {
             if expand_refs {
                 // Oid only: "0000000000000003" -> (oid, None) BINPERSID

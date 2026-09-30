@@ -299,6 +299,21 @@ Keys that genuinely start with `@ns:` are escaped the same way by every
 decode path, so they survive a round trip too. Single-key dicts `{"@ns": str}`
 are reserved for the marker, like every other `@`-prefixed single-key dict.
 
+### `@inst` -- BUILD on a non-instance
+
+`BUILD` applied to a value that is not a class instance (a corrupt or hand-made
+pickle) is kept as an anonymous instance and re-encoded as `value state BUILD`:
+
+```json
+{"@inst": {"@obj": {}, "@state": {}}}
+```
+
+Releases before 1.7.0 also wrote `{"@inst": {"@callable": ..., "@args": ...,
+"@state": ...}}` for `BUILD` after a `REDUCE` whose callable is not a global;
+that stored form is still read and encodes as `callable args REDUCE state
+BUILD`. New output uses `@reduce` with the `state` key instead. Any other
+`@inst` content is rejected by the encoders.
+
 ### `@pkl` -- Raw Pickle Escape Hatch
 
 Base64-encoded pickle fragment for types that cannot be represented in

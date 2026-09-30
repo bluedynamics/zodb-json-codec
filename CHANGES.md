@@ -13,6 +13,13 @@
   quotes, `UNICODE` is read as raw-unicode-escape (Latin-1 bytes plus `\uXXXX`;
   non-ASCII used to raise `InvalidUtf8` and `\u` escapes stayed literal) [#25]
 
+- Anonymous instances (`@inst`) round-trip: `BUILD` after a `REDUCE`/`NEWOBJ`
+  whose callable is not a global now decodes to `@reduce` with `state` and
+  re-encodes faithfully; `@inst` written by earlier releases (`@callable`,
+  `@args`, `@state`) and `BUILD` on a non-instance (`@obj`, `@state`) are read
+  by all encoder paths, which used to write them back as a plain dict or as a
+  `GLOBAL` with empty module and name [#25]
+
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
   the compact `["oid", "module.Class"]` form is now only recognized when both

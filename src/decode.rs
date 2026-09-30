@@ -627,27 +627,18 @@ impl<'a> Decoder<'a> {
                                     }
                                 }
                                 _ => {
-                                    // Can't decompose further — wrap as-is
-                                    self.push_at(PickleValue::Instance(Box::new(InstanceData {
-                                        module: String::new(),
-                                        name: String::new(),
+                                    // BUILD after REDUCE/NEWOBJ on a callable that is not a
+                                    // Global (e.g. the result of another REDUCE): the Reduce
+                                    // keeps the state and re-encodes as
+                                    // `callable args REDUCE|NEWOBJ state BUILD` (#25).
+                                    self.push_at(PickleValue::Reduce {
+                                        callable,
+                                        args,
                                         dict_items,
                                         list_items,
-                                        state: Box::new(PickleValue::Dict(vec![
-                                            (
-                                                PickleValue::String("@callable".to_string()),
-                                                *callable,
-                                            ),
-                                            (
-                                                PickleValue::String("@args".to_string()),
-                                                *args,
-                                            ),
-                                            (
-                                                PickleValue::String("@state".to_string()),
-                                                state,
-                                            ),
-                                        ])),
-                                    })), Self::nest(build_depth)?);
+                                        newobj,
+                                        state: Some(Box::new(state)),
+                                    }, build_depth);
                                 }
                             }
                         }
