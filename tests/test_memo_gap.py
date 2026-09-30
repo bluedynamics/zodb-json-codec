@@ -30,11 +30,21 @@ def test_cpython_rejects_the_stream():
         lambda data: zodb_json_codec.decode_zodb_record_for_pg_json(
             CLASS_PICKLE + data
         ),
+        lambda data: zodb_json_codec.decode_zodb_record_for_pg(CLASS_PICKLE + data),
     ],
 )
 def test_codec_rejects_the_stream(call):
     with pytest.raises(ValueError, match="memo index 0 not found"):
         call(GAP)
+
+
+def test_gap_is_rejected_without_the_memo_pre_scan():
+    # a byte the pre-scan cannot size after STOP makes it track every put
+    # (MemoNeeds::All); CPython ignores bytes after STOP, the gap is still an error
+    with pytest.raises(pickle.UnpicklingError):
+        pickle.loads(GAP + b"\x97")
+    with pytest.raises(ValueError, match="memo index 0 not found"):
+        zodb_json_codec.pickle_to_dict(GAP + b"\x97")
 
 
 def test_gap_put_without_a_read_of_the_gap_is_fine():
@@ -45,4 +55,6 @@ def test_gap_put_without_a_read_of_the_gap_is_fine():
 def test_record_memo_is_shared_between_the_two_pickles():
     # the unoptimized class pickle puts its strings at 0..2: GET 0 in the state is the module name
     rec = pickle.dumps(("persistent.mapping", "PersistentMapping"), protocol=3) + GAP
-    assert zodb_json_codec.decode_zodb_record(rec)["@s"] == {"@t": [1, "persistent.mapping"]}
+    assert zodb_json_codec.decode_zodb_record(rec)["@s"] == {
+        "@t": [1, "persistent.mapping"]
+    }

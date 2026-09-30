@@ -35,7 +35,7 @@ pub fn decode_zodb_pickles(data: &[u8]) -> Result<(PickleValue, PickleValue), Co
 /// record decoded on it (#26): after the first few records they never
 /// allocate again. Vectors that grew past `MAX_SCRATCH_ELEMS` are dropped
 /// instead of kept, so one huge record does not pin memory for the thread's
-/// lifetime; the ceiling is about 8 MiB per thread (48-byte values in `stack`
+/// lifetime; the ceiling is about 8 MiB per thread (56-byte values in `stack`
 /// and `memo`, 24-byte binding vectors, the rest small).
 #[derive(Default)]
 struct Scratch {

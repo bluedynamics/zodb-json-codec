@@ -76,7 +76,7 @@ mod tests {
         eprintln!("sizeof(Vec<u8>) = {} bytes", size_of::<Vec<u8>>());
         eprintln!("sizeof(Box<PickleValue>) = {} bytes", size_of::<Box<PickleValue>>());
         eprintln!("sizeof(BigInt) = {} bytes", size_of::<num_bigint::BigInt>());
-        // Enum should be <= 56 bytes (Global at 48 is now the largest variant)
+        // Enum should be <= 56 bytes (the largest variants, Global and Reduce, need 56)
         assert!(pv_size <= 56, "PickleValue enum too large: {} bytes", pv_size);
     }
 }
