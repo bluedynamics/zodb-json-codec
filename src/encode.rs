@@ -534,6 +534,53 @@ mod tests {
         assert_eq!(decode_pickle(&bytes).unwrap(), val);
     }
 
+    fn reduce(newobj: bool, state: Option<PickleValue>) -> PickleValue {
+        PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global { module: "m".into(), name: "C".into() }),
+            args: Box::new(PickleValue::Tuple(vec![PickleValue::Int(1)])),
+            dict_items: None,
+            list_items: None,
+            newobj,
+            state: state.map(Box::new),
+        }
+    }
+
+    #[test]
+    fn test_newobj_reduce_emits_newobj() {
+        let bytes = encode_pickle(&reduce(true, None)).unwrap();
+        assert!(bytes.contains(&NEWOBJ) && !bytes.contains(&REDUCE));
+        assert_eq!(decode_pickle(&bytes).unwrap(), reduce(true, None));
+    }
+
+    #[test]
+    fn test_reduce_with_state_emits_reduce_then_build() {
+        let val = reduce(false, Some(PickleValue::Dict(vec![])));
+        let bytes = encode_pickle(&val).unwrap();
+        let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
+        let b = bytes.iter().position(|&b| b == BUILD).unwrap();
+        assert!(r < b && !bytes.contains(&NEWOBJ));
+        assert_eq!(decode_pickle(&bytes).unwrap(), val);
+    }
+
+    #[test]
+    fn test_instance_with_args_state_emits_newobj_with_args() {
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "m".into(),
+            name: "C".into(),
+            state: Box::new(PickleValue::Dict(vec![
+                (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::Int(1)])),
+                (PickleValue::String("@state".into()), PickleValue::Dict(vec![])),
+            ])),
+            dict_items: None,
+            list_items: None,
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();
+        assert_eq!(bytes[newobj - 1], TUPLE1, "args tuple must sit right below NEWOBJ");
+        assert!(!bytes.contains(&EMPTY_TUPLE));
+        assert_eq!(decode_pickle(&bytes).unwrap(), val);
+    }
+
     #[test]
     fn test_encode_max_depth_exceeded() {
         // Build a deeply nested list that exceeds MAX_DEPTH (1000).

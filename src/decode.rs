@@ -1336,6 +1336,54 @@ mod tests {
     }
 
     #[test]
+    fn test_reduce_with_args_then_build_keeps_reduce_with_state() {
+        // GLOBAL m.C, "a", TUPLE1, REDUCE, EMPTY_DICT, BUILD
+        let data: &[u8] = &[
+            0x80, 0x03, b'c', b'm', b'\n', b'C', b'\n', 0x8c, 0x01, b'a', 0x85, b'R', b'}', b'b', b'.',
+        ];
+        match decode_pickle(data).unwrap() {
+            PickleValue::Reduce { newobj, state, args, .. } => {
+                assert!(!newobj);
+                assert_eq!(*args, PickleValue::Tuple(vec![PickleValue::String("a".into())]));
+                assert_eq!(state, Some(Box::new(PickleValue::Dict(vec![]))));
+            }
+            other => panic!("expected Reduce with state, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_newobj_with_args_then_build_folds_into_instance() {
+        // GLOBAL m.C, "a", TUPLE1, NEWOBJ, EMPTY_DICT, BUILD  ->  Instance with @args/@state
+        let data: &[u8] = &[
+            0x80, 0x03, b'c', b'm', b'\n', b'C', b'\n', 0x8c, 0x01, b'a', 0x85, 0x81, b'}', b'b', b'.',
+        ];
+        match decode_pickle(data).unwrap() {
+            PickleValue::Instance(inst) => {
+                assert_eq!(
+                    *inst.state,
+                    PickleValue::Dict(vec![
+                        (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::String("a".into())])),
+                        (PickleValue::String("@state".into()), PickleValue::Dict(vec![])),
+                    ])
+                );
+            }
+            other => panic!("expected Instance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_newobj_without_build_is_flagged() {
+        let data: &[u8] = &[0x80, 0x03, b'c', b'm', b'\n', b'C', b'\n', 0x8c, 0x01, b'a', 0x85, 0x81, b'.'];
+        match decode_pickle(data).unwrap() {
+            PickleValue::Reduce { newobj, state, .. } => {
+                assert!(newobj);
+                assert!(state.is_none());
+            }
+            other => panic!("expected Reduce, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_setitems_on_reduce_with_build() {
         // Dict subclass: REDUCE + SETITEMS + BUILD (all three combined)
         // This tests that dict_items carry through from Reduce to Instance
