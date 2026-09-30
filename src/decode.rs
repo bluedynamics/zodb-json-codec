@@ -61,9 +61,10 @@ struct Decoder<'a> {
     /// stream (pre-scanned). Puts to any other index are skipped entirely:
     /// no clone at BINPUT, no binding bookkeeping, no dirty sync at pop.
     memo_needed: MemoNeeds,
-    /// Number of memo puts seen so far (MEMOIZE's auto-index, protocol 4:
-    /// CPython uses `len(memo)`). Counted even when the put is skipped, so
-    /// later indices stay aligned.
+    /// Number of memo puts seen so far: MEMOIZE's auto-index (protocol 4).
+    /// Equals CPython's `len(memo)` for every stream a pickler emits (no slot
+    /// is put twice). Counted even when the put is skipped, so later indices
+    /// stay aligned.
     memoize_count: usize,
 }
 
@@ -738,8 +739,9 @@ impl<'a> Decoder<'a> {
                     self.memo_store(idx)?;
                 }
                 MEMOIZE => {
-                    // CPython: memo[len(memo)] = top; the index is the number of
-                    // memo puts so far, whether or not they were stored.
+                    // CPython: memo[len(memo)] = top. Picklers never put a slot
+                    // twice, so the number of puts so far (stored or skipped) is
+                    // that length.
                     let idx = self.memoize_count;
                     self.memo_store(idx)?;
                 }
@@ -972,12 +974,12 @@ impl<'a> Decoder<'a> {
     /// reads that slot; skipping the put avoids the clone entirely (#22).
     #[inline]
     fn memo_store(&mut self, idx: usize) -> Result<(), CodecError> {
+        self.peek_value()?; // the stack must not be empty even when the put is skipped
         if idx >= MAX_MEMO_SIZE {
             return Err(CodecError::InvalidData(format!(
                 "memo index {idx} exceeds maximum {MAX_MEMO_SIZE}"
             )));
         }
-        self.peek_value()?; // the stack must not be empty even when the put is skipped
         self.memoize_count += 1;
         if !self.memo_needed(idx) {
             return Ok(());
@@ -1801,6 +1803,18 @@ mod tests {
             PickleValue::Tuple(vec![PickleValue::List(vec![]), PickleValue::Int(1)])
         );
         assert_eq!(memo_len, 2, "index 1 is stored, index 0 stays an unused slot");
+    }
+
+    #[test]
+    fn test_prescan_long_binget() {
+        // LONG_BINPUT 300 (u32), POP, BININT1 1, LONG_BINGET 300, TUPLE2 -> (1, 2)... the
+        // wide read keeps the wide put: BININT1 2, LONG_BINPUT 300, BININT1 1, LONG_BINGET 300
+        let data: &[u8] = &[
+            0x80, 0x03, b'K', 2, b'r', 44, 1, 0, 0, b'K', 1, b'j', 44, 1, 0, 0, 0x86, b'.',
+        ];
+        let (result, memo_len) = run_decoder(data);
+        assert_eq!(result.unwrap(), PickleValue::Tuple(vec![PickleValue::Int(1), PickleValue::Int(2)]));
+        assert_eq!(memo_len, 301);
     }
 
     #[test]

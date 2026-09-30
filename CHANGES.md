@@ -29,9 +29,9 @@
 
 - Decode performance: memo puts that no later `GET`/`BINGET` reads are skipped
   after a pre-scan of the opcode stream. The 1.6.0 memo fix deep-copied every
-  container into the memo once per nesting level (decode was 30 to 70% slower
-  than 1.5.0 and nobody re-measured); shared references keep the 1.6.0
-  behaviour [#22]
+  container into the memo once per nesting level (typical records decoded 30
+  to 55% slower than 1.5.0, deeply nested ones 3.5x slower, and nobody
+  re-measured); shared references keep the 1.6.0 behaviour [#22]
 
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
@@ -150,7 +150,7 @@
   unnecessary clones for memo entries never re-read)
   Correction (1.7.0): the lazy variant still cloned every dirty container
   into the memo when it left the stack, once per nesting level; see the #22
-  entry under 1.7.0.
+  entry above.
 - Clean up dead code and compiler warnings: gate test-only functions with
   `#[cfg(test)]`, prefix unused variables, convert doc comments on macros
   to regular comments

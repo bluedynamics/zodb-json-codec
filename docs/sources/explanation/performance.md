@@ -187,16 +187,16 @@ binary-containing records.
 
 The 1.6.0 memo fix (a shared container must be re-synced into the memo after
 it is filled) was correct but deep-copied every container into the memo once
-per nesting level, and nobody re-measured: 1.6.1 decoded 30 to 70% slower
-than 1.5.0.
+per nesting level, and nobody re-measured: 1.6.1 decoded typical records 30
+to 55% slower than 1.5.0 and deeply nested ones 3.5x slower.
 Since 1.7.0 the decoder pre-scans the opcode stream for the memo indices that
 a `GET`/`BINGET` actually reads and skips every other memo put
 ([#22](https://github.com/bluedynamics/zodb-json-codec/issues/22)); shared
 references keep the 1.6.0 behaviour.
 
 One pinned core, minimum of medians over three interleaved rounds, non-PGO
-release builds with glibc malloc (measured without mimalloc, see the Allocator
-section once #24 lands; the two gains overlap and do not add up):
+release builds with glibc malloc (measured without mimalloc, #24, whose gain
+overlaps with this one):
 
 | Benchmark | v1.5.0 | main (1.6.1 plus fixes) | pre-scan |
 |---|---|---|---|

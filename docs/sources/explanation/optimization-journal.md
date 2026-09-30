@@ -465,8 +465,9 @@ other index: no clone, no binding bookkeeping, no dirty sync when the slot
 leaves the stack. Indices that are read keep the full 1.6.0 machinery. On an
 opcode the walk cannot size it reports "keep everything", so unknown input
 degrades to the old behaviour instead of a wrong answer. `MEMOIZE` (protocol
-4) numbers its entries by the count of puts seen, like CPython's `len(memo)`,
-so skipped puts keep later indices aligned.
+4) numbers its entries by the count of puts seen, which equals CPython's
+`len(memo)` for every stream a pickler emits (no slot is put twice), so
+skipped puts keep later indices aligned.
 
 **Why it helps:** CPython's pickler memoizes every str, dict, list and
 non-empty tuple, so a ZODB record carries a `BINPUT` after nearly every value,
