@@ -7,6 +7,8 @@
 - **Rust 1.70+** -- install via [rustup](https://rustup.rs/)
 - **Python 3.12+** -- with a virtual environment active
 - **maturin** -- the Rust/Python build tool
+- **C compiler** -- gcc or clang (MSVC on Windows); the Rust-side allocator
+  [mimalloc](https://github.com/microsoft/mimalloc) is compiled from C
 
 Install maturin:
 

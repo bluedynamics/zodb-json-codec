@@ -39,6 +39,13 @@
   sample database 39.8 to 35.5 µs, a 10 KB rich-text record 30 to 19 µs; both
   thread-local output buffers are released after a record larger than 4 MiB [#23]
 
+- Performance: mimalloc is the Rust-side global allocator (Python objects keep
+  using pymalloc). Decode is allocation-bound, so medium and large records
+  decode 20 to 50% faster (FileStorage decode 38.8 to 22.2 µs per record, PG
+  JSON pipeline median 39.3 to 20.7 µs), small ones 0 to 10%, encode 0 to 14%.
+  The wheel grows by about 170 KB and building from source needs a C compiler
+  [#24]
+
 - Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
   and user subclasses): the Python-dict decode path now emits their
   `items`/`appends` (`@items`/`@appends` for instances) and both encoder paths

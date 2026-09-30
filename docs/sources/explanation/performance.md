@@ -183,6 +183,37 @@ The FileStorage scan shows an overall ratio of 1.41x (7.2 MB JSON vs 5.1 MB
 pickle) for the full database, reflecting the mix of string-heavy and
 binary-containing records.
 
+## Allocator
+
+Since 1.7.0 the Rust side uses [mimalloc](https://github.com/microsoft/mimalloc)
+as its global allocator ([#24](https://github.com/bluedynamics/zodb-json-codec/issues/24));
+Python objects keep using pymalloc.
+Decode is allocation-bound (every string, list, dict and boxed instance of the
+`PickleValue` AST is one allocation, freed again when the AST is dropped), so
+this is the largest single improvement since the direct JSON path.
+Measured on one pinned core, minimum of three interleaved rounds, non-PGO
+release builds of `main` before and after the change:
+
+| Benchmark | glibc malloc | mimalloc | Ratio |
+|---|---|---|---|
+| FileStorage decode (per record) | 38.8 us | 22.2 us | 0.57 |
+| FileStorage encode | 5.0 us | 4.5 us | 0.89 |
+| PG JSON pipeline, median | 39.3 us | 20.7 us | 0.53 |
+| PG JSON pipeline, P95 | 76.2 us | 52.9 us | 0.69 |
+| wide_dict decode | 413 us | 202 us | 0.49 |
+| large_flat_dict decode | 30.3 us | 18.5 us | 0.61 |
+| deep_nesting decode | 27.1 us | 15.4 us | 0.57 |
+| special_types decode | 6.7 us | 5.2 us | 0.78 |
+| simple_flat_dict decode | 1.57 us | 1.52 us | 0.97 |
+
+The other tables on this page predate the change.
+The wheel grows by about 170 KB, and building from source needs a C compiler
+because mimalloc is compiled from C.
+The allocator is built with local-dynamic thread-local storage: the module is
+loaded with `dlopen`, and initial-exec TLS would take part of glibc's fixed
+static TLS surplus, which can make later imports fail with "cannot allocate
+memory in static TLS block".
+
 ## Summary
 
 The sweet spot for the codec is typical ZODB objects: 5-50 keys, mixed types,

@@ -456,6 +456,32 @@ a 10 KB rich-text record 30 µs to 19 µs; small-record encode 0.25 µs to
 a claim, not a fact. The release process gains a benchmark step against the
 previous release (#21).
 
+### 21. mimalloc as the global allocator
+
+**Technique:** `#[global_allocator] static GLOBAL: mimalloc::MiMalloc` in
+`lib.rs`, built with the `local_dynamic_tls` feature because the extension
+module is loaded with `dlopen`: initial-exec TLS would take part of glibc's
+fixed static TLS surplus and can make imports fail once other modules have
+used it up.
+
+**Why it helps:** the decode path is allocation-bound. Every string, list,
+dict and boxed instance in the `PickleValue` AST is a heap allocation, and all
+of them are freed again when the AST is dropped. glibc malloc pays for locking
+and size-class bookkeeping on each of those; mimalloc's thread-local free
+lists make a small allocation and its free a few instructions each. Only Rust
+allocations are affected; Python objects keep using pymalloc.
+
+**Impact:** one pinned core, minimum of three interleaved rounds, `main`
+before and after the change: FileStorage decode 38.8 to 22.2 µs per record,
+PG JSON pipeline median 39.3 to 20.7 µs and P95 76 to 53 µs, wide_dict decode
+413 to 202 µs, large_flat_dict 30.3 to 18.5 µs, deep_nesting 27.1 to 15.4 µs,
+small records 0 to 10%, encode 0 to 14%. The wheel grows by about 170 KB and
+building from source needs a C compiler (present on the manylinux, macOS and
+Windows release runners).
+
+**Lesson:** on an allocation-bound workload, benchmark the allocator early.
+It was worth more than any single optimization above.
+
 ## Cumulative result
 
 | Operation | vs CPython pickle |

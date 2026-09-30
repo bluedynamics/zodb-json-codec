@@ -24,7 +24,7 @@ Designed as the codec layer for a PostgreSQL JSONB storage backend.
 - BTree flattening for all BTrees package types
 - Escape hatch (`@pkl`) ensures any pickle data roundtrips safely
 
-**Requirements:** Python 3.12+, Rust toolchain (for building from source)
+**Requirements:** Python 3.12+, Rust toolchain and a C compiler (for building from source)
 
 ## Documentation
 
