@@ -32,6 +32,44 @@ Install for streamlined releases:
 cargo install cargo-release
 ```
 
+## Before a Release
+
+### Benchmark against the previous release
+
+Performance regressions do not show up in the test suite (1.6.0 shipped a
+27-72% slower decoder unnoticed). Build the previous tag in a second worktree
+and run the same benchmarks on both builds, on the same machine, in the same
+session:
+
+```bash
+cd sources/zodb-json-codec
+git worktree add ../zodb-json-codec-wt/prev-release v1.6.1
+for wt in ../zodb-json-codec-wt/prev-release .; do
+  (cd "$wt" && uv venv .venv -q && uv pip install --python .venv/bin/python -q ZODB BTrees \
+   && VIRTUAL_ENV=$PWD/.venv maturin develop --release \
+   && gunzip -kf benchmarks/bench_data/Data.fs.gz \
+   && .venv/bin/python benchmarks/bench.py synthetic --iterations 5000 --output "$wt/bench-synthetic.json" \
+   && .venv/bin/python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs --output "$wt/bench-fs.json" \
+   && .venv/bin/python benchmarks/bench.py pg-compare --iterations 5000 --filestorage benchmarks/bench_data/Data.fs)
+done
+```
+
+Compare the medians. A decode or encode median more than 10% slower than the
+previous release blocks the release until it is explained in the changelog or
+fixed. Update `docs/sources/explanation/performance.md` when the numbers move.
+
+### Dependency lockfile
+
+`Cargo.lock` is committed so every build, including the PGO release builds,
+uses the same dependency versions. Bump dependencies deliberately:
+
+```bash
+cargo update -p <crate>          # one crate
+cargo update                     # everything
+```
+
+and commit the lockfile change with a `CHANGES.md` entry.
+
 ## Making a Release
 
 ### 1. Bump the version
@@ -77,11 +115,11 @@ to **PyPI**.
 
 | Platform | Architecture | Wheels |
 |----------|-------------|--------|
-| Linux (manylinux) | x86_64 | Python 3.10-3.13 |
-| Linux (manylinux) | aarch64 | Python 3.10-3.13 |
-| macOS | x86_64 | Python 3.10-3.13 |
-| macOS | arm64 (Apple Silicon) | Python 3.10-3.13 |
-| Windows | x64 | Python 3.10-3.13 |
+| Linux (manylinux) | x86_64 | Python 3.10-3.14 |
+| Linux (manylinux) | aarch64 | Python 3.10-3.14 |
+| macOS | x86_64 | Python 3.10-3.14 |
+| macOS | arm64 (Apple Silicon) | Python 3.10-3.14 |
+| Windows | x64 | Python 3.10-3.14 |
 | Source | - | sdist |
 
 ## Workflow Overview

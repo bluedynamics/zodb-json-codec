@@ -45,6 +45,11 @@
   zodb-pgjsonb can drop its Python-side `_unsanitize_from_pg` walk once it
   requires this release [#18]
 
+- Commit `Cargo.lock` so all builds, including the PGO release builds, use the
+  same dependency versions; document the benchmark-against-the-previous-release
+  step and the lockfile policy in `RELEASE.md` (wheel table now lists Python
+  3.14, which the release workflow already builds) [#21]
+
 - Bump PyO3 to 0.29 (fixes Dependabot advisories GHSA-36hh-v3qg-5jq4 and
   GHSA-chgr-c6px-7xpp; neither API was used by the codec). PyO3 0.29 drops
   free-threaded Python 3.13t, which the wheels never targeted; 3.10 to 3.14
