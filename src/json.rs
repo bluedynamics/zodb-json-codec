@@ -606,6 +606,15 @@ fn write_compact_ref_pg(
     Ok(())
 }
 
+/// Decode the payload of an `@ns` marker (base64 of a UTF-8 string containing NUL bytes).
+fn decode_ns_marker(b64: &str) -> Result<String, CodecError> {
+    let bytes = BASE64
+        .decode(b64)
+        .map_err(|e| CodecError::InvalidData(format!("@ns marker is not valid base64: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| CodecError::InvalidData("@ns marker does not decode to UTF-8".into()))
+}
+
 /// Convert a serde_json Value back to a PickleValue AST.
 pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
     match val {
@@ -695,6 +704,10 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                         .map_err(|e| CodecError::Json(format!("base64 decode: {e}")))?;
                     return Ok(PickleValue::RawPickle(bytes));
                 }
+            }
+            if let (1, Some(Value::String(b64))) = (map.len(), map.get("@ns")) {
+                // String with NUL bytes, base64-encoded by the PG decode paths
+                return Ok(PickleValue::String(decode_ns_marker(b64)?));
             }
             // Check for known typed markers (@dt, @date, @time, @td, @dec, @uuid)
             if let Some(pv) =
@@ -803,13 +816,14 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                     });
                 }
             }
-            // Regular dict with string keys
+            // Regular dict with string keys ("@ns:<base64>" keys carry NUL bytes)
             let mut pairs = Vec::new();
             for (k, v) in map {
-                pairs.push((
-                    PickleValue::String(k.clone()),
-                    json_to_pickle_value(v)?,
-                ));
+                let key = match k.strip_prefix("@ns:") {
+                    Some(b64) => decode_ns_marker(b64)?,
+                    None => k.clone(),
+                };
+                pairs.push((PickleValue::String(key), json_to_pickle_value(v)?));
             }
             Ok(PickleValue::Dict(pairs))
         }
