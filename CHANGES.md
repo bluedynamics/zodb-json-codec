@@ -45,6 +45,11 @@
   zodb-pgjsonb can drop its Python-side `_unsanitize_from_pg` walk once it
   requires this release [#18]
 
+- Bump PyO3 to 0.29 (fixes Dependabot advisories GHSA-36hh-v3qg-5jq4 and
+  GHSA-chgr-c6px-7xpp; neither API was used by the codec). PyO3 0.29 drops
+  free-threaded Python 3.13t, which the wheels never targeted; 3.10 to 3.14
+  stay supported [#31]
+
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
 
