@@ -8,6 +8,7 @@
 pub const MARK: u8 = b'('; // push special markobject on stack
 pub const STOP: u8 = b'.'; // every pickle ends with STOP
 pub const POP: u8 = b'0'; // discard topmost stack item
+pub const POP_MARK: u8 = b'1'; // discard everything above the last MARK and the mark itself
 pub const DUP: u8 = b'2'; // duplicate top stack item
 pub const FLOAT: u8 = b'F'; // push float; decimal string argument
 pub const INT: u8 = b'I'; // push integer or bool
