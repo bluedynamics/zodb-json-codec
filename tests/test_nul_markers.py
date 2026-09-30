@@ -72,15 +72,61 @@ class TestValuesAndKeys:
         _, back = path(CLS, {"t": (NUL_VAL, 1), "s": {NUL_VAL}})
         assert back == {"t": (NUL_VAL, 1), "s": {NUL_VAL}}
 
-    def test_nul_in_btree_bucket_key(self):
+    @pytest.mark.parametrize("path", PATHS)
+    def test_nul_in_btree_bucket_key(self, path):
         state = ((NUL_KEY, 1, "k2", NUL_VAL),)
-        _, back = through_pg_json(("BTrees.OOBTree", "OOBucket"), state)
+        _, back = path(("BTrees.OOBTree", "OOBucket"), state)
         assert back == state
 
-    def test_single_key_dict_with_nul_key(self):
-        # exercises the single-key fast paths of both encoders
-        _, back = through_pg_json(CLS, {"d": {NUL_KEY: 1}})
+    @pytest.mark.parametrize("path", PATHS)
+    def test_single_key_dict_with_nul_key(self, path):
+        # single-key dict: the direct encoder defers to the PickleValue path here
+        _, back = path(CLS, {"d": {NUL_KEY: 1}})
         assert back == {"d": {NUL_KEY: 1}}
+
+    @pytest.mark.parametrize("path", PATHS)
+    @pytest.mark.parametrize(
+        "d",
+        [
+            {NUL_KEY: 1, "b": 2, "c": 3},  # 3 keys, NUL first: 2-4 key scan
+            {"a": 1, "b": 2, NUL_KEY: 3},  # 3 keys, NUL last
+            {NUL_KEY: 0, "a": 1, "b": 2, "c": 3, "d": 4, "e": 5},  # 6 keys: plain path
+            {"a": 1, "b": 2, "c": 3, "d": 4, "e": 5, NUL_KEY: 6},
+        ],
+    )
+    def test_nul_key_in_multi_key_dicts(self, path, d):
+        _, back = path(CLS, d)
+        assert back == d
+        # nested inside a @d value reaches pydict_to_pickle_value's scan
+        _, back = path(CLS, {"outer": {1: d}})
+        assert back == {"outer": {1: d}}
+
+
+class TestGenuineNsPrefixedKeys:
+    """Keys that happen to start with "@ns:" are user data and must survive every path."""
+
+    GENUINE = {"@ns:YWJj": 1, "@ns:": 2, "@ns:not base64!": 3}
+
+    @pytest.mark.parametrize("path", PATHS)
+    def test_pg_paths_escape_genuine_prefix(self, path):
+        _, back = path(CLS, dict(self.GENUINE))
+        assert back == self.GENUINE
+
+    def test_non_pg_record_path(self):
+        rec = two_pickles(CLS, dict(self.GENUINE))
+        back = load_state(
+            zodb_json_codec.encode_zodb_record(zodb_json_codec.decode_zodb_record(rec))
+        )
+        assert back == self.GENUINE
+
+    def test_json_string_api(self):
+        raw = pickle.dumps(dict(self.GENUINE), protocol=3)
+        assert (
+            pickle.loads(
+                zodb_json_codec.json_to_pickle(zodb_json_codec.pickle_to_json(raw))
+            )
+            == self.GENUINE
+        )
 
 
 class TestStandaloneJsonApi:

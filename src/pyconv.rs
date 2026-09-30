@@ -216,7 +216,7 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 for (k, v) in pairs {
                     if let PickleValue::String(key) = k {
-                        let py_key = if sanitize_nulls && key.contains('\0') {
+                        let py_key = if crate::json::key_needs_ns_escape(key, sanitize_nulls) {
                             // Same form the JSON writer uses: "@ns:<base64>" as the key string
                             format!("@ns:{}", BASE64.encode(key.as_bytes()))
                                 .into_pyobject(py)?
@@ -1548,22 +1548,17 @@ fn parse_compact_ref(list: &Bound<'_, PyList>) -> PyResult<Option<(Vec<u8>, Stri
     Ok(Some((oid, module, name)))
 }
 
-/// Decode the payload of an `@ns` marker (base64 of a UTF-8 string containing NUL bytes).
-fn decode_ns_marker(b64: &str) -> PyResult<String> {
-    let bytes = BASE64
-        .decode(b64)
-        .map_err(|e| CodecError::InvalidData(format!("@ns marker is not valid base64: {e}")))?;
-    String::from_utf8(bytes)
-        .map_err(|_| CodecError::InvalidData("@ns marker does not decode to UTF-8".into()).into())
-}
-
-/// Dict keys with NUL bytes are stored as `"@ns:<base64>"` by the PG decode paths.
+/// Dict keys written as `"@ns:<base64>"` (NUL bytes on the PG paths, or a genuine
+/// key starting with `@ns:`) decode back through the shared reader in `json.rs`.
 #[inline]
 fn dict_key(key: &str) -> PyResult<std::borrow::Cow<'_, str>> {
-    match key.strip_prefix("@ns:") {
-        Some(b64) => Ok(std::borrow::Cow::Owned(decode_ns_marker(b64)?)),
-        None => Ok(std::borrow::Cow::Borrowed(key)),
-    }
+    Ok(crate::json::decode_dict_key(key)?)
+}
+
+/// Decode the payload of an `@ns` marker.
+#[inline]
+fn decode_ns_marker(b64: &str) -> PyResult<String> {
+    Ok(crate::json::decode_ns_marker(b64)?)
 }
 
 /// Expand a compact ZODB persistent ref from Py<PyAny>.

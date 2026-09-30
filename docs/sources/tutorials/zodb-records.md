@@ -332,7 +332,7 @@ This is used by PostgreSQL storage backends for the `refs`
 column that enables pure-SQL garbage collection (pack).
 
 The PostgreSQL variant also sanitizes null bytes in strings (which PostgreSQL
-JSONB cannot store) by replacing them with `{"@ns:" "<base64>"}` markers.
+JSONB cannot store) by replacing them with `{"@ns": "<base64>"}` markers.
 
 ## Cleanup
 

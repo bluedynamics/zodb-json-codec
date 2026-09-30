@@ -279,6 +279,26 @@ a state that is exactly `{"@args": ..., "@state": ...}` is always read as
 constructor arguments plus state. A `@reduce` with both `newobj` and `state`
 is accepted (it encodes like the `@cls`/`@s` form above) but never written.
 
+### `@ns` -- String with NUL bytes (PostgreSQL storage)
+
+PostgreSQL JSONB cannot store U+0000. The PG decode functions
+(`decode_zodb_record_for_pg_json`, `decode_zodb_record_for_pg`) replace a
+string value containing NUL bytes with a marker holding the base64 of its
+UTF-8 bytes, and a dict key containing NUL bytes with a string key carrying
+the same payload behind an `@ns:` prefix:
+
+```json
+{"@ns": "YQBi"}
+{"@ns:awBleQ==": 1}
+```
+
+Python: `"a\x00b"` and `{"k\x00ey": 1}`
+
+The encoders (`encode_zodb_record`, `json_to_pickle`) restore both forms.
+Keys that genuinely start with `@ns:` are escaped the same way by every
+decode path, so they survive a round trip too. Single-key dicts `{"@ns": str}`
+are reserved for the marker, like every other `@`-prefixed single-key dict.
+
 ### `@pkl` -- Raw Pickle Escape Hatch
 
 Base64-encoded pickle fragment for types that cannot be represented in
@@ -297,7 +317,7 @@ order:
 
 **Single-key markers** (checked first):
 
-`@t`, `@b`, `@bi`, `@d`, `@set`, `@fset`, `@ref`, `@pkl`,
+`@t`, `@b`, `@bi`, `@d`, `@set`, `@fset`, `@ref`, `@pkl`, `@ns`,
 `@dt`, `@date`, `@time`, `@td`, `@dec`, `@uuid`, `@reduce`
 
 **Multi-key markers:**
