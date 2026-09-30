@@ -488,6 +488,8 @@ impl<'a> Decoder<'a> {
                                             args: Box::new(PickleValue::Tuple(vec![other])),
                                             dict_items: None,
                                             list_items: None,
+                                            newobj: false,
+                                            state: None,
                                         });
                                     }
                                 }
@@ -498,6 +500,8 @@ impl<'a> Decoder<'a> {
                                     args: Box::new(args),
                                     dict_items: None,
                                     list_items: None,
+                                    newobj: false,
+                                    state: None,
                                 });
                             }
                         }
@@ -507,6 +511,8 @@ impl<'a> Decoder<'a> {
                             args: Box::new(args),
                             dict_items: None,
                             list_items: None,
+                            newobj: false,
+                            state: None,
                         });
                     }
                 }
@@ -540,33 +546,47 @@ impl<'a> Decoder<'a> {
                             args,
                             dict_items,
                             list_items,
+                            newobj,
+                            state: _,
                         } => {
-                            // REDUCE followed by BUILD: the common pattern.
+                            // REDUCE/NEWOBJ followed by BUILD: the common pattern.
                             // Extract class info if callable is a Global.
                             match *callable {
                                 PickleValue::Global { module, name } => {
-                                    // Merge: state includes both constructor args and BUILD state
-                                    let combined = if *args == PickleValue::Tuple(vec![]) {
-                                        state
+                                    if *args == PickleValue::Tuple(vec![]) {
+                                        // No constructor args: plain instance (both kinds, see #32)
+                                        self.push(PickleValue::Instance(Box::new(InstanceData {
+                                            module,
+                                            name,
+                                            state: Box::new(state),
+                                            dict_items,
+                                            list_items,
+                                        })));
+                                    } else if newobj {
+                                        // NEWOBJ with constructor args: the stored shape keeps
+                                        // args and state side by side (#12)
+                                        self.push(PickleValue::Instance(Box::new(InstanceData {
+                                            module,
+                                            name,
+                                            state: Box::new(PickleValue::Dict(vec![
+                                                (PickleValue::String("@args".to_string()), *args),
+                                                (PickleValue::String("@state".to_string()), state),
+                                            ])),
+                                            dict_items,
+                                            list_items,
+                                        })));
                                     } else {
-                                        PickleValue::Dict(vec![
-                                            (
-                                                PickleValue::String("@args".to_string()),
-                                                *args,
-                                            ),
-                                            (
-                                                PickleValue::String("@state".to_string()),
-                                                state,
-                                            ),
-                                        ])
-                                    };
-                                    self.push(PickleValue::Instance(Box::new(InstanceData {
-                                        module,
-                                        name,
-                                        state: Box::new(combined),
-                                        dict_items,
-                                        list_items,
-                                    })));
+                                        // REDUCE with args then BUILD: re-emitting as NEWOBJ would
+                                        // call cls.__new__ with the args, so it stays a Reduce.
+                                        self.push(PickleValue::Reduce {
+                                            callable: Box::new(PickleValue::Global { module, name }),
+                                            args,
+                                            dict_items,
+                                            list_items,
+                                            newobj: false,
+                                            state: Some(Box::new(state)),
+                                        });
+                                    }
                                 }
                                 _ => {
                                     // Can't decompose further — wrap as-is
@@ -622,6 +642,8 @@ impl<'a> Decoder<'a> {
                         args: Box::new(args),
                         dict_items: None,
                         list_items: None,
+                        newobj: true,
+                        state: None,
                     });
                 }
                 NEWOBJ_EX => {
@@ -638,6 +660,8 @@ impl<'a> Decoder<'a> {
                         args: Box::new(combined_args),
                         dict_items: None,
                         list_items: None,
+                        newobj: true,
+                        state: None,
                     });
                 }
 
@@ -1263,6 +1287,7 @@ mod tests {
                 args,
                 dict_items,
                 list_items,
+                ..
             } => {
                 if let PickleValue::Global { module, name } = callable.as_ref() {
                     assert_eq!(module, "collections");

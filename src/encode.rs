@@ -314,6 +314,7 @@ impl Encoder {
                 args,
                 dict_items,
                 list_items,
+                ..
             } => {
                 self.encode_value(callable, depth + 1)?;
                 self.encode_value(args, depth + 1)?;

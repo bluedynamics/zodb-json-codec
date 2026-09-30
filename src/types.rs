@@ -48,6 +48,11 @@ pub enum PickleValue {
         dict_items: Option<Box<Vec<(PickleValue, PickleValue)>>>,
         /// List items appended via APPENDS/APPEND after REDUCE (list subclasses)
         list_items: Option<Box<Vec<PickleValue>>>,
+        /// Created by NEWOBJ (`cls.__new__(cls, *args)`) rather than REDUCE (`callable(*args)`).
+        newobj: bool,
+        /// BUILD state that followed a REDUCE with non-empty args. Kept on the Reduce
+        /// because NEWOBJ + BUILD and REDUCE + BUILD are not interchangeable.
+        state: Option<Box<PickleValue>>,
     },
     /// Escape hatch: raw pickle bytes we couldn't meaningfully decode
     RawPickle(Vec<u8>),

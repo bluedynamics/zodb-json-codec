@@ -148,7 +148,7 @@ fn pickle_value_to_json_impl(
             let inner_json = to_json(inner)?;
             Ok(json!({"@ref": inner_json}))
         }
-        PickleValue::Reduce { callable, args, dict_items, list_items } => {
+        PickleValue::Reduce { callable, args, dict_items, list_items, .. } => {
             if let Some(typed) =
                 known_types::try_reduce_to_typed_json(callable, args, &to_json)?
             {
@@ -476,6 +476,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
             args,
             dict_items,
             list_items,
+            ..
         } => {
             // Try known types first
             if known_types::try_write_reduce_typed(w, callable, args, &recurse)? {
@@ -773,6 +774,8 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                         args: Box::new(args),
                         dict_items,
                         list_items,
+                        newobj: false,
+                        state: None,
                     });
                 }
             }
@@ -931,6 +934,8 @@ mod tests {
                 (PickleValue::String("x".to_string()), PickleValue::Int(1)),
             ])),
             list_items: None,
+            newobj: false,
+            state: None,
         };
         let json = pickle_value_to_json(&val).unwrap();
         let reduce = json.get("@reduce").unwrap();
@@ -953,6 +958,8 @@ mod tests {
             args: Box::new(PickleValue::Tuple(vec![])),
             dict_items: None,
             list_items: Some(Box::new(vec![PickleValue::Int(5), PickleValue::Int(6)])),
+            newobj: false,
+            state: None,
         };
         let json = pickle_value_to_json(&val).unwrap();
         let reduce = json.get("@reduce").unwrap();
@@ -1338,6 +1345,8 @@ mod tests {
             args: Box::new(args),
             dict_items: None,
             list_items: None,
+            newobj: false,
+            state: None,
         }
     }
 
@@ -1643,6 +1652,8 @@ mod tests {
                 (PickleValue::String("x".into()), PickleValue::Int(1)),
             ])),
             list_items: None,
+            newobj: false,
+            state: None,
         };
         assert_pg_paths_match(&val, "", "");
     }
@@ -1657,6 +1668,8 @@ mod tests {
             args: Box::new(PickleValue::Tuple(vec![])),
             dict_items: None,
             list_items: Some(Box::new(vec![PickleValue::Int(5)])),
+            newobj: false,
+            state: None,
         };
         assert_pg_paths_match(&val, "", "");
     }

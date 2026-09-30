@@ -102,8 +102,11 @@ pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
                 }
             }
         }
-        PickleValue::Reduce { args, dict_items, list_items, .. } => {
+        PickleValue::Reduce { args, dict_items, list_items, state, .. } => {
             collect_refs_from_pickle_value(args, refs);
+            if let Some(state) = state {
+                collect_refs_from_pickle_value(state, refs);
+            }
             if let Some(pairs) = dict_items {
                 for (k, v) in pairs.iter() {
                     collect_refs_from_pickle_value(k, refs);
@@ -311,7 +314,7 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args, dict_items, list_items } => {
+        PickleValue::Reduce { callable, args, dict_items, list_items, .. } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(obj) =
                 try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
@@ -1344,6 +1347,8 @@ fn try_decode_single_key_marker(
                         ])),
                         dict_items: None,
                         list_items: None,
+                        newobj: false,
+                        state: None,
                     }));
                 }
             }
@@ -1358,6 +1363,8 @@ fn try_decode_single_key_marker(
                     args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 }));
             }
         }
@@ -1444,6 +1451,8 @@ fn reduce_dict_to_pickle_value(
         args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
         dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs, "items")?,
         list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs, "appends")?,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1571,6 +1580,8 @@ fn try_typed_pydict_to_pickle_value(
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 }));
             }
         }
@@ -1587,6 +1598,8 @@ fn try_typed_pydict_to_pickle_value(
                 args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
                 dict_items: None,
                 list_items: None,
+                newobj: false,
+                state: None,
             }));
         }
     }
@@ -1634,6 +1647,8 @@ fn decode_datetime_from_pyobject(
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1659,6 +1674,8 @@ fn decode_date_from_str(s: &str) -> PyResult<PickleValue> {
         args: Box::new(PickleValue::Tuple(vec![PickleValue::Bytes(bytes)])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1700,6 +1717,8 @@ fn decode_time_from_pyobject(
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1754,6 +1773,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     args: Box::new(PickleValue::Tuple(pickle_args?)),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 });
             }
         }
@@ -1775,6 +1796,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 };
                 return Ok(PickleValue::Reduce {
                     callable: Box::new(inner_reduce),
@@ -1784,6 +1807,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 });
             }
         }
@@ -2779,6 +2804,8 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: false,
+            state: None,
         };
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);
