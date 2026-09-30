@@ -75,9 +75,9 @@ All benchmark commands accept:
 - `--output FILE` -- export results as JSON
 - `--format {table,json,both}` -- output format (default: `table`)
 
-## PGO builds for production-accurate numbers
+## PGO builds, the way the wheels are built
 
-Profile-Guided Optimization (PGO) produces the most accurate performance numbers by optimizing based on actual benchmark workloads.
+The release wheels are Profile-Guided Optimization (PGO) builds, so a local PGO build reproduces what users install. PGO is not simply faster: it speeds up the Python-dict paths and encode, but makes the PG JSON pipeline on real records slower than a build without PGO (see #52 and the performance page); measure both when the storage path matters.
 
 ### 1. install LLVM tools
 
