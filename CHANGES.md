@@ -36,6 +36,13 @@
   `str()`; dicts with non-string keys (int, float, bool, `None`) no longer
   raise `TypeError` on the `PickleValue` path and for single-key dicts [#20]
 
+- NUL bytes survive the PostgreSQL round trip through the codec alone: the
+  `{"@ns": base64}` value marker and the `"@ns:base64"` key form written by the
+  PG decode paths are now restored by `encode_zodb_record` and `json_to_pickle`
+  (malformed markers raise `ValueError`), and `decode_zodb_record_for_pg` no
+  longer raises `TypeError` on dict keys with NUL bytes. zodb-pgjsonb can drop
+  its Python-side `_unsanitize_from_pg` walk once it requires this release [#18]
+
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
 
