@@ -26,6 +26,17 @@ def load_state(record):
     return u.load()
 
 
+def nesting(value):
+    """Count single-element list wrappers without recursion: comparing or
+    pickling a 900-deep value in Python hits its recursion limit on some
+    versions, so the deep tests never do either."""
+    n = 0
+    while isinstance(value, list) and len(value) == 1:
+        value = value[0]
+        n += 1
+    return n, value
+
+
 def wrap(n):
     deep = []
     for _ in range(n):
@@ -58,11 +69,14 @@ class TestDecode:
         )
 
     def test_depth_900_ok(self):
-        deep = []
-        for _ in range(900):
-            deep = [deep]
-        rec = class_pickle() + pickle.dumps({"d": deep}, protocol=3)
-        assert zodb_json_codec.decode_zodb_record(rec)["@s"] == {"d": deep}
+        # {"d": 900 nested lists} written by hand: EMPTY_DICT, key, 901 EMPTY_LIST,
+        # 900 APPEND (each nests the top list into the one below), SETITEM
+        state = (
+            b"\x80\x03}q\x00X\x01\x00\x00\x00dq\x01" + b"]" * 901 + b"a" * 900 + b"s."
+        )
+        decoded = zodb_json_codec.decode_zodb_record(class_pickle() + state)["@s"]
+        assert list(decoded) == ["d"]
+        assert nesting(decoded["d"]) == (900, [])
 
 
 class TestEncode:
@@ -100,20 +114,24 @@ class TestEncode:
         data = zodb_json_codec.encode_zodb_record(
             {"@cls": ["m", "C"], "@s": {"d": deep, "t": {"@t": [deep]}}}
         )
-        assert load_state(data) == {"d": deep, "t": (deep,)}
+        back = load_state(data)
+        assert set(back) == {"d", "t"} and isinstance(back["t"], tuple)
+        assert nesting(back["d"]) == (400, [])
+        assert nesting(back["t"][0]) == (400, [])
 
     def test_encode_boundary_is_exact(self):
         # only containers count: the state dict, the wrappers and the innermost
         # list make 1000 levels with 998 wrappers; the 1001st level is refused
         ok = {"deep": wrap(998)}
         bad = {"deep": wrap(999)}
-        assert (
-            load_state(
-                zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": ok})
-            )
-            == ok
+        back = load_state(
+            zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": ok})
         )
-        assert pickle.loads(zodb_json_codec.dict_to_pickle(ok)) == ok
+        assert nesting(back["deep"]) == (998, [])
+        assert nesting(pickle.loads(zodb_json_codec.dict_to_pickle(ok))["deep"]) == (
+            998,
+            [],
+        )
         with pytest.raises(ValueError, match="nesting depth"):
             zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": bad})
         with pytest.raises(ValueError, match="nesting depth"):
@@ -122,14 +140,11 @@ class TestEncode:
     def test_scalars_do_not_count(self):
         # a wide, flat dict at any depth is fine: the guard only counts containers
         state = {"deep": wrap(990)}
-        state["deep"][0] if False else None
         inner = state["deep"]
         for _ in range(990):
             inner = inner[0]
         inner.extend(range(5000))
-        assert (
-            load_state(
-                zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": state})
-            )
-            == state
+        back = load_state(
+            zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": state})
         )
+        assert nesting(back["deep"]) == (990, list(range(5000)))
