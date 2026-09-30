@@ -183,6 +183,41 @@ The FileStorage scan shows an overall ratio of 1.41x (7.2 MB JSON vs 5.1 MB
 pickle) for the full database, reflecting the mix of string-heavy and
 binary-containing records.
 
+## Decode since 1.7.0: the memo pre-scan
+
+The 1.6.0 memo fix (a shared container must be re-synced into the memo after
+it is filled) was correct but deep-copied every container into the memo once
+per nesting level, and nobody re-measured: 1.6.1 decoded 30 to 70% slower
+than 1.5.0.
+Since 1.7.0 the decoder pre-scans the opcode stream for the memo indices that
+a `GET`/`BINGET` actually reads and skips every other memo put
+([#22](https://github.com/bluedynamics/zodb-json-codec/issues/22)); shared
+references keep the 1.6.0 behaviour.
+
+One pinned core, minimum of medians over three interleaved rounds, non-PGO
+release builds with glibc malloc (measured without mimalloc, see the Allocator
+section once #24 lands; the two gains overlap and do not add up):
+
+| Benchmark | v1.5.0 | main (1.6.1 plus fixes) | pre-scan |
+|---|---|---|---|
+| FileStorage decode (per record) | 25.4 us | 37.9 us | 18.4 us |
+| PG JSON pipeline, median | 24.7 us | 37.9 us | 16.9 us |
+| PG JSON pipeline, P95 | 52.9 us | 69.8 us | 44.6 us |
+| wide_dict decode | 275 us | 410 us | 166 us |
+| large_flat_dict decode | 19.1 us | 29.7 us | 15.1 us |
+| special_types decode | 4.5 us | 6.5 us | 3.4 us |
+| nested_dict decode | 2.0 us | 3.1 us | 2.2 us |
+| simple_flat_dict decode | 1.20 us | 1.54 us | 1.35 us |
+| deep_nesting decode | 7.2 us | 25.4 us | 10.0 us |
+
+Large and wide records now decode 20 to 40% faster than v1.5.0; small and
+deeply nested ones are still 10 to 40% behind it, which is the per-slot
+bookkeeping the 1.6.0 fix keeps for the indices that are read plus the depth
+tracking of #19; the follow-ups in #26 target that gap.
+Encode is unchanged.
+The `bench.py check` gate passes again (`deep_nesting` 1.55x against CPython
+pickle, threshold 3.0x).
+
 ## Allocator
 
 Since 1.7.0 the Rust side uses [mimalloc](https://github.com/microsoft/mimalloc)

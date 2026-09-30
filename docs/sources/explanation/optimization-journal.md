@@ -456,6 +456,47 @@ a 10 KB rich-text record 30 µs to 19 µs; small-record encode 0.25 µs to
 a claim, not a fact. The release process gains a benchmark step against the
 previous release (#21).
 
+### 19. memo pre-scan, and the 1.6.0 regression it removes
+
+**Technique:** before decoding, walk the opcode stream once with the decoder's
+own argument-length rules and collect the memo indices that any
+`GET`/`BINGET`/`LONG_BINGET` reads. `memo_store` then skips the put for every
+other index: no clone, no binding bookkeeping, no dirty sync when the slot
+leaves the stack. Indices that are read keep the full 1.6.0 machinery. On an
+opcode the walk cannot size it reports "keep everything", so unknown input
+degrades to the old behaviour instead of a wrong answer. `MEMOIZE` (protocol
+4) numbers its entries by the count of puts seen, like CPython's `len(memo)`,
+so skipped puts keep later indices aligned.
+
+**Why it helps:** CPython's pickler memoizes every str, dict, list and
+non-empty tuple, so a ZODB record carries a `BINPUT` after nearly every value,
+while memo reads are rare (shared objects, repeated interned strings). Every
+skipped put saves the clone of the value; since 1.6.0 it also saves the
+dirty-sync clone of every container at pop time, which is where the
+regression lived.
+
+**The regression:** the 1.6.0 memo fix (#2 follow-up, commits 819b21b and
+de928a6) was necessary: the memo holds copies, so a container filled after
+its `BINPUT` must be re-synced or a shared reference silently loses data. Its
+"lazy" variant stopped being lazy at pop time and cloned every dirty slot into
+the memo when it left the stack, once per nesting level, plus the whole state
+dict at `STOP`. Nobody re-benchmarked; this page kept the 1.5.0 numbers. The
+1.6.0 changelog entry ("eliminates unnecessary clones for memo entries never
+re-read") described the intention, not the code; it now carries a correction.
+
+**Impact:** one pinned core, minimum of medians over three interleaved rounds,
+glibc malloc. `main` (1.6.1 plus fixes) to pre-scan: FileStorage decode 37.9
+to 18.4 µs, PG JSON pipeline median 37.9 to 16.9 µs and P95 69.8 to 44.6 µs,
+wide_dict 410 to 166 µs, large_flat_dict 29.7 to 15.1 µs, deep_nesting 25.4
+to 10.0 µs, simple_flat_dict 1.54 to 1.35 µs. Against v1.5.0 the large
+categories are 20 to 40% faster, small and deeply nested records 10 to 40%
+slower (deep_nesting 7.2 versus 10.0 µs). Encode unchanged. The 1,692-record
+sample database produces byte-identical JSON and refs.
+
+**Lesson:** a correctness fix on the hot path gets the same before-and-after
+benchmark as an optimization, against the previous release, before it ships.
+The release process gains that step in #39.
+
 ### 21. mimalloc as the global allocator
 
 **Technique:** `#[global_allocator] static GLOBAL: mimalloc::MiMalloc` in
