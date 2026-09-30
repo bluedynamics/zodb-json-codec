@@ -16,7 +16,7 @@ def load_record(record):
 
 
 RICH_TEXT = "".join(
-    f'<p class="p{i}">Zürich &amp; 日本語, line {i}\twith "quotes" and a backslash \\ and \x1f</p>\n'
+    f'<p class="p{i}">Zürich &amp; 日本語, line {i}\twith "quotes" and a backslash \\ and \x1f\x08\x0c</p>\r\n'
     for i in range(400)
 )
 

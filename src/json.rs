@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use crate::btrees;
 use crate::error::CodecError;
-use crate::json_writer::JsonWriter;
+use crate::json_writer::{JsonWriter, MAX_RETAINED_CAPACITY};
 use crate::known_types;
 use crate::types::{InstanceData, PickleValue};
 
@@ -231,6 +231,7 @@ thread_local! {
 ///
 /// This is the fast path that eliminates all serde_json::Value allocations.
 /// It handles BTree dispatch internally.
+#[cfg(test)]
 pub fn pickle_value_to_json_string_pg(
     val: &PickleValue,
     module: &str,
@@ -262,8 +263,21 @@ pub fn write_json_string_pg_to_buf(
 }
 
 /// Run `f` on the JSON produced by the last `write_json_string_pg_to_buf`.
+///
+/// Callers must not let anything that can run Python code (a GC-tracked
+/// allocation, a call into Python) happen between the write and this read on
+/// the same thread: a re-entrant call would overwrite the buffer first.
+/// A buffer grown past `MAX_RETAINED_CAPACITY` by one large record is released
+/// after the read instead of staying allocated for the thread's lifetime.
 pub fn with_json_buf<R>(f: impl FnOnce(&str) -> R) -> R {
-    JSON_BUF.with(|cell| f(cell.borrow().as_str()))
+    JSON_BUF.with(|cell| {
+        let mut w = cell.borrow_mut();
+        let result = f(w.as_str());
+        if w.capacity() > MAX_RETAINED_CAPACITY {
+            *w = JsonWriter::with_capacity(4096);
+        }
+        result
+    })
 }
 
 /// Recursive walker: write a PickleValue as PG-compatible JSON to a JsonWriter.
@@ -1964,5 +1978,16 @@ mod tests {
             list_items: None,
         }));
         assert_pg_paths_match(&inst, "", "");
+    }
+
+    #[test]
+    fn test_json_buf_released_after_large_record() {
+        let big = PickleValue::String("x".repeat(MAX_RETAINED_CAPACITY + 1));
+        write_json_string_pg_to_buf(&big, "m", "C").unwrap();
+        assert!(with_json_buf(|s| s.len()) > MAX_RETAINED_CAPACITY);
+        JSON_BUF.with(|c| assert!(c.borrow().capacity() <= 4096));
+        write_json_string_pg_to_buf(&PickleValue::Int(1), "m", "C").unwrap();
+        assert_eq!(with_json_buf(|s| s.to_string()), "1");
+        JSON_BUF.with(|c| assert!(c.borrow().capacity() <= 4096));
     }
 }

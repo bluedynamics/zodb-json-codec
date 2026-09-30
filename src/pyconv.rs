@@ -13,6 +13,7 @@ use pyo3::prelude::*;
 use pyo3::intern;
 use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 
+use crate::json_writer::MAX_RETAINED_CAPACITY;
 use crate::btrees;
 use crate::encode::{encode_value_into, write_bytes_val, write_global, write_int, write_string};
 use crate::error::CodecError;
@@ -1992,10 +1993,11 @@ pub fn encode_pyobject_as_pickle(
 thread_local! {
     static ENCODE_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    // Cache of class pickle bytes per (module, name) pair.
-    // Uses Vec for linear search — with ~6 distinct classes in a typical
-    // ZODB database, linear search is faster than hashing and avoids
-    // allocating key strings on every lookup.
+    // Cache of class pickle bytes per (module, name) pair: at most 32 entries,
+    // move-to-front on a hit, the least recently used entry evicted. A Plone
+    // site has well over a hundred persistent classes (182 on a real one), but
+    // access is heavily skewed, so hot classes sit near the front and the
+    // worst case (every lookup a miss) stays bounded.
     static CLASS_PICKLE_CACHE: std::cell::RefCell<Vec<(String, String, Vec<u8>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -2056,7 +2058,12 @@ pub fn encode_zodb_record_direct(
         }
         buf.push(STOP);
 
-        Ok(PyBytes::new(py, &buf).into())
+        let bytes: Py<PyBytes> = PyBytes::new(py, &buf).into();
+        if buf.capacity() > MAX_RETAINED_CAPACITY {
+            // one huge record must not pin its buffer for the thread's lifetime
+            *buf = Vec::new();
+        }
+        Ok(bytes)
     })
 }
 

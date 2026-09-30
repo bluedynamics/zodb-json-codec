@@ -140,9 +140,12 @@ fn decode_zodb_record_for_pg_json(py: Python<'_>, data: &[u8]) -> PyResult<Py<Py
     })?;
 
     // Only GIL-held work: build the 4-element return tuple. The JSON text is
-    // copied straight from the thread-local buffer into the Python str.
-    let refs_list = PyList::new(py, &refs)?;
+    // copied straight from the thread-local buffer into the Python str, and
+    // that read comes first: nothing that could run Python code (a GC-tracked
+    // allocation such as the list below) may sit between the write and the
+    // read, or a re-entrant call from a finalizer could overwrite the buffer.
     let json_py = json::with_json_buf(|s| PyString::new(py, s));
+    let refs_list = PyList::new(py, &refs)?;
     let result = (
         module.into_pyobject(py)?,
         name.into_pyobject(py)?,

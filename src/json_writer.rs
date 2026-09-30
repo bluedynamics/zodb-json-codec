@@ -2,6 +2,11 @@
 //! without allocating intermediate serde_json::Value nodes.
 
 /// A low-level JSON token writer that appends directly to a String buffer.
+/// Thread-local output buffers larger than this after a call are released
+/// instead of retained, so one huge record does not pin memory for the
+/// thread's lifetime. ZODB records are almost always far smaller.
+pub const MAX_RETAINED_CAPACITY: usize = 4 << 20;
+
 pub struct JsonWriter {
     buf: String,
 }
@@ -32,7 +37,13 @@ impl JsonWriter {
         &self.buf
     }
 
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
     /// Take the string out, leaving an empty buffer that retains its allocation.
+    #[cfg(test)]
     pub fn take(&mut self) -> String {
         std::mem::take(&mut self.buf)
     }
@@ -312,7 +323,9 @@ mod tests {
 
     #[test]
     fn test_escape_runs_long_mixed() {
-        // long safe runs around a few escapes: output must be exactly what serde_json writes
+        // long safe runs around a few escapes: for the characters used here the
+        // output must equal serde_json's (the writer emits \u0008 and \u000c where
+        // serde_json writes \b and \f; neither occurs in this text)
         let mut text = String::new();
         for i in 0..200 {
             text.push_str("The quick brown fox jumps over the lazy dog, again and again ");

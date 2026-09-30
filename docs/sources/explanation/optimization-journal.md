@@ -434,13 +434,15 @@ the head and the worst case is bounded (0.31 µs with 1000 classes).
 
 ### 18. review corrections
 
-**Technique:** A review of 1.6.1 found four of the optimizations above
-described behaviour the code did not have, plus one double copy: the JSON
+**Technique:** A review of 1.6.1 found three of the optimizations above
+described behaviour the code did not have, plus two small inefficiencies: the JSON
 writer's buffer was emptied on every call (item 15), escaping fell back to
 character-by-character output (item 16), the class pickle cache grew without
 bound (item 17), `write_i64` went through `core::fmt` instead of `itoa`, and
 `encode_zodb_record` copied its output twice (once into a fresh `Vec`, once
-into the `PyBytes`). All five were fixed together.
+into the `PyBytes`). All five were fixed together. Both thread-local buffers
+are released again after a record whose output exceeded 4 MiB, so one
+pathological record does not pin memory for the thread's lifetime.
 
 **Why it helps:** each is a small constant per record, and the PG path pays
 all of them on every load.
@@ -451,8 +453,8 @@ a 10 KB rich-text record 30 µs to 19 µs; small-record encode 0.25 µs to
 0.21 µs. The Python-dict decode path is untouched.
 
 **Lesson:** an optimization that is not measured after every later change is
-a claim, not a fact. `RELEASE.md` now requires a benchmark against the
-previous release.
+a claim, not a fact. The release process gains a benchmark step against the
+previous release (#21).
 
 ## Cumulative result
 
