@@ -339,7 +339,7 @@ impl Encoder {
                 self.write_u8(b'\n');
             }
             PickleValue::Instance(inst) => {
-                let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+                let InstanceData { module, name, state, dict_items, list_items, newobj } = inst.as_ref();
                 if module.is_empty() && name.is_empty() {
                     return self.encode_anonymous_instance(state, depth);
                 }
@@ -586,6 +586,7 @@ mod tests {
             )])),
             dict_items: Some(Box::new(vec![(PickleValue::String("k".into()), PickleValue::Int(2))])),
             list_items: None,
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         // CPython's save_reduce: NEWOBJ, then the items (MARK ... SETITEMS), then state + BUILD.
@@ -609,6 +610,7 @@ mod tests {
             state: Box::new(PickleValue::Dict(vec![])),
             dict_items: Some(Box::new(vec![(PickleValue::Int(1), PickleValue::Int(2))])),
             list_items: Some(Box::new(vec![PickleValue::Int(3)])),
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();
@@ -659,6 +661,7 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();

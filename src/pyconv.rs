@@ -309,7 +309,7 @@ fn pickle_value_to_pyobject_impl(
             Ok(dict.into_any().unbind())
         }
         PickleValue::Instance(inst) => {
-            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+            let InstanceData { module, name, state, dict_items, list_items, newobj } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(obj) =
                 try_instance_to_pyobject(py, module, name, state, compact_refs)?
@@ -1156,6 +1156,7 @@ fn pydict_to_pickle_value(
                         state: Box::new(state),
                         dict_items: dict_items_from_pyobject(dict.get_item(intern!(py, "@items"))?, expand_refs, "@items")?,
                         list_items: list_items_from_pyobject(dict.get_item(intern!(py, "@appends"))?, expand_refs, "@appends")?,
+                        newobj: true,
                     })));
                 }
                 if dict.get_item(intern!(py, "@items"))?.is_some()
@@ -1357,6 +1358,7 @@ fn try_decode_single_key_marker(
                 state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
                 dict_items: None,
                 list_items: None,
+                newobj: true,
             }))));
         }
         "@set" => {
@@ -1848,6 +1850,7 @@ fn decode_uuid_from_str(s: &str) -> PyResult<PickleValue> {
         )])),
         dict_items: None,
         list_items: None,
+        newobj: true,
     })))
 }
 
@@ -2409,6 +2412,7 @@ fn try_encode_marker_to_pickle(
                 state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
                 dict_items: None,
                 list_items: None,
+                newobj: true,
             }));
             encode_value_into(&pv, buf)?;
             Ok(true)
@@ -2960,6 +2964,7 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);
