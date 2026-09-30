@@ -176,11 +176,22 @@ impl<'a> Decoder<'a> {
                 LONG1 => {
                     let n = self.read_u8()? as usize;
                     let bytes = self.read_bytes(n)?;
-                    let val = BigInt::from_signed_bytes_le(bytes);
-                    if let Ok(v) = i64::try_from(&val) {
+                    if n == 0 {
+                        self.push(PickleValue::Int(0));
+                    } else if n <= 8 {
+                        // sign-extend the little-endian two's complement into i64
+                        // without going through BigInt (#26)
+                        let mut buf = [0u8; 8];
+                        buf[..n].copy_from_slice(bytes);
+                        let shift = 64 - 8 * n as u32;
+                        let v = (i64::from_le_bytes(buf) << shift) >> shift;
                         self.push(PickleValue::Int(v));
                     } else {
-                        self.push(PickleValue::BigInt(val));
+                        let val = BigInt::from_signed_bytes_le(bytes);
+                        match i64::try_from(&val) {
+                            Ok(v) => self.push(PickleValue::Int(v)),
+                            Err(_) => self.push(PickleValue::BigInt(val)),
+                        }
                     }
                 }
                 LONG4 => {
@@ -1844,5 +1855,34 @@ mod tests {
             MemoNeeds::Only(needed) => assert_eq!(needed, vec![true]),
             MemoNeeds::All => panic!("expected Only"),
         }
+    }
+
+    #[test]
+    fn test_long1_direct_matches_bigint() {
+        // every length 0..=9, four fill bytes: the direct i64 path and BigInt agree
+        for n in 0..=9usize {
+            for fill in [0x00u8, 0x7f, 0x80, 0xff] {
+                let mut data = vec![0x80, 0x03, 0x8a, n as u8];
+                data.extend(std::iter::repeat_n(fill, n));
+                data.push(b'.');
+                let got = decode_pickle(&data).unwrap();
+                let expected = num_bigint::BigInt::from_signed_bytes_le(&data[4..4 + n]);
+                match got {
+                    PickleValue::Int(i) => {
+                        assert_eq!(num_bigint::BigInt::from(i), expected, "n={n} fill={fill:#x}")
+                    }
+                    PickleValue::BigInt(b) => {
+                        assert!(i64::try_from(&expected).is_err(), "n={n} fill={fill:#x} should be Int");
+                        assert_eq!(b, expected);
+                    }
+                    other => panic!("{other:?}"),
+                }
+            }
+        }
+        // i64::MIN is exactly 8 bytes; 2**63 needs 9 and stays a BigInt
+        let data = [&[0x80u8, 0x03, 0x8a, 8][..], &i64::MIN.to_le_bytes(), b"."].concat();
+        assert_eq!(decode_pickle(&data).unwrap(), PickleValue::Int(i64::MIN));
+        let data = [&[0x80u8, 0x03, 0x8a, 9][..], &[0, 0, 0, 0, 0, 0, 0, 0x80, 0], b"."].concat();
+        assert!(matches!(decode_pickle(&data).unwrap(), PickleValue::BigInt(_)));
     }
 }

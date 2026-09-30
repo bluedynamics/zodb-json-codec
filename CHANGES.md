@@ -27,6 +27,10 @@
   buffer and class cache fall back to a fresh local one for the inner call
   [#25]
 
+- Decode performance: `LONG1` integers of up to 8 bytes are sign-extended into
+  an `i64` directly instead of going through `BigInt` (a record of 2,500 such
+  ints decodes 17% faster; the sample database has none) [#26]
+
 - Decode performance: memo puts that no later `GET`/`BINGET` reads are skipped
   after a pre-scan of the opcode stream. The 1.6.0 memo fix deep-copied every
   container into the memo once per nesting level (typical records decoded 30
