@@ -1266,7 +1266,8 @@ fn scan_memo_reads(data: &[u8]) -> MemoNeeds {
                 pos = end;
             }
             STOP | NONE | NEWTRUE | NEWFALSE | EMPTY_DICT | EMPTY_LIST | EMPTY_TUPLE
-            | EMPTY_SET | MARK | POP | POP_MARK | DUP | APPEND | APPENDS | BUILD | SETITEM | SETITEMS
+            | EMPTY_SET | MARK | POP | POP_MARK | DUP | APPEND | APPENDS | BUILD | SETITEM
+            | SETITEMS
             | ADDITEMS | REDUCE | NEWOBJ | BINPERSID | TUPLE | TUPLE1 | TUPLE2 | TUPLE3
             | LIST | DICT | FROZENSET | STACK_GLOBAL | MEMOIZE | NEWOBJ_EX => {}
             PROTO | BININT1 | BINPUT => pos += 1,

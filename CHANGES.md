@@ -22,9 +22,11 @@
   `@newobj`, `@items` or `@appends` on a bare class reference without `@s`
   (the JSON reader used to drop them silently) [#32]
 - Decoder: `POP_MARK` is handled and `POP` with nothing above the last `MARK`
-  discards the mark, as in CPython; both appear only in recursive tuples
-  written by protocol 0 or 1 picklers, which used to raise
-  `unknown pickle opcode` or `stack underflow` [#49]
+  discards the mark, as in CPython. Picklers write `POP_MARK` for a recursive
+  tuple of four or more elements at every binary protocol, protocol 3
+  included, and for any recursive tuple at protocol 1; protocol 0 writes
+  `POP`s instead. Such records used to raise `unknown pickle opcode` or
+  `stack underflow` [#49]
 
 - Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
   (the profile-guided build put the end-of-slice check on the pointer step of
