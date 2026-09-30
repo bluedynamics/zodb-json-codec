@@ -23,6 +23,16 @@
   this release for stateless `NEWOBJ` objects carry no `newobj` key and keep
   being re-emitted as `REDUCE`; the stored shape cannot tell the two apart [#12]
 
+- Performance: the PG JSON writer's thread-local buffer now really keeps its
+  capacity between calls (it was emptied on every return), integers are
+  formatted with `itoa`, JSON escaping copies runs of safe bytes instead of
+  going character by character once an escape is present, `encode_zodb_record`
+  builds its result without an intermediate copy, and the class pickle cache
+  is bounded (32 entries, move-to-front) instead of growing without limit
+  and being scanned linearly on every encode. PG JSON pipeline median on the
+  sample database 39.8 to 35.5 µs, a 10 KB rich-text record 30 to 19 µs; both
+  thread-local output buffers are released after a record larger than 4 MiB [#23]
+
 - Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
   and user subclasses): the Python-dict decode path now emits their
   `items`/`appends` (`@items`/`@appends` for instances) and both encoder paths

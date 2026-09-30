@@ -353,6 +353,12 @@ of times per transaction.
 The pattern is simple, safe (no cross-thread
 sharing), and the memory cost is bounded (one buffer per thread).
 
+**Correction (1.7.0, #23):** the writer-path reuse described above was not in
+effect until 1.7.0. `pickle_value_to_json_string_pg` handed the buffer to
+Python with `take()`, which left an empty `String` behind, so every call
+regrew the buffer from zero. The Python string is now built straight from the
+thread-local buffer, which keeps its capacity.
+
 ### Round 3
 
 #### 16. direct JSON string writer
@@ -386,6 +392,12 @@ floats to strings without going through `format!()`, avoiding a temporary
 
 **Impact:** wide_dict 55% faster, PG path 1.4x faster.
 
+**Correction (1.7.0, #23):** until 1.7.0 the escaping only had the fast
+path. As soon as a string contained one character that needed escaping, the
+whole string was pushed character by character. It now copies runs of safe
+bytes and handles only the escaped byte specially; a 10 KB rich-text field
+with newlines and quotes decodes in 19 µs instead of 30 µs on the PG path.
+
 ### Round 4
 
 #### 17. class pickle cache
@@ -410,6 +422,39 @@ ZODB database has only 5-10 distinct classes, so the cache is both small and
 highly effective.
 
 **Impact:** ~2-4% encode improvement, 99.6% cache hit rate on real data.
+
+**Correction (1.7.0, #23):** a Plone database has far more than 5 to 10
+distinct classes (the 1.0.0 release notes counted 182 types on a real site).
+The unbounded, linearly scanned cache cost 0.31 µs per encode with 200
+classes and 0.76 µs with 1000 (against 0.22 µs with one class). Since 1.7.0
+the cache holds at most 32 entries with move-to-front, so hot classes stay at
+the head and the worst case is bounded (0.31 µs with 1000 classes).
+
+## v1.7.0
+
+### 18. review corrections
+
+**Technique:** A review of 1.6.1 found three of the optimizations above
+described behaviour the code did not have, plus two small inefficiencies: the JSON
+writer's buffer was emptied on every call (item 15), escaping fell back to
+character-by-character output (item 16), the class pickle cache grew without
+bound (item 17), `write_i64` went through `core::fmt` instead of `itoa`, and
+`encode_zodb_record` copied its output twice (once into a fresh `Vec`, once
+into the `PyBytes`). All five were fixed together. Both thread-local buffers
+are released again after a record whose output exceeded 4 MiB, so one
+pathological record does not pin memory for the thread's lifetime.
+
+**Why it helps:** each is a small constant per record, and the PG path pays
+all of them on every load.
+
+**Impact:** PG JSON pipeline on the 1,692-record FileStorage: median 39.8 µs
+to 35.5 µs, P95 70 µs to 56 µs; small-record categories 12 to 25% faster;
+a 10 KB rich-text record 30 µs to 19 µs; small-record encode 0.25 µs to
+0.21 µs. The Python-dict decode path is untouched.
+
+**Lesson:** an optimization that is not measured after every later change is
+a claim, not a fact. The release process gains a benchmark step against the
+previous release (#21).
 
 ## Cumulative result
 

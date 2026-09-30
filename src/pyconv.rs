@@ -11,8 +11,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use pyo3::prelude::*;
 use pyo3::intern;
-use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyInt, PyList, PyString};
 
+use crate::json_writer::MAX_RETAINED_CAPACITY;
 use crate::btrees;
 use crate::encode::{encode_value_into, write_bytes_val, write_global, write_int, write_string};
 use crate::error::CodecError;
@@ -1992,10 +1993,11 @@ pub fn encode_pyobject_as_pickle(
 thread_local! {
     static ENCODE_BUF: std::cell::RefCell<Vec<u8>> =
         const { std::cell::RefCell::new(Vec::new()) };
-    // Cache of class pickle bytes per (module, name) pair.
-    // Uses Vec for linear search — with ~6 distinct classes in a typical
-    // ZODB database, linear search is faster than hashing and avoids
-    // allocating key strings on every lookup.
+    // Cache of class pickle bytes per (module, name) pair: at most 32 entries,
+    // move-to-front on a hit, the least recently used entry evicted. A Plone
+    // site has well over a hundred persistent classes (182 on a real one), but
+    // access is heavily skewed, so hot classes sit near the front and the
+    // worst case (every lookup a miss) stays bounded.
     static CLASS_PICKLE_CACHE: std::cell::RefCell<Vec<(String, String, Vec<u8>)>> =
         const { std::cell::RefCell::new(Vec::new()) };
 }
@@ -2017,10 +2019,11 @@ pub(crate) fn build_class_pickle(module: &str, name: &str) -> Vec<u8> {
 }
 
 pub fn encode_zodb_record_direct(
+    py: Python<'_>,
     module: &str,
     name: &str,
     state_obj: &Bound<'_, pyo3::PyAny>,
-) -> PyResult<Vec<u8>> {
+) -> PyResult<Py<PyBytes>> {
     ENCODE_BUF.with(|cell| {
         let mut buf = cell.borrow_mut();
         buf.clear(); // keep capacity from previous calls
@@ -2030,12 +2033,19 @@ pub fn encode_zodb_record_direct(
         // Class pickle: use cached bytes (identical for all records of same class)
         CLASS_PICKLE_CACHE.with(|cache_cell| {
             let mut cache = cache_cell.borrow_mut();
-            if let Some((_, _, bytes)) = cache.iter().find(|(m, n, _)| m == module && n == name) {
-                buf.extend_from_slice(bytes);
+            if let Some(pos) = cache.iter().position(|(m, n, _)| m == module && n == name) {
+                buf.extend_from_slice(&cache[pos].2);
+                // Move-to-front: hot classes stay at the head of the scan.
+                if pos > 0 {
+                    cache[..=pos].rotate_right(1);
+                }
             } else {
                 let bytes = build_class_pickle(module, name);
                 buf.extend_from_slice(&bytes);
-                cache.push((module.to_string(), name.to_string(), bytes));
+                if cache.len() >= 32 {
+                    cache.pop();
+                }
+                cache.insert(0, (module.to_string(), name.to_string(), bytes));
             }
         });
 
@@ -2048,7 +2058,12 @@ pub fn encode_zodb_record_direct(
         }
         buf.push(STOP);
 
-        Ok(buf.to_vec())
+        let bytes: Py<PyBytes> = PyBytes::new(py, &buf).into();
+        if buf.capacity() > MAX_RETAINED_CAPACITY {
+            // one huge record must not pin its buffer for the thread's lifetime
+            *buf = Vec::new();
+        }
+        Ok(bytes)
     })
 }
 

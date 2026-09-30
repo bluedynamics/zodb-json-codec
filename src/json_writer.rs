@@ -1,9 +1,12 @@
 //! Direct JSON string writer — writes JSON tokens to a String buffer
 //! without allocating intermediate serde_json::Value nodes.
 
-use std::fmt::Write;
-
 /// A low-level JSON token writer that appends directly to a String buffer.
+/// Thread-local output buffers larger than this after a call are released
+/// instead of retained, so one huge record does not pin memory for the
+/// thread's lifetime. ZODB records are almost always far smaller.
+pub const MAX_RETAINED_CAPACITY: usize = 4 << 20;
+
 pub struct JsonWriter {
     buf: String,
 }
@@ -29,13 +32,18 @@ impl JsonWriter {
     }
 
     /// Borrow the inner buffer (for length checks, etc.).
-    #[cfg(test)]
     #[inline]
     pub fn as_str(&self) -> &str {
         &self.buf
     }
 
+    #[inline]
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
+    }
+
     /// Take the string out, leaving an empty buffer that retains its allocation.
+    #[cfg(test)]
     pub fn take(&mut self) -> String {
         std::mem::take(&mut self.buf)
     }
@@ -59,7 +67,8 @@ impl JsonWriter {
 
     #[inline]
     pub fn write_i64(&mut self, n: i64) {
-        let _ = write!(self.buf, "{n}");
+        let mut b = itoa::Buffer::new();
+        self.buf.push_str(b.format(n));
     }
 
     #[inline]
@@ -143,30 +152,33 @@ impl JsonWriter {
 /// Write JSON-escaped string content (without surrounding quotes) to a String.
 #[inline]
 fn write_escaped(buf: &mut String, s: &str) {
-    // Fast path: if no special chars, push entire string at once
-    let needs_escape = s.bytes().any(|b| {
-        b == b'"' || b == b'\\' || b < 0x20
-    });
-    if !needs_escape {
-        buf.push_str(s);
-        return;
-    }
-
-    // Slow path: escape character by character
-    for ch in s.chars() {
-        match ch {
-            '"' => buf.push_str("\\\""),
-            '\\' => buf.push_str("\\\\"),
-            '\n' => buf.push_str("\\n"),
-            '\r' => buf.push_str("\\r"),
-            '\t' => buf.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                // Control characters → \u00XX
-                let _ = write!(buf, "\\u{:04x}", c as u32);
-            }
-            c => buf.push(c),
+    // Single pass: copy runs of bytes that need no escaping with one
+    // push_str each; only the escaped byte itself is handled specially.
+    // Every escaped byte is ASCII, so slicing at its index is always on a
+    // char boundary.
+    let bytes = s.as_bytes();
+    let mut start = 0;
+    for (i, &b) in bytes.iter().enumerate() {
+        if b >= 0x20 && b != b'"' && b != b'\\' {
+            continue;
         }
+        buf.push_str(&s[start..i]);
+        match b {
+            b'"' => buf.push_str("\\\""),
+            b'\\' => buf.push_str("\\\\"),
+            b'\n' => buf.push_str("\\n"),
+            b'\r' => buf.push_str("\\r"),
+            b'\t' => buf.push_str("\\t"),
+            _ => {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                buf.push_str("\\u00");
+                buf.push(HEX[(b >> 4) as usize] as char);
+                buf.push(HEX[(b & 0xf) as usize] as char);
+            }
+        }
+        start = i + 1;
     }
+    buf.push_str(&s[start..]);
 }
 
 #[cfg(test)]
@@ -307,6 +319,33 @@ mod tests {
         let mut w = JsonWriter::new();
         w.write_string("日本語");
         assert_eq!(w.into_string(), "\"日本語\"");
+    }
+
+    #[test]
+    fn test_escape_runs_long_mixed() {
+        // long safe runs around a few escapes: for the characters used here the
+        // output must equal serde_json's (the writer emits \u0008 and \u000c where
+        // serde_json writes \b and \f; neither occurs in this text)
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str("The quick brown fox jumps over the lazy dog, again and again ");
+            if i % 7 == 0 {
+                text.push('\n');
+            }
+            if i % 11 == 0 {
+                text.push('"');
+            }
+            if i % 13 == 0 {
+                text.push('\u{1f}');
+            }
+            if i % 17 == 0 {
+                text.push_str("Zürich 日本語 \\ ");
+            }
+        }
+        let mut w = JsonWriter::new();
+        w.write_string(&text);
+        let expected = serde_json::to_string(&text).unwrap();
+        assert_eq!(w.into_string(), expected);
     }
 
     #[test]
