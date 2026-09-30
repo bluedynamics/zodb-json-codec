@@ -29,6 +29,13 @@
   read them back; the `PickleValue` encoder emits items before `BUILD` like
   CPython [#16]
 
+- Encoder input robustness: Python ints beyond the i64 range now encode as
+  `LONG1`/`LONG4` (they used to raise `OverflowError`); objects the encoder does
+  not understand (bytes, tuples, sets, datetimes, arbitrary instances) raise
+  `TypeError` naming the type instead of being silently pickled as their
+  `str()`; dicts with non-string keys (int, float, bool, `None`) no longer
+  raise `TypeError` on the `PickleValue` path and for single-key dicts [#20]
+
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
 

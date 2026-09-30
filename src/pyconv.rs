@@ -958,6 +958,19 @@ fn format_flat_data_pyobject_impl(
 // Reverse direction: Py<PyAny> → PickleValue
 // ---------------------------------------------------------------------------
 
+/// Python int to PickleValue: i64 when it fits, BigInt otherwise. The BigInt
+/// extraction runs only after an OverflowError, so the hot path stays a single
+/// extraction; any other error propagates unchanged.
+fn int_to_pickle_value(obj: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue> {
+    match obj.extract::<i64>() {
+        Ok(i) => Ok(PickleValue::Int(i)),
+        Err(e) if e.is_instance_of::<pyo3::exceptions::PyOverflowError>(obj.py()) => {
+            Ok(PickleValue::BigInt(obj.extract::<num_bigint::BigInt>()?))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// Convert a Python object to a PickleValue AST with marker detection.
 ///
 /// When `expand_refs` is true, compact ZODB persistent refs are expanded inline.
@@ -983,8 +996,7 @@ pub fn pyobject_to_pickle_value(
         return Ok(PickleValue::Bool(b));
     }
     if obj.is_instance_of::<PyInt>() {
-        let i: i64 = obj.extract()?;
-        return Ok(PickleValue::Int(i));
+        return int_to_pickle_value(obj);
     }
     if obj.is_instance_of::<PyFloat>() {
         let f: f64 = obj.extract()?;
@@ -998,9 +1010,12 @@ pub fn pyobject_to_pickle_value(
             .collect();
         return Ok(PickleValue::List(items?));
     }
-    // Fallback: try str() representation
-    let s = obj.str()?.to_string();
-    Ok(PickleValue::String(s))
+    // Anything else is a caller bug: refuse instead of pickling str(obj).
+    Err(pyo3::exceptions::PyTypeError::new_err(format!(
+        "cannot encode object of type {}; expected str, dict, list, int, float, bool, None \
+         or a marker dict",
+        obj.get_type().name()?
+    )))
 }
 
 /// Convert a PyDict to PickleValue, checking for marker keys.
@@ -1044,9 +1059,9 @@ fn pydict_to_pickle_value(
                 )]));
             }
         }
-        let k_str: String = k.extract()?;
+        // Non-string key (int, tuple, None, ...): keep it as a pickle value
         return Ok(PickleValue::Dict(vec![(
-            PickleValue::String(k_str),
+            pyobject_to_pickle_value(&k, expand_refs)?,
             pyobject_to_pickle_value(&v, expand_refs)?,
         )]));
     }
@@ -1070,9 +1085,9 @@ fn pydict_to_pickle_value(
                 continue;
             }
         }
-        let key: String = k.extract()?;
+        // Non-string key (int, tuple, None, ...): keep it as a pickle value
         pairs.push((
-            PickleValue::String(key),
+            pyobject_to_pickle_value(&k, expand_refs)?,
             pyobject_to_pickle_value(&v, expand_refs)?,
         ));
     }
@@ -1224,7 +1239,8 @@ fn pydict_to_pickle_value(
     plain_dict_to_pickle_value(dict, expand_refs)
 }
 
-/// Build a plain dict PickleValue from a PyDict (no marker checking).
+/// Build a plain dict PickleValue from a PyDict (no marker checking; keys may be
+/// any picklable value, string keys are the common case).
 #[inline]
 fn plain_dict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
@@ -1232,11 +1248,12 @@ fn plain_dict_to_pickle_value(
 ) -> PyResult<PickleValue> {
     let mut pairs = Vec::with_capacity(dict.len());
     for (k, v) in dict {
-        let key: String = k.extract()?;
-        pairs.push((
-            PickleValue::String(key),
-            pyobject_to_pickle_value(&v, expand_refs)?,
-        ));
+        let key = match k.cast::<PyString>() {
+            Ok(s) => PickleValue::String(s.to_str()?.to_owned()),
+            // Non-string key (int, tuple, None, ...): keep it as a pickle value
+            Err(_) => pyobject_to_pickle_value(&k, expand_refs)?,
+        };
+        pairs.push((key, pyobject_to_pickle_value(&v, expand_refs)?));
     }
     Ok(PickleValue::Dict(pairs))
 }
@@ -2049,10 +2066,12 @@ pub fn encode_pyobject_to_pickle(
         return Ok(());
     }
 
-    // Int
+    // Int (values beyond i64 go through the PickleValue path as LONG1/LONG4)
     if obj.is_instance_of::<PyInt>() {
-        let i: i64 = obj.extract()?;
-        write_int(buf, i);
+        match int_to_pickle_value(obj)? {
+            PickleValue::Int(i) => write_int(buf, i),
+            big => encode_value_into(&big, buf)?,
+        }
         return Ok(());
     }
 
