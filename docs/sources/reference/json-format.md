@@ -215,6 +215,24 @@ ZODB record.
 }
 ```
 
+### `@newobj` -- Construction Kind
+
+Written as `false`, next to `@cls`/`@s`, when the pickle created the instance
+by calling the class (`REDUCE` with empty arguments, the shape of a
+`__reduce__` that returns `(cls, (), state)`, for example `OrderedDict`
+subclasses with a `__dict__`). Absent means the instance was created with
+`NEWOBJ` (`cls.__new__(cls)`), the common case. The encoders emit the same
+opcode again, so `__init__` runs on unpickling exactly when it did for the
+original pickle.
+
+```json
+{
+  "@cls": ["myapp.models", "Registry"],
+  "@s": {"entries": 3},
+  "@newobj": false
+}
+```
+
 ### `@ref` -- Persistent Reference
 
 ZODB persistent object reference, using hex OID format (16 hex digits,
@@ -290,7 +308,7 @@ a state that is exactly `{"@args": ..., "@state": ...}` is always read as
 constructor arguments plus state. A `@reduce` with both `newobj` and `state`
 is written only when the class itself is not a global (`NEWOBJ` on a class
 pickled by value, then `BUILD`); for a global class the `@cls`/`@s` form above
-is used. Readers accept both.
+is used, with `@newobj` marking the `REDUCE` kind. Readers accept both.
 
 ### `@ns` -- String with NUL bytes (PostgreSQL storage)
 
@@ -350,8 +368,8 @@ order:
 
 **Multi-key markers:**
 
-`@cls` + `@s` (instance with BTree detection), `@dt` + `@tz`
-(timezone-aware datetime)
+`@cls` + `@s` (instance with BTree detection; `@items`, `@appends` and
+`@newobj` ride along), `@dt` + `@tz` (timezone-aware datetime)
 
 **Fallback:** Plain JSON object becomes a Python dict.
 
