@@ -102,8 +102,11 @@ pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
                 }
             }
         }
-        PickleValue::Reduce { args, dict_items, list_items, .. } => {
+        PickleValue::Reduce { args, dict_items, list_items, state, .. } => {
             collect_refs_from_pickle_value(args, refs);
+            if let Some(state) = state {
+                collect_refs_from_pickle_value(state, refs);
+            }
             if let Some(pairs) = dict_items {
                 for (k, v) in pairs.iter() {
                     collect_refs_from_pickle_value(k, refs);
@@ -311,12 +314,15 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args, dict_items, list_items } => {
-            // Try known type handlers first (datetime, Decimal, set, etc.)
-            if let Some(obj) =
-                try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
-            {
-                return Ok(obj);
+        PickleValue::Reduce { callable, args, dict_items, list_items, newobj, state } => {
+            // Try known type handlers first (datetime, Decimal, set, etc.); a REDUCE
+            // that carried BUILD state is never one of them.
+            if state.is_none() {
+                if let Some(obj) =
+                    try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
+                {
+                    return Ok(obj);
+                }
             }
             // Fall back to generic @reduce
             let callable_obj = pickle_value_to_pyobject_impl(py, callable, compact_refs, sanitize_nulls, depth + 1)?;
@@ -329,6 +335,15 @@ fn pickle_value_to_pyobject_impl(
             }
             if let Some(items) = list_items {
                 inner_dict.set_item(intern!(py, "appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+            }
+            if *newobj {
+                inner_dict.set_item(intern!(py, "newobj"), true)?;
+            }
+            if let Some(st) = state {
+                inner_dict.set_item(
+                    intern!(py, "state"),
+                    pickle_value_to_pyobject_impl(py, st, compact_refs, sanitize_nulls, depth + 1)?,
+                )?;
             }
             let dict = PyDict::new(py);
             dict.set_item(intern!(py, "@reduce"), inner_dict)?;
@@ -1344,6 +1359,8 @@ fn try_decode_single_key_marker(
                         ])),
                         dict_items: None,
                         list_items: None,
+                        newobj: false,
+                        state: None,
                     }));
                 }
             }
@@ -1358,6 +1375,8 @@ fn try_decode_single_key_marker(
                     args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 }));
             }
         }
@@ -1444,6 +1463,15 @@ fn reduce_dict_to_pickle_value(
         args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
         dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs, "items")?,
         list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs, "appends")?,
+        // Strict `true`, like the serde reader: writers only ever emit a JSON true.
+        newobj: reduce_dict
+            .get_item(intern!(py, "newobj"))?
+            .and_then(|v| v.cast::<PyBool>().ok().map(|b| b.is_true()))
+            .unwrap_or(false),
+        state: match reduce_dict.get_item(intern!(py, "state"))? {
+            Some(v) => Some(Box::new(pyobject_to_pickle_value(&v, expand_refs)?)),
+            None => None,
+        },
     })
 }
 
@@ -1571,6 +1599,8 @@ fn try_typed_pydict_to_pickle_value(
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 }));
             }
         }
@@ -1587,6 +1617,8 @@ fn try_typed_pydict_to_pickle_value(
                 args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s)])),
                 dict_items: None,
                 list_items: None,
+                newobj: false,
+                state: None,
             }));
         }
     }
@@ -1634,6 +1666,8 @@ fn decode_datetime_from_pyobject(
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1659,6 +1693,8 @@ fn decode_date_from_str(s: &str) -> PyResult<PickleValue> {
         args: Box::new(PickleValue::Tuple(vec![PickleValue::Bytes(bytes)])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1700,6 +1736,8 @@ fn decode_time_from_pyobject(
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1754,6 +1792,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     args: Box::new(PickleValue::Tuple(pickle_args?)),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 });
             }
         }
@@ -1775,6 +1815,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 };
                 return Ok(PickleValue::Reduce {
                     callable: Box::new(inner_reduce),
@@ -1784,6 +1826,8 @@ fn decode_tz_from_pyobject(tz_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleVa
                     ])),
                     dict_items: None,
                     list_items: None,
+                    newobj: false,
+                    state: None,
                 });
             }
         }
@@ -2112,6 +2156,13 @@ fn encode_pydict_to_pickle(
                     }
 
                     if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
+                        // NEWOBJ with constructor args is stored as {"@args": ..., "@state": ...}
+                        // and needs the PickleValue path (#12).
+                        if is_args_state_dict(&state_val)? {
+                            let pv = pydict_to_pickle_value(dict, expand_refs)?;
+                            encode_value_into(&pv, buf)?;
+                            return Ok(());
+                        }
                         // Instance: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
                         write_global(buf, module, name);
                         buf.push(EMPTY_TUPLE);
@@ -2161,6 +2212,19 @@ fn encode_pydict_to_pickle(
 
     // No @cls, no typed marker → plain dict (most common case for nested non-marker dicts)
     encode_plain_dict_to_pickle(dict, buf, expand_refs)
+}
+
+/// True for the stored shape of a NEWOBJ instance with constructor args:
+/// a two-key dict `{"@args": ..., "@state": ...}` (#12).
+fn is_args_state_dict(v: &Bound<'_, pyo3::PyAny>) -> PyResult<bool> {
+    let Ok(d) = v.cast::<PyDict>() else {
+        return Ok(false);
+    };
+    if d.len() != 2 {
+        return Ok(false);
+    }
+    let py = d.py();
+    Ok(d.get_item(intern!(py, "@args"))?.is_some() && d.get_item(intern!(py, "@state"))?.is_some())
 }
 
 /// Write a plain dict (no markers) directly to pickle buffer.
@@ -2779,6 +2843,8 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: false,
+            state: None,
         };
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);

@@ -13,6 +13,16 @@
   until they are rewritten; recompute `refs` before the first pack if such
   classes exist in the database [#17]
 
+- Fix constructor arguments being lost on round trip: objects pickled with
+  `NEWOBJ` and non-empty `__getnewargs__` (with or without state) are
+  re-emitted with their args and as `NEWOBJ`, objects pickled with
+  `REDUCE(cls, args)` followed by `BUILD` keep both; `@reduce` gained the
+  additive keys `newobj` and `state`. Class pickles that carry `newargs`
+  now raise (naming the class) instead of silently dropping them, and ZODB's
+  `(klass, None)` class tuple form is read correctly. Records written before
+  this release for stateless `NEWOBJ` objects carry no `newobj` key and keep
+  being re-emitted as `REDUCE`; the stored shape cannot tell the two apart [#12]
+
 - Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
   and user subclasses): the Python-dict decode path now emits their
   `items`/`appends` (`@items`/`@appends` for instances) and both encoder paths

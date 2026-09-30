@@ -63,7 +63,7 @@ fn decode_zodb_record(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>> {
     // Release GIL during pure-Rust pickle parsing
     let (_class_val, state_val, module, name) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
-        let (module, name) = zodb::extract_class_info(&class_val);
+        let (module, name) = zodb::extract_class_info(&class_val)?;
         Ok::<_, PyErr>((class_val, state_val, module, name))
     })?;
 
@@ -97,7 +97,7 @@ fn decode_zodb_record_for_pg(py: Python<'_>, data: &[u8]) -> PyResult<Py<PyAny>>
     // This allows other Python threads to run during the CPU-bound phase.
     let (_class_val, state_val, module, name, refs) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
-        let (module, name) = zodb::extract_class_info(&class_val);
+        let (module, name) = zodb::extract_class_info(&class_val)?;
         let mut refs = Vec::new();
         pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
         Ok::<_, PyErr>((class_val, state_val, module, name, refs))
@@ -131,7 +131,7 @@ fn decode_zodb_record_for_pg_json(py: Python<'_>, data: &[u8]) -> PyResult<Py<Py
     // ENTIRE pipeline runs with GIL released: pickle decode + JSON conversion
     let (module, name, json_str, refs) = py.detach(|| {
         let (class_val, state_val) = decode_zodb_pickles(data).map_err(CodecError::from)?;
-        let (module, name) = zodb::extract_class_info(&class_val);
+        let (module, name) = zodb::extract_class_info(&class_val)?;
         let mut refs = Vec::new();
         pyconv::collect_refs_from_pickle_value(&state_val, &mut refs);
 

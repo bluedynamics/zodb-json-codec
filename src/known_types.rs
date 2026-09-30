@@ -1006,6 +1006,8 @@ fn try_decode_datetime(
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1038,6 +1040,8 @@ fn try_decode_date(val: &Value) -> Result<PickleValue, CodecError> {
         args: Box::new(PickleValue::Tuple(vec![PickleValue::Bytes(bytes)])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1080,6 +1084,8 @@ fn try_decode_time(val: &Value, tz_val: Option<&Value>) -> Result<PickleValue, C
         args: Box::new(args),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1113,6 +1119,8 @@ fn try_decode_timedelta(val: &Value) -> Result<PickleValue, CodecError> {
         ])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1129,6 +1137,8 @@ fn try_decode_decimal(val: &Value) -> Result<PickleValue, CodecError> {
         args: Box::new(PickleValue::Tuple(vec![PickleValue::String(s.to_string())])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     })
 }
 
@@ -1310,6 +1320,8 @@ pub fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
         ])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     };
     PickleValue::Reduce {
         callable: Box::new(PickleValue::Global {
@@ -1319,6 +1331,8 @@ pub fn make_stdlib_timezone(offset_seconds: i64) -> PickleValue {
         args: Box::new(PickleValue::Tuple(vec![td])),
         dict_items: None,
         list_items: None,
+        newobj: false,
+        state: None,
     }
 }
 
@@ -1354,6 +1368,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                 args: Box::new(PickleValue::Tuple(pickle_args)),
                 dict_items: None,
                 list_items: None,
+                newobj: false,
+                state: None,
             });
         }
 
@@ -1374,6 +1390,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                 ])),
                 dict_items: None,
                 list_items: None,
+                newobj: false,
+                state: None,
             };
             return Ok(PickleValue::Reduce {
                 callable: Box::new(inner_reduce),
@@ -1383,6 +1401,8 @@ fn decode_tz_json(tz_json: &Value) -> Result<PickleValue, CodecError> {
                 ])),
                 dict_items: None,
                 list_items: None,
+                newobj: false,
+                state: None,
             });
         }
     }
@@ -1410,6 +1430,8 @@ mod tests {
             args: Box::new(args),
             dict_items: None,
             list_items: None,
+            newobj: false,
+            state: None,
         }
     }
 
