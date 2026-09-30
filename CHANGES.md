@@ -37,6 +37,13 @@
   16.4 µs on the sample database, which has 9 references and 12 bytes values
   per record) [#26]
 
+- Decode performance: the decoder keeps one value stack with mark positions
+  instead of swapping in a fresh stack (three vectors) at every `MARK`, builds
+  dict pairs straight from the closed frame, and reuses its bookkeeping
+  vectors per thread across records (vectors that grew past 65,536 entries are
+  released instead). Small and nested records decode 15 to 20% faster; a
+  1,000-key dict decodes in the Rust core in 97 µs instead of 110 µs [#26]
+
 - Decode performance: memo puts that no later `GET`/`BINGET` reads are skipped
   after a pre-scan of the opcode stream. The 1.6.0 memo fix deep-copied every
   container into the memo once per nesting level (typical records decoded 30
