@@ -55,14 +55,21 @@ pub fn pickle_value_to_pyobject_pg(
 pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
     match val {
         PickleValue::PersistentRef(inner) => {
-            // Extract OID from Tuple([Bytes(oid), ...])
-            if let PickleValue::Tuple(items) = inner.as_ref() {
-                if let Some(PickleValue::Bytes(oid)) = items.first() {
-                    if oid.len() == 8 {
-                        if let Ok(arr) = <[u8; 8]>::try_from(oid.as_slice()) {
-                            refs.push(i64::from_be_bytes(arr));
-                        }
-                    }
+            // (oid, klass) tuples and bare oids (classes with __getnewargs__) are local
+            // references; list forms ('w' weakref, 'm'/'n' multi-database) are not,
+            // matching ZODB.serialize.referencesf. Cross-database oids of other
+            // lengths are skipped as well.
+            let oid = match inner.as_ref() {
+                PickleValue::Tuple(items) => match items.first() {
+                    Some(PickleValue::Bytes(oid)) => Some(oid),
+                    _ => None,
+                },
+                PickleValue::Bytes(oid) => Some(oid),
+                _ => None,
+            };
+            if let Some(oid) = oid {
+                if let Ok(arr) = <[u8; 8]>::try_from(oid.as_slice()) {
+                    refs.push(i64::from_be_bytes(arr));
                 }
             }
         }
@@ -1450,34 +1457,31 @@ fn expand_compact_ref(ref_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue>
         ))));
     }
 
-    // Array [oid_hex, class_path]
+    // Compact form with class: ["oid_hex", "module.Class"]. ZODB's list-shaped ids
+    // ('w' weakref, 'm'/'n' multi-database) always carry a tuple as second element,
+    // so two strings is unambiguous; anything else is encoded generically below.
     if let Ok(list) = ref_val.cast::<PyList>() {
         if list.len() == 2 {
-            let oid_hex: String = list.get_item(0)?.extract()?;
-            let class_path: String = list.get_item(1)?.extract()?;
-            let oid_bytes = hex::decode(&oid_hex)
-                .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
-
-            // Split "module.ClassName" back into module + name
-            let (module, name) = if let Some(dot_pos) = class_path.rfind('.') {
-                (
-                    class_path[..dot_pos].to_string(),
-                    class_path[dot_pos + 1..].to_string(),
-                )
-            } else {
-                (String::new(), class_path)
-            };
-
-            return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(
-                vec![
+            let item0 = list.get_item(0)?;
+            let item1 = list.get_item(1)?;
+            if let (Ok(oid_py), Ok(cls_py)) = (item0.cast::<PyString>(), item1.cast::<PyString>()) {
+                let oid_bytes = hex::decode(oid_py.to_str()?)
+                    .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
+                let class_path = cls_py.to_str()?;
+                let (module, name) = match class_path.rfind('.') {
+                    Some(dot) => (class_path[..dot].to_string(), class_path[dot + 1..].to_string()),
+                    None => (String::new(), class_path.to_string()),
+                };
+                return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
                     PickleValue::Bytes(oid_bytes),
                     PickleValue::Global { module, name },
-                ],
-            ))));
+                ]))));
+            }
         }
     }
 
-    // Fallback: generic conversion
+    // Everything else (bare oid as {"@b": ...}, weakref and multi-database lists,
+    // any other structure): generic conversion under BINPERSID.
     let inner = pyobject_to_pickle_value(ref_val, false)?;
     Ok(PickleValue::PersistentRef(Box::new(inner)))
 }
