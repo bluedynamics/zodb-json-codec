@@ -514,12 +514,12 @@ least 3% with no category slower by more than the noise floor.
 | one value stack with mark positions instead of a metastack | alone: small records 15 to 20% faster, wide dicts 37% slower (the single stack grows by doubling while not at the top of the heap, so every growth copies; the per-frame sub-stack grew in place) | with the next |
 | decoder vectors reused per thread (scratch, capped at 65,536 entries each) | with the previous: FileStorage decode 0.94, PG median 0.85, deep_nesting 0.76, large_flat_dict 0.84, simple_flat_dict 0.85, wide_dict 0.99 | yes |
 | `PickleValue` down to 32 bytes by boxing `Global`, `Reduce`, `BigInt` | not tried: about 140 match sites in 7 files that every open PR edits, and the gap it targeted is closed | no |
-| `lto = "fat"` | FileStorage decode 0.97, large_flat_dict 0.90, binary 7% smaller | yes |
+| `lto = "fat"` | FileStorage decode 0.97, large_flat_dict 0.90, binary 7% smaller, clean release build 16 to 19 s | yes |
 
 **Why it helps:** after the memo pre-scan (entry 19) the remaining cost on
 small and nested records was bookkeeping, not memo clones: every `MARK`
 swapped three vectors out and let three fresh ones grow from zero, every
-`Decoder` allocated six vectors, and the PG writer built a temporary `String`
+`Decoder` allocated nine vectors, and the PG writer built a temporary `String`
 for every persistent reference and every bytes value. The single stack keeps
 one allocation per vector per thread; the frame above a mark position is
 drained straight into the tuple, list or dict pairs.
@@ -533,7 +533,8 @@ large_flat_dict 29.9 to 13.8 µs, deep_nesting 25.2 to 7.7 µs, nested_dict
 2.9 µs. Against v1.5.0: FileStorage decode 25.1 to 16.3 µs (0.65), PG median
 25.2 to 14.7 µs (0.58), simple_flat_dict 1.13 to 1.00, nested_dict 1.96 to
 1.69, wide_dict 272 to 159; deep_nesting is within 7% of 1.5.0 (7.07 versus
-7.58 µs) and scalar strings within 9%, the rest is ahead. The 1,692-record
+7.58 µs) and the two sub-microsecond scalar categories within 9%, the rest
+is ahead. The 1,692-record
 sample database produces byte-identical JSON and refs. Encode is unchanged by
 this work (0.92 to 1.09 against the #19 build); the encode difference to
 1.6.1 (deep_nesting 1.26 to 1.75 µs in this session, 1.26 to 1.44 µs in the

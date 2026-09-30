@@ -35,7 +35,8 @@ pub fn decode_zodb_pickles(data: &[u8]) -> Result<(PickleValue, PickleValue), Co
 /// record decoded on it (#26): after the first few records they never
 /// allocate again. Vectors that grew past `MAX_SCRATCH_ELEMS` are dropped
 /// instead of kept, so one huge record does not pin memory for the thread's
-/// lifetime.
+/// lifetime; the ceiling is about 8 MiB per thread (48-byte values in `stack`
+/// and `memo`, 24-byte binding vectors, the rest small).
 #[derive(Default)]
 struct Scratch {
     stack: Vec<PickleValue>,
@@ -57,10 +58,12 @@ impl Scratch {
     fn take() -> Self {
         // a re-entrant decode on the same thread (impossible today: the decoder
         // runs no Python code) would simply get fresh vectors
-        let mut scratch = SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut held) => std::mem::take(&mut *held),
-            Err(_) => Scratch::default(),
-        });
+        let mut scratch = SCRATCH
+            .try_with(|cell| match cell.try_borrow_mut() {
+                Ok(mut held) => std::mem::take(&mut *held),
+                Err(_) => Scratch::default(),
+            })
+            .unwrap_or_default();
         scratch.stack.clear();
         scratch.memo.clear();
         scratch.stack_memo.clear();
@@ -84,11 +87,13 @@ impl Scratch {
             || self.stack_memo.capacity() > MAX_SCRATCH_ELEMS
             || self.dirty_memo.capacity() > MAX_SCRATCH_ELEMS
             || self.depth.capacity() > MAX_SCRATCH_ELEMS
-            || self.memo_depth.capacity() > MAX_SCRATCH_ELEMS;
+            || self.memo_depth.capacity() > MAX_SCRATCH_ELEMS
+            || self.marks.capacity() > MAX_SCRATCH_ELEMS;
         if oversized {
             return;
         }
-        SCRATCH.with(|cell| {
+        // try_with: never panic from Drop, even during thread-local destruction
+        let _ = SCRATCH.try_with(|cell| {
             if let Ok(mut held) = cell.try_borrow_mut() {
                 *held = self;
             }
@@ -387,6 +392,15 @@ impl<'a> Decoder<'a> {
 
                 // -- Mark --
                 MARK => {
+                    // Every open mark ends in a container, so more open marks than
+                    // MAX_DEPTH cannot become a valid value: refuse here, before the
+                    // bookkeeping grows (a corrupt stream of MARKs would otherwise
+                    // grow `marks` without bound).
+                    if self.marks.len() >= MAX_DEPTH as usize {
+                        return Err(CodecError::InvalidData(
+                            "maximum nesting depth exceeded".to_string(),
+                        ));
+                    }
                     // Everything pushed from here on is above the mark
                     self.marks.push(self.stack.len());
                 }
@@ -1135,7 +1149,8 @@ impl<'a> Decoder<'a> {
     fn resolve_dirty_memo(&mut self, memo_idx: usize) {
         // Search the stack (all frames, marks included) for the slot that
         // owns this memo binding
-        for (si, bindings) in self.stack_memo.iter().enumerate() {
+        // newest binding first: a re-PUT of the same index binds the newer slot
+        for (si, bindings) in self.stack_memo.iter().enumerate().rev() {
             if bindings.contains(&memo_idx) {
                 self.memo[memo_idx] = self.stack[si].clone();
                 self.memo_depth[memo_idx] = self.depth[si];
@@ -2007,8 +2022,39 @@ mod tests {
         // a huge stack is not kept: MARK then MAX_SCRATCH_ELEMS + 1 scalars
         let mut huge = vec![0x80, 0x03, b'('];
         huge.extend(std::iter::repeat_n(b'N', MAX_SCRATCH_ELEMS + 1));
-        huge.extend_from_slice(&[b't', b'.']);
+        huge.extend_from_slice(b"t.");
         assert!(matches!(decode_pickle(&huge).unwrap(), PickleValue::Tuple(ref t) if t.len() == MAX_SCRATCH_ELEMS + 1));
         assert!(SCRATCH.with(|c| c.borrow().stack.capacity()) <= MAX_SCRATCH_ELEMS);
+    }
+
+    #[test]
+    fn test_open_marks_bounded_by_depth_limit() {
+        // MAX_DEPTH open marks are fine to build up (each must close as a container)...
+        let mut ok = vec![0x80, 0x03];
+        ok.extend(std::iter::repeat_n(b'(', MAX_DEPTH as usize - 1));
+        ok.extend(std::iter::repeat_n(b't', MAX_DEPTH as usize - 1));
+        ok.push(b'.');
+        assert!(decode_pickle(&ok).is_ok());
+        // ... one more is refused at the MARK, before any vector grows further
+        let mut bad = vec![0x80, 0x03];
+        bad.extend(std::iter::repeat_n(b'(', MAX_DEPTH as usize + 1));
+        let err = decode_pickle(&bad).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidData(ref m) if m.contains("nesting depth")), "{err:?}");
+        SCRATCH.with(|c| assert!(c.borrow().marks.capacity() <= MAX_SCRATCH_ELEMS));
+    }
+
+    #[test]
+    fn test_dirty_memo_resolves_newest_binding() {
+        // list bound to memo 0, MARK, another list bound to 0, APPEND (dirty), BINGET 0:
+        // CPython gives ([1], [1]); the newest binding of index 0 must win
+        let data: &[u8] = b"\x80\x03]q\x00(]q\x00K\x01ah\x00t.";
+        let one = PickleValue::List(vec![PickleValue::Int(1)]);
+        assert_eq!(
+            decode_pickle(data).unwrap(),
+            PickleValue::Tuple(vec![one.clone(), one.clone()])
+        );
+        // same within one frame
+        let data: &[u8] = b"\x80\x03]q\x00]q\x00K\x01ah\x00\x86.";
+        assert_eq!(decode_pickle(data).unwrap(), PickleValue::Tuple(vec![one.clone(), one]));
     }
 }

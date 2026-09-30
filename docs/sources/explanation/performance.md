@@ -214,7 +214,8 @@ The last column is the decoder allocation follow-ups of
 [#26](https://github.com/bluedynamics/zodb-json-codec/issues/26) (one value
 stack with mark positions, per-thread scratch vectors, allocation-free
 writers, fat LTO; journal entry 20): every category is now ahead of v1.5.0
-except deep_nesting (7% behind) and scalar strings (9%).
+except deep_nesting (7% behind) and the two sub-microsecond scalar
+categories (9%).
 Encode is unchanged by the decoder work; the difference to 1.6.1 there is the
 depth guard of #19.
 The `bench.py check` gate passes again (`deep_nesting` 1.55x against CPython

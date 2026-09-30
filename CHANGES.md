@@ -42,7 +42,11 @@
   dict pairs straight from the closed frame, and reuses its bookkeeping
   vectors per thread across records (vectors that grew past 65,536 entries are
   released instead). Small and nested records decode 15 to 20% faster; a
-  1,000-key dict decodes in the Rust core in 97 µs instead of 110 µs [#26]
+  1,000-key dict decodes in the Rust core in 97 µs instead of 110 µs. Two
+  malformed shapes that used to be accepted now raise like CPython: a `TUPLE`,
+  `LIST`, `DICT` or `SETITEMS` without a `MARK` (the whole stack used to be
+  taken), and more than 1000 open marks; a second pickle in a record no longer
+  inherits an open mark from the first [#26]
 
 - Build: `lto = "fat"` for release builds (FileStorage decode 3% and
   large_flat_dict decode 10% faster than thin LTO, extension 7% smaller,
