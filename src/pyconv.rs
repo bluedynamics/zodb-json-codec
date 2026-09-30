@@ -2156,6 +2156,13 @@ fn encode_pydict_to_pickle(
                     }
 
                     if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
+                        // NEWOBJ with constructor args is stored as {"@args": ..., "@state": ...}
+                        // and needs the PickleValue path (#12).
+                        if is_args_state_dict(&state_val)? {
+                            let pv = pydict_to_pickle_value(dict, expand_refs)?;
+                            encode_value_into(&pv, buf)?;
+                            return Ok(());
+                        }
                         // Instance: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
                         write_global(buf, module, name);
                         buf.push(EMPTY_TUPLE);
@@ -2205,6 +2212,19 @@ fn encode_pydict_to_pickle(
 
     // No @cls, no typed marker → plain dict (most common case for nested non-marker dicts)
     encode_plain_dict_to_pickle(dict, buf, expand_refs)
+}
+
+/// True for the stored shape of a NEWOBJ instance with constructor args:
+/// a two-key dict `{"@args": ..., "@state": ...}` (#12).
+fn is_args_state_dict(v: &Bound<'_, pyo3::PyAny>) -> PyResult<bool> {
+    let Ok(d) = v.cast::<PyDict>() else {
+        return Ok(false);
+    };
+    if d.len() != 2 {
+        return Ok(false);
+    }
+    let py = d.py();
+    Ok(d.get_item(intern!(py, "@args"))?.is_some() && d.get_item(intern!(py, "@state"))?.is_some())
 }
 
 /// Write a plain dict (no markers) directly to pickle buffer.

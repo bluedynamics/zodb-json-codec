@@ -106,6 +106,30 @@ pub fn write_global(buf: &mut Vec<u8>, module: &str, name: &str) {
     buf.push(b'\n');
 }
 
+/// Detect the stored shape of a NEWOBJ instance with constructor args (issue #12):
+/// state is `{"@args": <tuple>, "@state": <state>}` with exactly those two keys, in any order.
+fn newobj_args_state(state: &PickleValue) -> Option<(&PickleValue, &PickleValue)> {
+    let PickleValue::Dict(pairs) = state else {
+        return None;
+    };
+    if pairs.len() != 2 {
+        return None;
+    }
+    let mut args = None;
+    let mut inner = None;
+    for (k, v) in pairs {
+        match k {
+            PickleValue::String(key) if key == "@args" => args = Some(v),
+            PickleValue::String(key) if key == "@state" => inner = Some(v),
+            _ => return None,
+        }
+    }
+    match (args, inner) {
+        (Some(a @ PickleValue::Tuple(_)), Some(i)) => Some((a, i)),
+        _ => None,
+    }
+}
+
 struct Encoder {
     buf: Vec<u8>,
 }
@@ -271,15 +295,22 @@ impl Encoder {
             }
             PickleValue::Instance(inst) => {
                 let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
-                // Emit as: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
-                // This is the standard ZODB pattern.
+                // Emit as: GLOBAL module\nname\n args NEWOBJ [items] state BUILD, where args is
+                // EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12).
+                let (args, state) = match newobj_args_state(state) {
+                    Some((args, inner)) => (Some(args), inner),
+                    None => (None, state.as_ref()),
+                };
                 self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+NEWOBJ
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
                 self.write_u8(b'\n');
                 self.write_bytes(name.as_bytes());
                 self.write_u8(b'\n');
-                self.write_u8(EMPTY_TUPLE);
+                match args {
+                    Some(args) => self.encode_value(args, depth + 1)?,
+                    None => self.write_u8(EMPTY_TUPLE),
+                }
                 self.write_u8(NEWOBJ);
                 // Dict/list subclass items go before the state, in the order CPython's
                 // save_reduce writes them: APPENDS, then SETITEMS, then BUILD.
@@ -314,11 +345,12 @@ impl Encoder {
                 args,
                 dict_items,
                 list_items,
-                ..
+                newobj,
+                state,
             } => {
                 self.encode_value(callable, depth + 1)?;
                 self.encode_value(args, depth + 1)?;
-                self.write_u8(REDUCE);
+                self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
                 // Post-REDUCE items in CPython's save_reduce order: APPENDS, then SETITEMS.
                 if let Some(items) = list_items {
                     if !items.is_empty() {
@@ -338,6 +370,11 @@ impl Encoder {
                         }
                         self.write_u8(SETITEMS);
                     }
+                }
+                // BUILD state that followed a REDUCE with args (#12)
+                if let Some(st) = state {
+                    self.encode_value(st, depth + 1)?;
+                    self.write_u8(BUILD);
                 }
             }
             PickleValue::RawPickle(data) => {
