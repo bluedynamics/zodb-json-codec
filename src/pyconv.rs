@@ -216,10 +216,12 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 for (k, v) in pairs {
                     if let PickleValue::String(key) = k {
-                        let py_key = if sanitize_nulls && key.contains('\0') {
-                            let marker = PyDict::new(py);
-                            marker.set_item(intern!(py, "@ns"), BASE64.encode(key.as_bytes()))?;
-                            marker.into_any().unbind()
+                        let py_key = if crate::json::key_needs_ns_escape(key, sanitize_nulls) {
+                            // Same form the JSON writer uses: "@ns:<base64>" as the key string
+                            format!("@ns:{}", BASE64.encode(key.as_bytes()))
+                                .into_pyobject(py)?
+                                .into_any()
+                                .unbind()
                         } else {
                             key.into_pyobject(py)?.into_any().unbind()
                         };
@@ -1054,7 +1056,7 @@ fn pydict_to_pickle_value(
                 }
                 // Non-marker key, or marker with unrecognized value type
                 return Ok(PickleValue::Dict(vec![(
-                    PickleValue::String(key.to_owned()),
+                    PickleValue::String(dict_key(key)?.into_owned()),
                     pyobject_to_pickle_value(&v, expand_refs)?,
                 )]));
             }
@@ -1079,7 +1081,7 @@ fn pydict_to_pickle_value(
                     break;
                 }
                 pairs.push((
-                    PickleValue::String(key_str.to_owned()),
+                    PickleValue::String(dict_key(key_str)?.into_owned()),
                     pyobject_to_pickle_value(&v, expand_refs)?,
                 ));
                 continue;
@@ -1249,7 +1251,8 @@ fn plain_dict_to_pickle_value(
     let mut pairs = Vec::with_capacity(dict.len());
     for (k, v) in dict {
         let key = match k.cast::<PyString>() {
-            Ok(s) => PickleValue::String(s.to_str()?.to_owned()),
+            // `@ns:` keys written by the PG decoders decode back (#18)
+            Ok(s) => PickleValue::String(dict_key(s.to_str()?)?.into_owned()),
             // Non-string key (int, tuple, None, ...): keep it as a pickle value
             Err(_) => pyobject_to_pickle_value(&k, expand_refs)?,
         };
@@ -1411,6 +1414,12 @@ fn try_decode_single_key_marker(
                 }
             }
         }
+        "@ns" => {
+            // String with NUL bytes, base64-encoded by the PG decode paths
+            if let Ok(s) = v.cast::<PyString>() {
+                return Ok(Some(PickleValue::String(decode_ns_marker(s.to_str()?)?)));
+            }
+        }
         "@reduce" => {
             if let Ok(reduce_dict) = v.cast::<PyDict>() {
                 return Ok(Some(reduce_dict_to_pickle_value(py, reduce_dict, expand_refs)?));
@@ -1537,6 +1546,19 @@ fn parse_compact_ref(list: &Bound<'_, PyList>) -> PyResult<Option<(Vec<u8>, Stri
         None => (String::new(), class_path.to_string()),
     };
     Ok(Some((oid, module, name)))
+}
+
+/// Dict keys written as `"@ns:<base64>"` (NUL bytes on the PG paths, or a genuine
+/// key starting with `@ns:`) decode back through the shared reader in `json.rs`.
+#[inline]
+fn dict_key(key: &str) -> PyResult<std::borrow::Cow<'_, str>> {
+    Ok(crate::json::decode_dict_key(key)?)
+}
+
+/// Decode the payload of an `@ns` marker.
+#[inline]
+fn decode_ns_marker(b64: &str) -> PyResult<String> {
+    Ok(crate::json::decode_ns_marker(b64)?)
 }
 
 /// Expand a compact ZODB persistent ref from Py<PyAny>.
@@ -2134,7 +2156,7 @@ fn encode_pydict_to_pickle(
                 // Non-marker single key or unrecognized marker value
                 buf.push(EMPTY_DICT);
                 buf.push(MARK);
-                write_string(buf, key);
+                write_string(buf, &dict_key(key)?);
                 encode_pyobject_to_pickle(&v, buf, expand_refs)?;
                 buf.push(SETITEMS);
                 return Ok(());
@@ -2260,7 +2282,7 @@ fn encode_plain_dict_to_pickle(
             // Optimistically assume string keys (>99% in ZODB)
             if let Ok(s) = k.cast::<PyString>() {
                 if let Ok(key_str) = s.to_str() {
-                    write_string(buf, key_str);
+                    write_string(buf, &dict_key(key_str)?);
                     encode_pyobject_to_pickle(&v, buf, expand_refs)?;
                     continue;
                 }
@@ -2492,6 +2514,14 @@ fn try_encode_marker_to_pickle(
             }
             Ok(false)
         }
+        "@ns" => {
+            // String with NUL bytes, base64-encoded by the PG decode paths
+            if let Ok(s) = v.cast::<PyString>() {
+                write_string(buf, &decode_ns_marker(s.to_str()?)?);
+                return Ok(true);
+            }
+            Ok(false)
+        }
         "@dec" => {
             if let Ok(s) = v.cast::<PyString>() {
                 if let Ok(dec_str) = s.to_str() {
@@ -2514,7 +2544,7 @@ fn try_encode_marker_to_pickle(
                 } else {
                     // Unrecognized marker: encode as plain dict
                     let val_pv = pyobject_to_pickle_value(v, expand_refs)?;
-                    PickleValue::Dict(vec![(PickleValue::String(key.to_owned()), val_pv)])
+                    PickleValue::Dict(vec![(PickleValue::String(dict_key(key)?.into_owned()), val_pv)])
                 };
             encode_value_into(&pv, buf)?;
             Ok(true)

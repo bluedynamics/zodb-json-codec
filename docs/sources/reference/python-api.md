@@ -131,7 +131,7 @@ Returns
 
   `state` (`dict`)
   : The decoded object state as a Python dict with marker keys. Strings
-    containing null bytes (`\x00`) are replaced with `{"@ns:" base64}`
+    containing null bytes (`\x00`) are replaced with `{"@ns": base64}`
     markers, because PostgreSQL JSONB cannot store `\u0000`.
 
   `refs` (`list[int]`)

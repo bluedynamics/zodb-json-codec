@@ -79,8 +79,8 @@ fn pickle_value_to_json_impl(
                 let mut map = Map::new();
                 for (k, v) in pairs {
                     if let PickleValue::String(key) = k {
-                        let json_key = if sanitize_nulls && key.contains('\0') {
-                            // Null-byte in dict key — use @ns: prefix for JSON key
+                        let json_key = if key_needs_ns_escape(key, sanitize_nulls) {
+                            // Null-byte (PG) or a genuine "@ns:" prefix: escape the key
                             format!("@ns:{}", BASE64.encode(key.as_bytes()))
                         } else {
                             key.clone()
@@ -333,7 +333,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                         w.write_comma();
                     }
                     if let PickleValue::String(key) = k {
-                        if key.contains('\0') {
+                        if key_needs_ns_escape(key, true) {
                             let encoded = format!("@ns:{}", BASE64.encode(key.as_bytes()));
                             w.write_key(&encoded);
                         } else {
@@ -606,6 +606,32 @@ fn write_compact_ref_pg(
     Ok(())
 }
 
+/// Decode the payload of an `@ns` marker (base64 of a UTF-8 string containing NUL bytes).
+pub(crate) fn decode_ns_marker(b64: &str) -> Result<String, CodecError> {
+    let bytes = BASE64
+        .decode(b64)
+        .map_err(|e| CodecError::Json(format!("@ns marker is not valid base64: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| CodecError::Json("@ns marker does not decode to UTF-8".into()))
+}
+
+/// A dict key as the writers produce it: `"@ns:<base64>"` carries a key with NUL
+/// bytes (PG paths) or a genuine key that itself starts with `@ns:` (all paths).
+pub(crate) fn decode_dict_key(key: &str) -> Result<std::borrow::Cow<'_, str>, CodecError> {
+    match key.strip_prefix("@ns:") {
+        Some(b64) => Ok(std::borrow::Cow::Owned(decode_ns_marker(b64)?)),
+        None => Ok(std::borrow::Cow::Borrowed(key)),
+    }
+}
+
+/// Keys the writers must escape as `"@ns:<base64>"`: NUL bytes (only when
+/// sanitizing for PG) and genuine keys starting with the prefix (always, so the
+/// readers' decoding stays bijective).
+#[inline]
+pub(crate) fn key_needs_ns_escape(key: &str, sanitize_nulls: bool) -> bool {
+    key.starts_with("@ns:") || (sanitize_nulls && key.contains('\0'))
+}
+
 /// Convert a serde_json Value back to a PickleValue AST.
 pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
     match val {
@@ -695,6 +721,10 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                         .map_err(|e| CodecError::Json(format!("base64 decode: {e}")))?;
                     return Ok(PickleValue::RawPickle(bytes));
                 }
+            }
+            if let (1, Some(Value::String(b64))) = (map.len(), map.get("@ns")) {
+                // String with NUL bytes, base64-encoded by the PG decode paths
+                return Ok(PickleValue::String(decode_ns_marker(b64)?));
             }
             // Check for known typed markers (@dt, @date, @time, @td, @dec, @uuid)
             if let Some(pv) =
@@ -803,13 +833,11 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                     });
                 }
             }
-            // Regular dict with string keys
+            // Regular dict with string keys ("@ns:<base64>" keys carry NUL bytes)
             let mut pairs = Vec::new();
             for (k, v) in map {
-                pairs.push((
-                    PickleValue::String(k.clone()),
-                    json_to_pickle_value(v)?,
-                ));
+                let key = decode_dict_key(k)?.into_owned();
+                pairs.push((PickleValue::String(key), json_to_pickle_value(v)?));
             }
             Ok(PickleValue::Dict(pairs))
         }
