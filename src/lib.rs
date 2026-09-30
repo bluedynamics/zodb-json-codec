@@ -19,6 +19,12 @@ use crate::encode::encode_pickle;
 use crate::error::CodecError;
 use crate::json::{json_to_pickle_value, pickle_value_to_json};
 
+/// mimalloc serves the Rust-side allocations (decode AST, buffers, strings);
+/// Python objects keep using pymalloc. Decode is allocation-bound, so the
+/// allocator is a large part of its cost (see docs/explanation/performance.md).
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Convert pickle bytes to a JSON string.
 #[pyfunction]
 fn pickle_to_json(py: Python<'_>, data: &[u8]) -> PyResult<String> {
