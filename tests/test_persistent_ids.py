@@ -1,12 +1,19 @@
 """All persistent id shapes ZODB writes round-trip and are counted like referencesf (#17)."""
 
+from BTrees.OOBTree import OOBTree
+from persistent import Persistent
 from persistent.mapping import PersistentMapping
+from persistent.wref import WeakRef
+from ZODB.MappingStorage import MappingStorage
 from ZODB.serialize import referencesf
 
 import io
 import json
 import pickle
+import pickletools
 import pytest
+import transaction
+import ZODB
 import zodb_json_codec
 
 
@@ -81,12 +88,32 @@ class TestRoundTrip:
         assert back["x"][1][1][2] is PersistentMapping
 
     def test_compact_ref_without_module(self):
-        # ["hex", "Cls"] is the compact form for a class without module; the encoder
-        # must recognize it (no ValueError/TypeError) and emit the oid.
+        # ["hex", "Cls"] is the compact form for a class without module: the encoder
+        # must emit GLOBAL "" "Cls" and the oid under TUPLE2 BINPERSID.
         data = zodb_json_codec.encode_zodb_record(
             {"@cls": ["m", "C"], "@s": {"x": {"@ref": ["0000000000000005", "Cls"]}}}
         )
         assert OID5 in data
+        ops = [
+            (op.name, arg)
+            for op, arg, _pos in pickletools.genops(data.split(b"\x80\x02", 2)[2])
+        ]
+        i = ops.index(("GLOBAL", " Cls"))
+        assert [name for name, _ in ops[i + 1 : i + 3]] == ["TUPLE2", "BINPERSID"]
+
+    @pytest.mark.parametrize(
+        "ref, message",
+        [
+            (["05", "m.C"], "8 bytes"),
+            ("05", "8 bytes"),
+            (["0000000000000005", None], "compact"),
+        ],
+    )
+    def test_malformed_compact_refs_are_rejected(self, ref, message):
+        with pytest.raises(ValueError, match=message):
+            zodb_json_codec.encode_zodb_record(
+                {"@cls": ["m", "C"], "@s": {"x": {"@ref": ref}}}
+            )
 
     def test_stored_weakref_json_from_1_6_1_encodes(self):
         stored = '{"x":{"@ref":["w",{"@t":[{"@b":"AAAAAAAAAAk="}]}]}}'
@@ -114,3 +141,64 @@ class TestRefs:
         assert sorted(refs_dict) == expected
         assert 7 in refs_json  # bare oid counted
         assert 9 not in refs_json  # weak / multi-database excluded
+
+
+class Plain(Persistent):
+    pass
+
+
+class NewArgs(Persistent):
+    """__getnewargs__ makes ZODB write a bare-oid persistent id for references to it."""
+
+    def __getnewargs__(self):
+        return ()
+
+
+class TestRealZodbRecords:
+    def test_real_zodb_records_match_referencesf_and_reload(self):
+        # Records written by ZODB itself: plain ref, weakref, bare-oid ref, cross-database
+        # 'm' and 'n' refs, in a PersistentMapping and an OOBTree. The re-encoded pickle is
+        # read back by ZODB's own ObjectReader, which resolves every id form.
+        dbs = {}
+        db1 = ZODB.DB(MappingStorage(), databases=dbs, database_name="one")
+        ZODB.DB(MappingStorage(), databases=dbs, database_name="two")
+        conn1 = db1.open()
+        conn2 = conn1.get_connection("two")
+        try:
+            r1, r2 = conn1.root(), conn2.root()
+            a, b, na = Plain(), Plain(), NewArgs()
+            pm = PersistentMapping()
+            r1["pm"], r1["b"] = pm, b
+            pm["a"], pm["w"], pm["na"] = a, WeakRef(b), na
+            bt = OOBTree()
+            r1["bt"] = bt
+            bt["a"], bt["w"], bt["na"] = a, WeakRef(b), na
+            o2, na2 = Plain(), NewArgs()
+            conn2.add(o2)
+            conn2.add(na2)
+            r2["o2"], r2["na2"] = o2, na2
+            # cross-database: ['m', ('two', oid, Plain)] and ['n', ('two', oid)]
+            r1["x_m"], r1["x_n"] = o2, na2
+            transaction.commit()
+
+            for obj in (r1, pm, bt):
+                data, _ = db1.storage.load(obj._p_oid)
+                expected = sorted(int.from_bytes(o, "big") for o in referencesf(data))
+                mod, name, js, refs_json = (
+                    zodb_json_codec.decode_zodb_record_for_pg_json(data)
+                )
+                _, _, _, refs_dict = zodb_json_codec.decode_zodb_record_for_pg(data)
+                back = zodb_json_codec.encode_zodb_record(
+                    {"@cls": [mod, name], "@s": json.loads(js)}
+                )
+                assert sorted(refs_json) == expected
+                assert sorted(refs_dict) == expected
+                assert (
+                    sorted(int.from_bytes(o, "big") for o in referencesf(back))
+                    == expected
+                )
+                assert conn1._reader.getState(back) == conn1._reader.getState(data)
+        finally:
+            transaction.abort()
+            conn1.close()
+            db1.close()

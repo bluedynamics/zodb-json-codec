@@ -50,15 +50,16 @@ pub fn pickle_value_to_pyobject_pg(
 
 /// Collect all persistent reference OIDs from a PickleValue tree.
 ///
-/// OIDs are returned as i64 (big-endian interpretation of 8-byte ZODB OID).
-/// Cross-database refs (non-8-byte OIDs) are skipped.
+/// OIDs are returned as i64 (big-endian interpretation of the 8-byte ZODB OID).
+/// Counts what `ZODB.serialize.referencesf` counts: `(oid, klass)` tuples and bare
+/// oids. List forms ('w' weakref, 'm'/'n' multi-database) are not local references.
 pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
     match val {
         PickleValue::PersistentRef(inner) => {
             // (oid, klass) tuples and bare oids (classes with __getnewargs__) are local
             // references; list forms ('w' weakref, 'm'/'n' multi-database) are not,
-            // matching ZODB.serialize.referencesf. Cross-database oids of other
-            // lengths are skipped as well.
+            // matching ZODB.serialize.referencesf. The 8-byte check only guards
+            // against malformed input: ZODB oids are always 8 bytes.
             let oid = match inner.as_ref() {
                 PickleValue::Tuple(items) => match items.first() {
                     Some(PickleValue::Bytes(oid)) => Some(oid),
@@ -1446,40 +1447,72 @@ fn reduce_dict_to_pickle_value(
     })
 }
 
+/// Decode a 16-char hex oid; ZODB oids are always 8 bytes.
+fn decode_oid_hex(hex_str: &str) -> PyResult<Vec<u8>> {
+    let oid = hex::decode(hex_str).map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
+    if oid.len() != 8 {
+        return Err(CodecError::InvalidData(format!(
+            "@ref oid must be 8 bytes (16 hex chars), got {} bytes",
+            oid.len()
+        ))
+        .into());
+    }
+    Ok(oid)
+}
+
+/// Parse the compact reference form `["oid_hex", "module.Class"]`.
+///
+/// ZODB's list-shaped ids ('w' weakref, 'm'/'n' multi-database) always carry a
+/// tuple as second element, so two strings is unambiguous: those and anything else
+/// return `None` and are encoded generically. A list that starts with a 16-char hex
+/// string but has no class path string is malformed and an error.
+fn parse_compact_ref(list: &Bound<'_, PyList>) -> PyResult<Option<(Vec<u8>, String, String)>> {
+    if list.len() != 2 {
+        return Ok(None);
+    }
+    let item0 = list.get_item(0)?;
+    let item1 = list.get_item(1)?;
+    let Ok(oid_py) = item0.cast::<PyString>() else {
+        return Ok(None);
+    };
+    let oid_hex = oid_py.to_str()?;
+    let Ok(cls_py) = item1.cast::<PyString>() else {
+        if oid_hex.len() == 16 && oid_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(CodecError::InvalidData(
+                "malformed compact @ref: [oid, class] needs a class path string".into(),
+            )
+            .into());
+        }
+        return Ok(None);
+    };
+    let oid = decode_oid_hex(oid_hex)?;
+    let class_path = cls_py.to_str()?;
+    let (module, name) = match class_path.rfind('.') {
+        Some(dot) => (class_path[..dot].to_string(), class_path[dot + 1..].to_string()),
+        None => (String::new(), class_path.to_string()),
+    };
+    Ok(Some((oid, module, name)))
+}
+
 /// Expand a compact ZODB persistent ref from Py<PyAny>.
 fn expand_compact_ref(ref_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue> {
-    // Simple string oid: "0000000000000003"
-    if let Ok(hex_str) = ref_val.extract::<String>() {
-        let oid_bytes = hex::decode(&hex_str)
-            .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
-        return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(
-            vec![PickleValue::Bytes(oid_bytes), PickleValue::None],
-        ))));
+    // Oid only: "0000000000000003" -> (oid, None)
+    if let Ok(hex_py) = ref_val.cast::<PyString>() {
+        let oid = decode_oid_hex(hex_py.to_str()?)?;
+        return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+            PickleValue::Bytes(oid),
+            PickleValue::None,
+        ]))));
     }
-
-    // Compact form with class: ["oid_hex", "module.Class"]. ZODB's list-shaped ids
-    // ('w' weakref, 'm'/'n' multi-database) always carry a tuple as second element,
-    // so two strings is unambiguous; anything else is encoded generically below.
+    // Oid with class: ["0000000000000003", "module.Class"] -> (oid, Global)
     if let Ok(list) = ref_val.cast::<PyList>() {
-        if list.len() == 2 {
-            let item0 = list.get_item(0)?;
-            let item1 = list.get_item(1)?;
-            if let (Ok(oid_py), Ok(cls_py)) = (item0.cast::<PyString>(), item1.cast::<PyString>()) {
-                let oid_bytes = hex::decode(oid_py.to_str()?)
-                    .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
-                let class_path = cls_py.to_str()?;
-                let (module, name) = match class_path.rfind('.') {
-                    Some(dot) => (class_path[..dot].to_string(), class_path[dot + 1..].to_string()),
-                    None => (String::new(), class_path.to_string()),
-                };
-                return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
-                    PickleValue::Bytes(oid_bytes),
-                    PickleValue::Global { module, name },
-                ]))));
-            }
+        if let Some((oid, module, name)) = parse_compact_ref(list)? {
+            return Ok(PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
+                PickleValue::Bytes(oid),
+                PickleValue::Global { module, name },
+            ]))));
         }
     }
-
     // Everything else (bare oid as {"@b": ...}, weakref and multi-database lists,
     // any other structure): generic conversion under BINPERSID.
     let inner = pyobject_to_pickle_value(ref_val, false)?;
@@ -2186,44 +2219,26 @@ fn try_encode_marker_to_pickle(
     match key {
         "@ref" => {
             if expand_refs {
-                // Expand compact hex ref → PersistentRef(Tuple([Bytes(oid), None/Global]))
-                if let Ok(s) = v.cast::<PyString>() {
-                    if let Ok(hex_str) = s.to_str() {
-                        let oid = hex::decode(hex_str)
-                            .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
+                // Oid only: "0000000000000003" -> (oid, None) BINPERSID
+                if let Ok(hex_py) = v.cast::<PyString>() {
+                    let oid = decode_oid_hex(hex_py.to_str()?)?;
+                    write_bytes_val(buf, &oid);
+                    buf.push(NONE);
+                    buf.push(TUPLE2);
+                    buf.push(BINPERSID);
+                    return Ok(true);
+                }
+                // Oid with class: ["0000000000000003", "module.Class"] -> (oid, Global) BINPERSID
+                if let Ok(list) = v.cast::<PyList>() {
+                    if let Some((oid, module, name)) = parse_compact_ref(list)? {
                         write_bytes_val(buf, &oid);
-                        buf.push(NONE);
+                        write_global(buf, &module, &name);
                         buf.push(TUPLE2);
                         buf.push(BINPERSID);
                         return Ok(true);
                     }
                 }
-                if let Ok(list) = v.cast::<PyList>() {
-                    if list.len() == 2 {
-                        let item0 = list.get_item(0)?;
-                        let item1 = list.get_item(1)?;
-                        if let (Ok(oid_py), Ok(cls_py)) = (
-                            item0.cast::<PyString>(),
-                            item1.cast::<PyString>(),
-                        ) {
-                            let oid_str = oid_py.to_str()?;
-                            let cls_str = cls_py.to_str()?;
-                            let oid = hex::decode(oid_str)
-                                .map_err(|e| CodecError::Json(format!("hex decode: {e}")))?;
-                            write_bytes_val(buf, &oid);
-                            let (module, name) = if let Some(dot) = cls_str.rfind('.') {
-                                (&cls_str[..dot], &cls_str[dot + 1..])
-                            } else {
-                                ("", cls_str)
-                            };
-                            write_global(buf, module, name);
-                            buf.push(TUPLE2);
-                            buf.push(BINPERSID);
-                            return Ok(true);
-                        }
-                    }
-                }
-                // Fallback for complex @ref values
+                // Anything else (bare oid, weakref / multi-database lists): generic
                 let pv = expand_compact_ref(v)?;
                 encode_value_into(&pv, buf)?;
                 Ok(true)
