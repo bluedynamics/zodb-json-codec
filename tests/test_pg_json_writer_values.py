@@ -38,6 +38,7 @@ def test_writer_matches_dict_path_on_refs_bytes_and_nul():
         "typed": Ref(b"\x00\x00\x00\x00\x00\x00\x00\x2a", SomeClass),
         "blob": b"\x00\xff\xfe binary",
         "nul": "a\x00b",
+        "k\x00ey": 1,
     }
     record = pickle.dumps(("m", "C"), protocol=3) + dumps_with_refs(state)
     mod, name, js, refs = zodb_json_codec.decode_zodb_record_for_pg_json(record)
@@ -49,12 +50,4 @@ def test_writer_matches_dict_path_on_refs_bytes_and_nul():
     assert parsed["typed"] == {"@ref": ["000000000000002a", f"{__name__}.SomeClass"]}
     assert parsed["nul"] == {"@ns": "YQBi"}
     assert parsed["blob"] == {"@b": "AP/+IGJpbmFyeQ=="}
-
-
-def test_writer_nul_key():
-    # the dict PG path cannot represent this key before #18 lands; the JSON writer can
-    record = pickle.dumps(("m", "C"), protocol=3) + pickle.dumps(
-        {"k\x00ey": 1}, protocol=3
-    )
-    _, _, js, _ = zodb_json_codec.decode_zodb_record_for_pg_json(record)
-    assert json.loads(js) == {"@ns:awBleQ==": 1}
+    assert parsed["@ns:awBleQ=="] == 1
