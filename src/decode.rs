@@ -4,6 +4,8 @@ use crate::types::{InstanceData, PickleValue};
 use num_bigint::BigInt;
 
 const MAX_MEMO_SIZE: usize = 100_000;
+/// Deepest value the decoder will build; deeper input is a crafted pickle.
+const MAX_DEPTH: u32 = 1000;
 const MAX_BINARY_SIZE: u64 = 256 * 1024 * 1024; // 256 MB
 
 /// Decode pickle bytes into a PickleValue AST.
@@ -44,6 +46,16 @@ struct Decoder<'a> {
     /// (the owning stack slot was mutated after BINPUT stored the value).
     /// Resolved lazily at BINGET or eagerly when the slot is popped.
     dirty_memo: Vec<bool>,
+    /// Nesting depth of each stack slot (parallel to `stack`): 0 for scalars,
+    /// 1 + deepest child for containers, including the dicts BUILD wraps around
+    /// `@args`/`@state` (those may count one level more than the value has, never
+    /// less). Lets container opcodes refuse a value deeper than MAX_DEPTH before
+    /// it exists (its Drop/Clone would recurse).
+    depth: Vec<u32>,
+    /// Saved `depth` during MARK (parallel to metastack).
+    meta_depth: Vec<Vec<u32>>,
+    /// Depth of each memo entry (parallel to memo).
+    memo_depth: Vec<u32>,
 }
 
 impl<'a> Decoder<'a> {
@@ -57,7 +69,21 @@ impl<'a> Decoder<'a> {
             stack_memo: Vec::with_capacity(16),
             meta_stack_memo: Vec::with_capacity(4),
             dirty_memo: Vec::with_capacity(16),
+            depth: Vec::with_capacity(16),
+            meta_depth: Vec::with_capacity(4),
+            memo_depth: Vec::with_capacity(16),
         }
+    }
+
+    /// Depth of a container whose deepest child has depth `child_max`.
+    #[inline]
+    fn nest(child_max: u32) -> Result<u32, CodecError> {
+        if child_max >= MAX_DEPTH {
+            return Err(CodecError::InvalidData(
+                "maximum nesting depth exceeded".to_string(),
+            ));
+        }
+        Ok(child_max + 1)
     }
 
     fn run(&mut self) -> Result<PickleValue, CodecError> {
@@ -258,6 +284,8 @@ impl<'a> Decoder<'a> {
                     self.metastack.push(old_stack);
                     let old_sm = std::mem::take(&mut self.stack_memo);
                     self.meta_stack_memo.push(old_sm);
+                    let old_depth = std::mem::take(&mut self.depth);
+                    self.meta_depth.push(old_depth);
                     // Don't push Mark itself; everything above the mark
                     // is captured by the current stack being empty
                 }
@@ -265,33 +293,34 @@ impl<'a> Decoder<'a> {
                 // -- Tuple --
                 EMPTY_TUPLE => self.push(PickleValue::Tuple(Vec::new())),
                 TUPLE => {
-                    let items = self.pop_mark()?;
-                    self.push(PickleValue::Tuple(items));
+                    let (items, d) = self.pop_mark_d()?;
+                    self.push_at(PickleValue::Tuple(items), Self::nest(d)?);
                 }
                 TUPLE1 => {
-                    let a = self.pop_value()?;
-                    self.push(PickleValue::Tuple(vec![a]));
+                    let (a, da) = self.pop_value_d()?;
+                    self.push_at(PickleValue::Tuple(vec![a]), Self::nest(da)?);
                 }
                 TUPLE2 => {
-                    let b = self.pop_value()?;
-                    let a = self.pop_value()?;
-                    self.push(PickleValue::Tuple(vec![a, b]));
+                    let (b, db) = self.pop_value_d()?;
+                    let (a, da) = self.pop_value_d()?;
+                    self.push_at(PickleValue::Tuple(vec![a, b]), Self::nest(da.max(db))?);
                 }
                 TUPLE3 => {
-                    let c = self.pop_value()?;
-                    let b = self.pop_value()?;
-                    let a = self.pop_value()?;
-                    self.push(PickleValue::Tuple(vec![a, b, c]));
+                    let (c, dc) = self.pop_value_d()?;
+                    let (b, db) = self.pop_value_d()?;
+                    let (a, da) = self.pop_value_d()?;
+                    self.push_at(PickleValue::Tuple(vec![a, b, c]), Self::nest(da.max(db).max(dc))?);
                 }
 
                 // -- List --
                 EMPTY_LIST => self.push(PickleValue::List(Vec::new())),
                 LIST => {
-                    let items = self.pop_mark()?;
-                    self.push(PickleValue::List(items));
+                    let (items, d) = self.pop_mark_d()?;
+                    self.push_at(PickleValue::List(items), Self::nest(d)?);
                 }
                 APPEND => {
-                    let val = self.pop_value()?;
+                    let (val, dv) = self.pop_value_d()?;
+                    self.raise_top_depth(dv)?;
                     let top = self.top_value_mut()?;
                     match top {
                         PickleValue::List(ref mut items) => {
@@ -316,7 +345,8 @@ impl<'a> Decoder<'a> {
                     self.mark_top_dirty();
                 }
                 APPENDS => {
-                    let items = self.pop_mark()?;
+                    let (items, d) = self.pop_mark_d()?;
+                    self.raise_top_depth(d)?;
                     let top = self.top_value_mut()?;
                     match top {
                         PickleValue::List(ref mut list_items) => {
@@ -344,13 +374,14 @@ impl<'a> Decoder<'a> {
                 // -- Dict --
                 EMPTY_DICT => self.push(PickleValue::Dict(Vec::new())),
                 DICT => {
-                    let items = self.pop_mark()?;
+                    let (items, d) = self.pop_mark_d()?;
                     let pairs = items_to_pairs(items)?;
-                    self.push(PickleValue::Dict(pairs));
+                    self.push_at(PickleValue::Dict(pairs), Self::nest(d)?);
                 }
                 SETITEM => {
-                    let val = self.pop_value()?;
-                    let key = self.pop_value()?;
+                    let (val, dv) = self.pop_value_d()?;
+                    let (key, dk) = self.pop_value_d()?;
+                    self.raise_top_depth(dv.max(dk))?;
                     let top = self.top_value_mut()?;
                     match top {
                         PickleValue::Dict(ref mut pairs) => {
@@ -375,8 +406,9 @@ impl<'a> Decoder<'a> {
                     self.mark_top_dirty();
                 }
                 SETITEMS => {
-                    let items = self.pop_mark()?;
+                    let (items, d) = self.pop_mark_d()?;
                     let new_pairs = items_to_pairs(items)?;
+                    self.raise_top_depth(d)?;
                     let top = self.top_value_mut()?;
                     match top {
                         PickleValue::Dict(ref mut pairs) => {
@@ -404,7 +436,8 @@ impl<'a> Decoder<'a> {
                 // -- Set/FrozenSet (protocol 4) --
                 EMPTY_SET => self.push(PickleValue::Set(Vec::new())),
                 ADDITEMS => {
-                    let items = self.pop_mark()?;
+                    let (items, d) = self.pop_mark_d()?;
+                    self.raise_top_depth(d)?;
                     let set = self.top_value_mut()?;
                     if let PickleValue::Set(ref mut set_items) = set {
                         set_items.extend(items);
@@ -416,8 +449,8 @@ impl<'a> Decoder<'a> {
                     self.mark_top_dirty();
                 }
                 FROZENSET => {
-                    let items = self.pop_mark()?;
-                    self.push(PickleValue::FrozenSet(items));
+                    let (items, d) = self.pop_mark_d()?;
+                    self.push_at(PickleValue::FrozenSet(items), Self::nest(d)?);
                 }
 
                 // -- Global (class reference) --
@@ -456,8 +489,9 @@ impl<'a> Decoder<'a> {
 
                 // -- Object construction --
                 REDUCE => {
-                    let args = self.pop_value()?;
-                    let callable = self.pop_value()?;
+                    let (args, da) = self.pop_value_d()?;
+                    let (callable, dc) = self.pop_value_d()?;
+                    let reduce_depth = Self::nest(da.max(dc))?;
                     // Recognize set/frozenset REDUCE pattern (protocol 3).
                     // Uses two-step check: borrow callable first, then consume
                     // args by value to move list items instead of cloning.
@@ -476,70 +510,73 @@ impl<'a> Decoder<'a> {
                             PickleValue::Tuple(mut tuple_items) if tuple_items.len() == 1 => {
                                 match tuple_items.swap_remove(0) {
                                     PickleValue::List(items) => {
-                                        self.push(if is_set {
+                                        // the set replaces the (list,) args tuple: one level below it
+                                        self.push_at(if is_set {
                                             PickleValue::Set(items)
                                         } else {
                                             PickleValue::FrozenSet(items)
-                                        });
+                                        }, da.saturating_sub(1).max(1));
                                     }
                                     other => {
-                                        self.push(PickleValue::Reduce {
+                                        self.push_at(PickleValue::Reduce {
                                             callable: Box::new(callable),
                                             args: Box::new(PickleValue::Tuple(vec![other])),
                                             dict_items: None,
                                             list_items: None,
                                             newobj: false,
                                             state: None,
-                                        });
+                                        }, reduce_depth);
                                     }
                                 }
                             }
                             args => {
-                                self.push(PickleValue::Reduce {
+                                self.push_at(PickleValue::Reduce {
                                     callable: Box::new(callable),
                                     args: Box::new(args),
                                     dict_items: None,
                                     list_items: None,
                                     newobj: false,
                                     state: None,
-                                });
+                                }, reduce_depth);
                             }
                         }
                     } else {
-                        self.push(PickleValue::Reduce {
+                        self.push_at(PickleValue::Reduce {
                             callable: Box::new(callable),
                             args: Box::new(args),
                             dict_items: None,
                             list_items: None,
                             newobj: false,
                             state: None,
-                        });
+                        }, reduce_depth);
                     }
                 }
                 BUILD => {
-                    let state = self.pop_value()?;
+                    let (state, ds) = self.pop_value_d()?;
                     // Pop object and its memo bindings (so we can transfer them)
                     let obj_bindings = self.stack_memo.pop().unwrap_or_default();
+                    let dobj = self.depth.pop().unwrap_or(0);
                     let obj = self.stack.pop().ok_or(CodecError::StackUnderflow)?;
+                    let build_depth = Self::nest(ds.max(dobj))?;
                     match obj {
                         PickleValue::Global { module, name } => {
-                            self.push(PickleValue::Instance(Box::new(InstanceData {
+                            self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                 module,
                                 name,
                                 state: Box::new(state),
                                 dict_items: None,
                                 list_items: None,
-                            })));
+                            })), build_depth);
                         }
                         PickleValue::Instance(inst) => {
                             // BUILD on an existing instance updates its state
-                            self.push(PickleValue::Instance(Box::new(InstanceData {
+                            self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                 module: inst.module,
                                 name: inst.name,
                                 state: Box::new(state),
                                 dict_items: inst.dict_items,
                                 list_items: inst.list_items,
-                            })));
+                            })), build_depth);
                         }
                         PickleValue::Reduce {
                             callable,
@@ -555,17 +592,18 @@ impl<'a> Decoder<'a> {
                                 PickleValue::Global { module, name } => {
                                     if *args == PickleValue::Tuple(vec![]) {
                                         // No constructor args: plain instance (both kinds, see #32)
-                                        self.push(PickleValue::Instance(Box::new(InstanceData {
+                                        self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                             module,
                                             name,
                                             state: Box::new(state),
                                             dict_items,
                                             list_items,
-                                        })));
+                                        })), build_depth);
                                     } else if newobj {
                                         // NEWOBJ with constructor args: the stored shape keeps
-                                        // args and state side by side (#12)
-                                        self.push(PickleValue::Instance(Box::new(InstanceData {
+                                        // args and state side by side (#12); the wrapping dict is
+                                        // one more level
+                                        self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                             module,
                                             name,
                                             state: Box::new(PickleValue::Dict(vec![
@@ -574,23 +612,23 @@ impl<'a> Decoder<'a> {
                                             ])),
                                             dict_items,
                                             list_items,
-                                        })));
+                                        })), Self::nest(build_depth)?);
                                     } else {
                                         // REDUCE with args then BUILD: re-emitting as NEWOBJ would
                                         // call cls.__new__ with the args, so it stays a Reduce.
-                                        self.push(PickleValue::Reduce {
+                                        self.push_at(PickleValue::Reduce {
                                             callable: Box::new(PickleValue::Global { module, name }),
                                             args,
                                             dict_items,
                                             list_items,
                                             newobj: false,
                                             state: Some(Box::new(state)),
-                                        });
+                                        }, build_depth);
                                     }
                                 }
                                 _ => {
                                     // Can't decompose further — wrap as-is
-                                    self.push(PickleValue::Instance(Box::new(InstanceData {
+                                    self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                         module: String::new(),
                                         name: String::new(),
                                         dict_items,
@@ -609,13 +647,13 @@ impl<'a> Decoder<'a> {
                                                 state,
                                             ),
                                         ])),
-                                    })));
+                                    })), Self::nest(build_depth)?);
                                 }
                             }
                         }
                         _ => {
                             // BUILD on something unexpected — keep both
-                            self.push(PickleValue::Instance(Box::new(InstanceData {
+                            self.push_at(PickleValue::Instance(Box::new(InstanceData {
                                 module: String::new(),
                                 name: String::new(),
                                 state: Box::new(PickleValue::Dict(vec![
@@ -624,7 +662,7 @@ impl<'a> Decoder<'a> {
                                 ])),
                                 dict_items: None,
                                 list_items: None,
-                            })));
+                            })), Self::nest(build_depth)?);
                         }
                     }
                     // Transfer memo bindings from the old object to the new
@@ -635,79 +673,83 @@ impl<'a> Decoder<'a> {
                     self.mark_top_dirty();
                 }
                 NEWOBJ => {
-                    let args = self.pop_value()?;
-                    let cls = self.pop_value()?;
-                    self.push(PickleValue::Reduce {
+                    let (args, da) = self.pop_value_d()?;
+                    let (cls, dc) = self.pop_value_d()?;
+                    let d = Self::nest(da.max(dc))?;
+                    self.push_at(PickleValue::Reduce {
                         callable: Box::new(cls),
                         args: Box::new(args),
                         dict_items: None,
                         list_items: None,
                         newobj: true,
                         state: None,
-                    });
+                    }, d);
                 }
                 NEWOBJ_EX => {
-                    let kwargs = self.pop_value()?;
-                    let args = self.pop_value()?;
-                    let cls = self.pop_value()?;
+                    let (kwargs, dk) = self.pop_value_d()?;
+                    let (args, da) = self.pop_value_d()?;
+                    let (cls, dc) = self.pop_value_d()?;
+                    // args and kwargs are wrapped in a dict below: two levels
+                    let d = Self::nest(Self::nest(dk.max(da))?.max(dc))?;
                     // For now, combine args and kwargs
                     let combined_args = PickleValue::Dict(vec![
                         (PickleValue::String("@args".to_string()), args),
                         (PickleValue::String("@kwargs".to_string()), kwargs),
                     ]);
-                    self.push(PickleValue::Reduce {
+                    self.push_at(PickleValue::Reduce {
                         callable: Box::new(cls),
                         args: Box::new(combined_args),
                         dict_items: None,
                         list_items: None,
                         newobj: true,
                         state: None,
-                    });
+                    }, d);
                 }
 
                 // -- Persistent references (ZODB) --
                 BINPERSID => {
-                    let pid = self.pop_value()?;
-                    self.push(PickleValue::PersistentRef(Box::new(pid)));
+                    let (pid, d) = self.pop_value_d()?;
+                    self.push_at(PickleValue::PersistentRef(Box::new(pid)), Self::nest(d)?);
                 }
                 PERSID => {
                     let line = self.read_line()?;
                     let s = std::str::from_utf8(line)
                         .map_err(|_| CodecError::InvalidUtf8)?
                         .to_string();
-                    self.push(PickleValue::PersistentRef(Box::new(
-                        PickleValue::String(s),
-                    )));
+                    self.push_at(PickleValue::PersistentRef(Box::new(PickleValue::String(s))), 1);
                 }
 
                 // -- Memo --
                 BINPUT => {
                     let idx = self.read_u8()? as usize;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val)?;
+                    let d = self.top_depth();
+                    self.memo_put(idx, val, d)?;
                     self.record_memo_binding(idx);
                 }
                 LONG_BINPUT => {
                     let idx = self.read_u32()? as usize;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val)?;
+                    let d = self.top_depth();
+                    self.memo_put(idx, val, d)?;
                     self.record_memo_binding(idx);
                 }
                 MEMOIZE => {
                     let val = self.peek_value()?.clone();
                     let idx = self.memo.len();
-                    self.memo_put(idx, val)?;
+                    let d = self.top_depth();
+                    self.memo_put(idx, val, d)?;
                     self.record_memo_binding(idx);
                 }
                 BINGET => {
                     let idx = self.read_u8()? as usize;
-                    let val = self.memo_get(idx)?;
-                    self.push(val);
+                    let (val, d) = self.memo_get(idx)?;
+                    self.push_at(val, d);
                 }
                 LONG_BINGET => {
                     let idx = self.read_u32()? as usize;
-                    let val = self.memo_get(idx)?;
-                    self.push(val);
+                    let (val, d) = self.memo_get(idx)?;
+                    self.push_at(val, d);
                 }
                 PUT => {
                     let line = self.read_line()?;
@@ -717,7 +759,8 @@ impl<'a> Decoder<'a> {
                         .parse()
                         .map_err(|e| CodecError::InvalidData(format!("PUT index: {e}")))?;
                     let val = self.peek_value()?.clone();
-                    self.memo_put(idx, val)?;
+                    let d = self.top_depth();
+                    self.memo_put(idx, val, d)?;
                     self.record_memo_binding(idx);
                 }
                 GET => {
@@ -727,8 +770,8 @@ impl<'a> Decoder<'a> {
                         .trim()
                         .parse()
                         .map_err(|e| CodecError::InvalidData(format!("GET index: {e}")))?;
-                    let val = self.memo_get(idx)?;
-                    self.push(val);
+                    let (val, d) = self.memo_get(idx)?;
+                    self.push_at(val, d);
                 }
 
                 // -- Stack manipulation --
@@ -737,7 +780,8 @@ impl<'a> Decoder<'a> {
                 }
                 DUP => {
                     let val = self.peek_value()?.clone();
-                    self.push(val);
+                    let d = self.top_depth();
+                    self.push_at(val, d);
                 }
 
                 _ => {
@@ -802,15 +846,30 @@ impl<'a> Decoder<'a> {
 
     // -- Stack operations --
 
+    /// Push a scalar (depth 0).
     #[inline]
     fn push(&mut self, val: PickleValue) {
+        self.push_at(val, 0);
+    }
+
+    /// Push a value of known nesting depth.
+    #[inline]
+    fn push_at(&mut self, val: PickleValue, depth: u32) {
         self.stack.push(val);
         self.stack_memo.push(Vec::new());
+        self.depth.push(depth);
     }
 
     #[inline]
     fn pop_value(&mut self) -> Result<PickleValue, CodecError> {
+        Ok(self.pop_value_d()?.0)
+    }
+
+    /// Pop a value together with its nesting depth.
+    #[inline]
+    fn pop_value_d(&mut self) -> Result<(PickleValue, u32), CodecError> {
         let bindings = self.stack_memo.pop().unwrap_or_default();
+        let depth = self.depth.pop().unwrap_or(0);
         let val = self.stack.pop().ok_or(CodecError::StackUnderflow)?;
         // Sync any dirty memo entries before the value leaves the stack
         if !bindings.is_empty() {
@@ -826,13 +885,14 @@ impl<'a> Decoder<'a> {
                     if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
                         if idx < self.memo.len() {
                             self.memo[idx] = val.clone();
+                            self.memo_depth[idx] = depth;
                         }
                         self.dirty_memo[idx] = false;
                     }
                 }
             }
         }
-        Ok(val)
+        Ok((val, depth))
     }
 
     #[inline]
@@ -845,19 +905,22 @@ impl<'a> Decoder<'a> {
         self.stack.last_mut().ok_or(CodecError::StackUnderflow)
     }
 
-    /// Pop all items above the last MARK from the stack.
-    fn pop_mark(&mut self) -> Result<Vec<PickleValue>, CodecError> {
+    /// Pop all items above the last MARK together with their deepest nesting depth.
+    fn pop_mark_d(&mut self) -> Result<(Vec<PickleValue>, u32), CodecError> {
         // Take the current stack (everything since MARK) as the result.
         // This is a pointer swap — no element-by-element drain needed.
         let items = std::mem::take(&mut self.stack);
         let slot_memos = std::mem::take(&mut self.stack_memo);
+        let depths = std::mem::take(&mut self.depth);
+        let max_depth = depths.iter().copied().max().unwrap_or(0);
 
         // Sync dirty memo entries for all popped slots before values are consumed
-        for (val, bindings) in items.iter().zip(slot_memos.iter()) {
+        for ((val, bindings), &d) in items.iter().zip(slot_memos.iter()).zip(depths.iter()) {
             for &idx in bindings {
                 if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
                     if idx < self.memo.len() {
                         self.memo[idx] = val.clone();
+                        self.memo_depth[idx] = d;
                     }
                     self.dirty_memo[idx] = false;
                 }
@@ -871,34 +934,58 @@ impl<'a> Decoder<'a> {
         if let Some(old_sm) = self.meta_stack_memo.pop() {
             self.stack_memo = old_sm;
         }
+        if let Some(old_depth) = self.meta_depth.pop() {
+            self.depth = old_depth;
+        }
 
-        Ok(items)
+        Ok((items, max_depth))
+    }
+
+    /// Depth of the current stack top (0 when empty).
+    #[inline]
+    fn top_depth(&self) -> u32 {
+        self.depth.last().copied().unwrap_or(0)
+    }
+
+    /// Raise the stack top's depth after an in-place mutation that added
+    /// children of depth `child_max`.
+    #[inline]
+    fn raise_top_depth(&mut self, child_max: u32) -> Result<(), CodecError> {
+        let nested = Self::nest(child_max)?;
+        if let Some(d) = self.depth.last_mut() {
+            *d = (*d).max(nested);
+        }
+        Ok(())
     }
 
     // -- Memo operations --
 
-    fn memo_put(&mut self, idx: usize, val: PickleValue) -> Result<(), CodecError> {
+    fn memo_put(&mut self, idx: usize, val: PickleValue, depth: u32) -> Result<(), CodecError> {
         if idx >= MAX_MEMO_SIZE {
             return Err(CodecError::InvalidData(format!("memo index {idx} exceeds maximum {MAX_MEMO_SIZE}")));
         }
         if idx >= self.memo.len() {
             self.memo.resize(idx + 1, PickleValue::None);
             self.dirty_memo.resize(idx + 1, false);
+            self.memo_depth.resize(idx + 1, 0);
         }
         self.memo[idx] = val;
+        self.memo_depth[idx] = depth;
         self.dirty_memo[idx] = false;
         Ok(())
     }
 
-    /// Get a memo entry, lazily resolving dirty (stale) entries first.
-    fn memo_get(&mut self, idx: usize) -> Result<PickleValue, CodecError> {
+    /// Get a memo entry and its depth, lazily resolving dirty (stale) entries first.
+    fn memo_get(&mut self, idx: usize) -> Result<(PickleValue, u32), CodecError> {
         if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
             self.resolve_dirty_memo(idx);
         }
-        self.memo
+        let val = self
+            .memo
             .get(idx)
             .cloned()
-            .ok_or_else(|| CodecError::InvalidData(format!("memo index {idx} not found")))
+            .ok_or_else(|| CodecError::InvalidData(format!("memo index {idx} not found")))?;
+        Ok((val, self.memo_depth[idx]))
     }
 
     /// Resolve a dirty memo entry by finding its live value on the stack.
@@ -907,6 +994,7 @@ impl<'a> Decoder<'a> {
         for (si, bindings) in self.stack_memo.iter().enumerate() {
             if bindings.contains(&memo_idx) {
                 self.memo[memo_idx] = self.stack[si].clone();
+                self.memo_depth[memo_idx] = self.depth[si];
                 self.dirty_memo[memo_idx] = false;
                 return;
             }
@@ -916,6 +1004,7 @@ impl<'a> Decoder<'a> {
             for (si, bindings) in meta_sm.iter().enumerate() {
                 if bindings.contains(&memo_idx) {
                     self.memo[memo_idx] = self.metastack[mi][si].clone();
+                    self.memo_depth[memo_idx] = self.meta_depth[mi][si];
                     self.dirty_memo[memo_idx] = false;
                     return;
                 }
@@ -1358,6 +1447,45 @@ mod tests {
         } else {
             panic!("expected Reduce");
         }
+    }
+
+    fn tuple1_chain(n: usize) -> Vec<u8> {
+        let mut data = vec![0x80, 0x03, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(n));
+        data.push(b'.');
+        data
+    }
+
+    #[test]
+    fn test_decoder_depth_boundary() {
+        assert!(decode_pickle(&tuple1_chain(1000)).is_ok());
+        let err = decode_pickle(&tuple1_chain(1001)).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
+    }
+
+    #[test]
+    fn test_memo_depth_carries() {
+        // value of depth 999, memoized, fetched back and wrapped twice -> 1001
+        let mut data = vec![0x80, 0x03, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(999));
+        data.extend_from_slice(&[BINPUT, 0, POP, BINGET, 0, TUPLE1, TUPLE1, b'.']);
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
+        // wrapped once -> exactly 1000, fine
+        let mut ok = vec![0x80, 0x03, b'N'];
+        ok.extend(std::iter::repeat(TUPLE1).take(999));
+        ok.extend_from_slice(&[BINPUT, 0, POP, BINGET, 0, TUPLE1, b'.']);
+        assert!(decode_pickle(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_mutation_raises_depth() {
+        // EMPTY_LIST, MARK, <value of depth 1000>, APPENDS  -> list of depth 1001
+        let mut data = vec![0x80, 0x03, EMPTY_LIST, MARK, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(1000));
+        data.extend_from_slice(&[APPENDS, b'.']);
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
     }
 
     #[test]
