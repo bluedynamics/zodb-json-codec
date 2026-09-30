@@ -44,6 +44,10 @@
   released instead). Small and nested records decode 15 to 20% faster; a
   1,000-key dict decodes in the Rust core in 97 µs instead of 110 µs [#26]
 
+- Build: `lto = "fat"` for release builds (FileStorage decode 3% and
+  large_flat_dict decode 10% faster than thin LTO, extension 7% smaller,
+  release compile takes longer) [#26]
+
 - Decode performance: memo puts that no later `GET`/`BINGET` reads are skipped
   after a pre-scan of the opcode stream. The 1.6.0 memo fix deep-copied every
   container into the memo once per nesting level (typical records decoded 30
