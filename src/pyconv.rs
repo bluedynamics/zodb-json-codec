@@ -112,6 +112,38 @@ pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
     }
 }
 
+/// Convert SETITEMS pairs to a Python list of [key, value] lists.
+fn pairs_to_pylist(
+    py: Python<'_>,
+    pairs: &[(PickleValue, PickleValue)],
+    compact_refs: bool,
+    sanitize_nulls: bool,
+    depth: usize,
+) -> PyResult<Py<PyAny>> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        let pk = pickle_value_to_pyobject_impl(py, k, compact_refs, sanitize_nulls, depth + 1)?;
+        let pv = pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls, depth + 1)?;
+        out.push(PyList::new(py, [pk, pv])?.into_any().unbind());
+    }
+    Ok(PyList::new(py, out)?.into_any().unbind())
+}
+
+/// Convert APPENDS items to a Python list.
+fn items_to_pylist(
+    py: Python<'_>,
+    items: &[PickleValue],
+    compact_refs: bool,
+    sanitize_nulls: bool,
+    depth: usize,
+) -> PyResult<Py<PyAny>> {
+    let py_items: PyResult<Vec<Py<PyAny>>> = items
+        .iter()
+        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls, depth + 1))
+        .collect();
+    Ok(PyList::new(py, py_items?)?.into_any().unbind())
+}
+
 /// Core implementation with optional null-byte sanitization for PG JSONB.
 fn pickle_value_to_pyobject_impl(
     py: Python<'_>,
@@ -228,7 +260,7 @@ fn pickle_value_to_pyobject_impl(
             Ok(dict.into_any().unbind())
         }
         PickleValue::Instance(inst) => {
-            let InstanceData { module, name, state, .. } = inst.as_ref();
+            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(obj) =
                 try_instance_to_pyobject(py, module, name, state, compact_refs)?
@@ -251,6 +283,13 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@cls"), cls_list)?;
                 dict.set_item(intern!(py, "@s"), state_obj)?;
+                // SETITEMS/APPENDS data of dict/list subclasses (same keys as the JSON writer)
+                if let Some(pairs) = dict_items {
+                    dict.set_item(intern!(py, "@items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
+                }
+                if let Some(items) = list_items {
+                    dict.set_item(intern!(py, "@appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+                }
                 Ok(dict.into_any().unbind())
             }
         }
@@ -264,7 +303,7 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args, .. } => {
+        PickleValue::Reduce { callable, args, dict_items, list_items } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(obj) =
                 try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
@@ -277,6 +316,12 @@ fn pickle_value_to_pyobject_impl(
             let inner_dict = PyDict::new(py);
             inner_dict.set_item(intern!(py, "callable"), callable_obj)?;
             inner_dict.set_item(intern!(py, "args"), args_obj)?;
+            if let Some(pairs) = dict_items {
+                inner_dict.set_item(intern!(py, "items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
+            }
+            if let Some(items) = list_items {
+                inner_dict.set_item(intern!(py, "appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+            }
             let dict = PyDict::new(py);
             dict.set_item(intern!(py, "@reduce"), inner_dict)?;
             Ok(dict.into_any().unbind())
