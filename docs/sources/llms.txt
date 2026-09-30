@@ -10,7 +10,7 @@ zodb-pgjsonb, a PostgreSQL JSONB storage backend for ZODB.
 
 - Package: zodb-json-codec
 - License: MIT
-- Python: 3.10+
+- Python: 3.12+
 - Rust: 1.70+ (PyO3 0.28)
 - Repository: https://github.com/bluedynamics/zodb-json-codec
 - PyPI: https://pypi.org/project/zodb-json-codec/

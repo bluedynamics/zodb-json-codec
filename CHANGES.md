@@ -2,6 +2,12 @@
 
 ## unreleased
 
+- Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
+  3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage
+  collector can run finalizers inside any GC-tracked allocation, a class of
+  re-entrancy the extension no longer has to consider. 3.15 wheels follow once
+  the release is out [#41]
+
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
   the compact `["oid", "module.Class"]` form is now only recognized when both

@@ -4,7 +4,7 @@
 
 ## From PyPI
 
-Pre-built wheels are available for Linux, macOS, and Windows on Python 3.10 through 3.14.
+Pre-built wheels are available for Linux, macOS, and Windows on Python 3.12 through 3.14.
 
 ```bash
 pip install zodb-json-codec

@@ -115,11 +115,11 @@ to **PyPI**.
 
 | Platform | Architecture | Wheels |
 |----------|-------------|--------|
-| Linux (manylinux) | x86_64 | Python 3.10-3.14 |
-| Linux (manylinux) | aarch64 | Python 3.10-3.14 |
-| macOS | x86_64 | Python 3.10-3.14 |
-| macOS | arm64 (Apple Silicon) | Python 3.10-3.14 |
-| Windows | x64 | Python 3.10-3.14 |
+| Linux (manylinux) | x86_64 | Python 3.12-3.14 |
+| Linux (manylinux) | aarch64 | Python 3.12-3.14 |
+| macOS | x86_64 | Python 3.12-3.14 |
+| macOS | arm64 (Apple Silicon) | Python 3.12-3.14 |
+| Windows | x64 | Python 3.12-3.14 |
 | Source | - | sdist |
 
 ## Workflow Overview
@@ -147,7 +147,7 @@ When a new Python version is supported by PyO3:
 ### PyO3 doesn't support Python 3.X yet
 
 If `--find-interpreter` picks up a Python version newer than PyO3 supports,
-the build will fail. The workflow uses explicit `-i 3.10 -i 3.11 ...` flags
+the build will fail. The workflow uses explicit `-i 3.12 -i 3.13 ...` flags
 to avoid this. Update `PYTHON_TARGETS` when PyO3 adds support.
 
 ### Trusted publishing fails

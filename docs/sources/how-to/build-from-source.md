@@ -5,7 +5,7 @@
 ## Prerequisites
 
 - **Rust 1.70+** -- install via [rustup](https://rustup.rs/)
-- **Python 3.10+** -- with a virtual environment active
+- **Python 3.12+** -- with a virtual environment active
 - **maturin** -- the Rust/Python build tool
 
 Install maturin:
