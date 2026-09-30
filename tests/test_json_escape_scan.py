@@ -7,6 +7,8 @@ import pytest
 
 import zodb_json_codec
 
+# no NUL here: a string with NUL becomes an `@ns` marker before it reaches the
+# writer (#18), so the plain round trip cannot hold; the Rust test covers 0x00
 ESCAPES = ['"', "\\", "\n", "\r", "\t", "\x01", "\x02", "\x1f", "\x7f"]
 
 

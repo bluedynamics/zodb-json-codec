@@ -650,9 +650,10 @@ through `setne`, `movb` and `lea`, so every byte's pointer increment waits
 for the compare instead of being one unconditional `lea`. The loop-carried
 chain grows from about one to about four cycles per byte, and long clean
 runs are where that shows. The chunked scan fixes the shape of the hot path
-in the source: one 8-byte load and about fifteen ALU instructions per chunk
-with a plain `i += 8`, whatever the profile says, and a clean run of any
-length is one `push_str`.
+in the source: one 8-byte load, the mask arithmetic and a plain `i += 8`
+per clean chunk (38 instructions in the built extension, no call,
+no data-dependent pointer step), whatever the profile says, and a clean
+run of any length is one `push_str`.
 
 **Impact:** the same probe after the change, minimum of two passes on one
 pinned core (`plain` is the build without PGO):
@@ -668,12 +669,15 @@ pinned core (`plain` is the build without PGO):
 | 500 short Cyrillic strings | 0.99 | 0.91 | 0.96 |
 | Cyrillic and ASCII words mixed | 0.83 | 1.00 | 1.57 |
 
-On the sample database (PG JSON pipeline, minimum of three interleaved
-rounds): the plain build goes from 11.1 to 10.7 µs median and 32.1 to 30.4
-µs P95 with the change; its PGO build is now the fastest of all at 9.5 µs
-median and 29.4 µs P95, where the PGO build of the old code was the slowest
-(10.9 and 37.4 µs in entry 21's session). Every other benchmark category is
-unchanged (the dict paths and the encoder do not run this code).
+On the sample database (PG JSON pipeline; each number the minimum of that
+statistic over three interleaved rounds): against `main` without PGO in one
+A/B run the plain build goes from 11.1 to 10.7 µs median and 32.1 to 30.4 µs
+P95 with the change. In the performance page's session the plain build of
+the fixed tree is 10.7 µs median and 29.0 µs P95 and its PGO build 9.6 and
+28.1 µs, so the PGO build is the fastest of all on the median while the P95
+difference sits inside the 3% noise floor; the PGO build of the old code was
+the slowest (10.9 and 37.4 µs in entry 21's session). Every other benchmark
+category is unchanged (the dict paths and the encoder do not run this code).
 
 **Lesson:** a profile can make a hot loop slower, and a benchmark category
 that mixes features cannot say which one. Time per record on real data, then

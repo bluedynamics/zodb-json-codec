@@ -11,9 +11,10 @@
   of the bytes that need escaping (below 0x20, `"`, `\`), so clean runs are
   copied whole and each escape is reached directly. The byte loop it replaces
   was compiled up to 1.8x slower for long strings in PGO builds, which made
-  the release wheels slower than a plain build on the storage path (P95 30 to
-  47% on the sample database); the new scan is faster in every build. Output
-  is unchanged [#52]
+  the release wheels slower than a plain build on the storage path (P95 17 to
+  45% on the sample database, depending on the profile); the new scan is no
+  slower anywhere and faster on long strings in every build. Output is
+  unchanged [#52]
 
 - Docs: the round-trip claim now says what holds (an equal object, not
   identical bytes) and lists what differs; the tutorial example is run by a

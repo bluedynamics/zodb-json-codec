@@ -194,8 +194,9 @@ loop of the JSON string writer, which the profile-guided build compiled up to
 ([#52](https://github.com/bluedynamics/zodb-json-codec/issues/52), journal
 entry 22). The writer now scans eight bytes at a time with a SWAR mask, and
 the tables above are measured with that scan: the PGO build is the faster one
-on the storage path as well (JSON path median 10.7 to 9.6 us, P95 29.0 to
-28.1 us) and the Python-dict paths keep their PGO gain. The PGO column is what
+on the storage path as well (JSON path median 10.7 to 9.6 us; the P95, 29.0
+to 28.1 us, is inside the noise floor) and the Python-dict paths keep their
+PGO gain. The PGO column is what
 the PyPI wheels deliver and what zodb-pgjsonb sees.
 
 ### Allocator notes for operators

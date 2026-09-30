@@ -192,7 +192,6 @@ impl JsonWriter {
     }
 }
 
-/// Write JSON-escaped string content (without surrounding quotes) to a String.
 const ONES: u64 = 0x0101_0101_0101_0101;
 const HIGHS: u64 = 0x8080_8080_8080_8080;
 const LOWS: u64 = 0x7f7f_7f7f_7f7f_7f7f;
@@ -230,6 +229,7 @@ fn push_escape(buf: &mut String, b: u8) {
     }
 }
 
+/// Write JSON-escaped string content (without surrounding quotes) to a String.
 #[inline]
 fn write_escaped(buf: &mut String, s: &str) {
     // Eight bytes at a time: one SWAR mask marks the bytes that need an
@@ -242,7 +242,7 @@ fn write_escaped(buf: &mut String, s: &str) {
     let bytes = s.as_bytes();
     let mut start = 0;
     let mut i = 0;
-    while i + 8 <= bytes.len() {
+    while bytes.len() - i >= 8 {
         let chunk = u64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
         let mut mask = escape_mask(chunk);
         while mask != 0 {
