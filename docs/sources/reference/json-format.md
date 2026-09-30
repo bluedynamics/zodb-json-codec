@@ -237,6 +237,43 @@ callable and arguments for roundtripping.
 }
 ```
 
+Optional keys inside `@reduce`:
+
+`items`, `appends`
+: Contents of dict/list subclasses set through `SETITEMS`/`APPENDS` after the
+  call (`OrderedDict`, `defaultdict`, `deque`, user subclasses).
+
+`newobj`
+: `true` when the object was created with `NEWOBJ` (`cls.__new__(cls, *args)`)
+  instead of calling the callable (`REDUCE`). Absent means `REDUCE`.
+
+`state`
+: `BUILD` state that followed a `REDUCE` with non-empty arguments.
+
+```json
+{
+  "@reduce": {
+    "callable": {"@cls": ["some.module", "SomeClass"]},
+    "args": {"@t": ["arg1"]},
+    "state": {"extra": 1}
+  }
+}
+```
+
+Instances created with `NEWOBJ` and non-empty constructor arguments
+(`__getnewargs__`) followed by `BUILD` keep the `@cls`/`@s` form; their state
+holds both parts:
+
+```json
+{
+  "@cls": ["some.module", "SomeClass"],
+  "@s": {"@args": {"@t": ["arg1"]}, "@state": {"token": "arg1"}}
+}
+```
+
+`@items` and `@appends` next to `@cls`/`@s` carry dict/list subclass contents of
+such instances.
+
 ### `@pkl` -- Raw Pickle Escape Hatch
 
 Base64-encoded pickle fragment for types that cannot be represented in
