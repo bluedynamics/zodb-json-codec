@@ -314,12 +314,15 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args, dict_items, list_items, .. } => {
-            // Try known type handlers first (datetime, Decimal, set, etc.)
-            if let Some(obj) =
-                try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
-            {
-                return Ok(obj);
+        PickleValue::Reduce { callable, args, dict_items, list_items, newobj, state } => {
+            // Try known type handlers first (datetime, Decimal, set, etc.); a REDUCE
+            // that carried BUILD state is never one of them.
+            if state.is_none() {
+                if let Some(obj) =
+                    try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
+                {
+                    return Ok(obj);
+                }
             }
             // Fall back to generic @reduce
             let callable_obj = pickle_value_to_pyobject_impl(py, callable, compact_refs, sanitize_nulls, depth + 1)?;
@@ -332,6 +335,15 @@ fn pickle_value_to_pyobject_impl(
             }
             if let Some(items) = list_items {
                 inner_dict.set_item(intern!(py, "appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+            }
+            if *newobj {
+                inner_dict.set_item(intern!(py, "newobj"), true)?;
+            }
+            if let Some(st) = state {
+                inner_dict.set_item(
+                    intern!(py, "state"),
+                    pickle_value_to_pyobject_impl(py, st, compact_refs, sanitize_nulls, depth + 1)?,
+                )?;
             }
             let dict = PyDict::new(py);
             dict.set_item(intern!(py, "@reduce"), inner_dict)?;
@@ -1451,8 +1463,15 @@ fn reduce_dict_to_pickle_value(
         args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
         dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs, "items")?,
         list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs, "appends")?,
-        newobj: false,
-        state: None,
+        newobj: reduce_dict
+            .get_item(intern!(py, "newobj"))?
+            .map(|v| v.is_truthy())
+            .transpose()?
+            .unwrap_or(false),
+        state: match reduce_dict.get_item(intern!(py, "state"))? {
+            Some(v) => Some(Box::new(pyobject_to_pickle_value(&v, expand_refs)?)),
+            None => None,
+        },
     })
 }
 

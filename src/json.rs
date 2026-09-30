@@ -148,11 +148,13 @@ fn pickle_value_to_json_impl(
             let inner_json = to_json(inner)?;
             Ok(json!({"@ref": inner_json}))
         }
-        PickleValue::Reduce { callable, args, dict_items, list_items, .. } => {
-            if let Some(typed) =
-                known_types::try_reduce_to_typed_json(callable, args, &to_json)?
-            {
-                return Ok(typed);
+        PickleValue::Reduce { callable, args, dict_items, list_items, newobj, state } => {
+            if state.is_none() {
+                if let Some(typed) =
+                    known_types::try_reduce_to_typed_json(callable, args, &to_json)?
+                {
+                    return Ok(typed);
+                }
             }
             let callable_json = to_json(callable)?;
             let args_json = to_json(args)?;
@@ -170,6 +172,12 @@ fn pickle_value_to_json_impl(
             if let Some(items) = list_items {
                 let appends_json: Result<Vec<Value>, _> = items.iter().map(&to_json).collect();
                 reduce_obj.as_object_mut().unwrap().insert("appends".to_string(), json!(appends_json?));
+            }
+            if *newobj {
+                reduce_obj.as_object_mut().unwrap().insert("newobj".to_string(), json!(true));
+            }
+            if let Some(st) = state {
+                reduce_obj.as_object_mut().unwrap().insert("state".to_string(), to_json(st)?);
             }
             Ok(json!({"@reduce": reduce_obj}))
         }
@@ -476,10 +484,11 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
             args,
             dict_items,
             list_items,
-            ..
+            newobj,
+            state,
         } => {
-            // Try known types first
-            if known_types::try_write_reduce_typed(w, callable, args, &recurse)? {
+            // Try known types first (a REDUCE that carried BUILD state is never one)
+            if state.is_none() && known_types::try_write_reduce_typed(w, callable, args, &recurse)? {
                 return Ok(());
             }
             // Fallback: {"@reduce": {"callable": ..., "args": ..., ...}}
@@ -518,6 +527,16 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                     recurse(w, item)?;
                 }
                 w.end_array();
+            }
+            if *newobj {
+                w.write_comma();
+                w.write_key_literal("newobj");
+                w.write_bool(true);
+            }
+            if let Some(st) = state {
+                w.write_comma();
+                w.write_key_literal("state");
+                recurse(w, st)?;
             }
             w.end_object();
             w.end_object();
@@ -769,13 +788,18 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                     } else {
                         None
                     };
+                    let newobj = matches!(reduce_map.get("newobj"), Some(Value::Bool(true)));
+                    let state = match reduce_map.get("state") {
+                        Some(v) => Some(Box::new(json_to_pickle_value(v)?)),
+                        None => None,
+                    };
                     return Ok(PickleValue::Reduce {
                         callable: Box::new(callable),
                         args: Box::new(args),
                         dict_items,
                         list_items,
-                        newobj: false,
-                        state: None,
+                        newobj,
+                        state,
                     });
                 }
             }
