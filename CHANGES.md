@@ -2,6 +2,14 @@
 
 ## unreleased
 
+- PG JSON writer: strings are scanned eight bytes at a time with a SWAR mask
+  of the bytes that need escaping (below 0x20, `"`, `\`), so clean runs are
+  copied whole and each escape is reached directly. The byte loop it replaces
+  was compiled up to 1.8x slower for long strings in PGO builds, which made
+  the release wheels slower than a plain build on the storage path (P95 30 to
+  47% on the sample database); the new scan is faster in every build. Output
+  is unchanged [#52]
+
 - Docs: the round-trip claim now says what holds (an equal object, not
   identical bytes) and lists what differs; the tutorial example is run by a
   test; the architecture page names `decode_zodb_record_for_pg_json` as the
@@ -13,10 +21,7 @@
   turns out to slow the PG JSON pipeline on real records (see #52) [#27]
 
 - Release wheels: the PGO profile now includes the PG JSON path
-  (`bench.py pg-compare`), which the profile used to leave out. Note that PGO
-  still makes the PG JSON pipeline on real records slower than a build without
-  PGO (median 9.8 to 10.4 µs, P95 26 to 35 µs) while it speeds up the
-  Python-dict paths; the cause is open in #52 [#52]
+  (`bench.py pg-compare`), which the profile used to leave out [#52]
 
 - Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
   3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage

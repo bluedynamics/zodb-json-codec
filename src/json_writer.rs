@@ -193,33 +193,75 @@ impl JsonWriter {
 }
 
 /// Write JSON-escaped string content (without surrounding quotes) to a String.
+const ONES: u64 = 0x0101_0101_0101_0101;
+const HIGHS: u64 = 0x8080_8080_8080_8080;
+const LOWS: u64 = 0x7f7f_7f7f_7f7f_7f7f;
+
+/// High bit set in every byte of `v` that is zero, exact per byte: the carry
+/// of `(b & 0x7f) + 0x7f` never leaves its byte.
+#[inline(always)]
+fn zero_bytes(v: u64) -> u64 {
+    !(((v & LOWS) + LOWS) | v) & HIGHS
+}
+
+/// High bit set in every byte of the chunk that needs escaping in a JSON
+/// string: below 0x20 (the top three bits clear), `"` or `\`.
+#[inline(always)]
+fn escape_mask(chunk: u64) -> u64 {
+    zero_bytes(chunk & (ONES * 0xe0))
+        | zero_bytes(chunk ^ (ONES * u64::from(b'"')))
+        | zero_bytes(chunk ^ (ONES * u64::from(b'\\')))
+}
+
+/// The JSON escape of one byte that needs it (below 0x20, `"` or `\`).
+#[inline(always)]
+fn push_escape(buf: &mut String, b: u8) {
+    match b {
+        b'"' => buf.push_str("\\\""),
+        b'\\' => buf.push_str("\\\\"),
+        b'\n' => buf.push_str("\\n"),
+        b'\r' => buf.push_str("\\r"),
+        b'\t' => buf.push_str("\\t"),
+        _ => {
+            buf.push_str("\\u00");
+            buf.push(HEX[(b >> 4) as usize] as char);
+            buf.push(HEX[(b & 0xf) as usize] as char);
+        }
+    }
+}
+
 #[inline]
 fn write_escaped(buf: &mut String, s: &str) {
-    // Single pass: copy runs of bytes that need no escaping with one
-    // push_str each; only the escaped byte itself is handled specially.
-    // Every escaped byte is ASCII, so slicing at its index is always on a
-    // char boundary.
+    // Eight bytes at a time: one SWAR mask marks the bytes that need an
+    // escape, clean chunks are skipped and clean runs are copied whole.
+    // Every escaped byte is ASCII, so slicing at its index is on a char
+    // boundary; multi-byte chars are never split, whatever chunk they
+    // straddle. A plain byte loop here was compiled up to 1.8x slower for
+    // long strings in PGO builds (#52); the explicit scan does not depend on
+    // the optimizer's unrolling decisions.
     let bytes = s.as_bytes();
     let mut start = 0;
-    for (i, &b) in bytes.iter().enumerate() {
+    let mut i = 0;
+    while i + 8 <= bytes.len() {
+        let chunk = u64::from_le_bytes(bytes[i..i + 8].try_into().expect("8 bytes"));
+        let mut mask = escape_mask(chunk);
+        while mask != 0 {
+            let at = i + (mask.trailing_zeros() / 8) as usize;
+            buf.push_str(&s[start..at]);
+            push_escape(buf, bytes[at]);
+            start = at + 1;
+            mask &= mask - 1;
+        }
+        i += 8;
+    }
+    for (j, &b) in bytes[i..].iter().enumerate() {
         if b >= 0x20 && b != b'"' && b != b'\\' {
             continue;
         }
-        buf.push_str(&s[start..i]);
-        match b {
-            b'"' => buf.push_str("\\\""),
-            b'\\' => buf.push_str("\\\\"),
-            b'\n' => buf.push_str("\\n"),
-            b'\r' => buf.push_str("\\r"),
-            b'\t' => buf.push_str("\\t"),
-            _ => {
-                const HEX: &[u8; 16] = b"0123456789abcdef";
-                buf.push_str("\\u00");
-                buf.push(HEX[(b >> 4) as usize] as char);
-                buf.push(HEX[(b & 0xf) as usize] as char);
-            }
-        }
-        start = i + 1;
+        let at = i + j;
+        buf.push_str(&s[start..at]);
+        push_escape(buf, b);
+        start = at + 1;
     }
     buf.push_str(&s[start..]);
 }
@@ -486,5 +528,62 @@ mod tests {
             w.as_str(),
             "\"000ff0ff\",\"YQBi\",\"mod.sub.Cls\\\"q\",\"Bare\",\"@ns:awA=\":"
         );
+    }
+
+    fn reference_escape(s: &str) -> String {
+        let mut out = String::new();
+        for ch in s.chars() {
+            match ch {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+                c => out.push(c),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn test_write_escaped_every_offset_matches_reference() {
+        // an escape byte at every offset of strings up to 40 bytes: inside,
+        // at and across the 8-byte chunk boundaries and in the short tail (#52)
+        let escapes = [b'"', b'\\', b'\n', b'\r', b'\t', 0x00, 0x01, 0x1f];
+        for len in 0..40 {
+            for &esc in &escapes {
+                for pos in 0..=len {
+                    let mut bytes: Vec<u8> = (0..len).map(|i| b'a' + (i % 26) as u8).collect();
+                    bytes.insert(pos, esc);
+                    let s = String::from_utf8(bytes).unwrap();
+                    let mut buf = String::new();
+                    write_escaped(&mut buf, &s);
+                    assert_eq!(buf, reference_escape(&s), "len {len} esc {esc:#x} pos {pos}");
+                }
+            }
+        }
+        // multi-byte chars around the 8-byte boundary, with and without an escape after them
+        let euro9 = "\u{20ac}".repeat(9);
+        let samples = [
+            "abcdef\u{e9}\"".to_string(),
+            "abcdef\u{20ac}\n".to_string(),
+            "abcde\u{1f600}x\\y".to_string(),
+            "\u{1f600}\u{1f600}\u{1f600}\"".to_string(),
+            "\u{e9}".repeat(20),
+            format!("{euro9}\t{euro9}"),
+            String::new(),
+            "1234567".to_string(),
+            "12345678".to_string(),
+            "\"\\\n\t\r\u{1}\u{1f}\"".to_string(),
+            "a\"b\"c\"d\"e\"f\"g\"h\"i".to_string(),
+            "\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}\u{7f}".to_string(),
+            "\u{a2}\u{22}\u{a2}\u{22}\u{a2}\u{22}\u{a2}\u{22}".to_string(),
+        ];
+        for s in samples {
+            let mut buf = String::new();
+            write_escaped(&mut buf, &s);
+            assert_eq!(buf, reference_escape(&s), "{s:?}");
+        }
     }
 }
