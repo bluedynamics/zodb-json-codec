@@ -1,3 +1,4 @@
+use crate::escape;
 use crate::error::CodecError;
 use crate::opcodes::*;
 use crate::types::{InstanceData, PickleValue};
@@ -211,17 +212,17 @@ impl<'a> Decoder<'a> {
                 }
                 STRING => {
                     let line = self.read_line()?;
-                    let s = std::str::from_utf8(line).map_err(|_| CodecError::InvalidUtf8)?;
-                    let s = s.trim();
-                    // STRING values are repr'd: strip quotes
-                    let inner = if (s.starts_with('\'') && s.ends_with('\''))
-                        || (s.starts_with('"') && s.ends_with('"'))
-                    {
-                        &s[1..s.len() - 1]
-                    } else {
-                        s
-                    };
-                    self.push(PickleValue::Bytes(inner.as_bytes().to_vec()));
+                    // CPython requires matching quotes around a bytes repr
+                    let quoted = line.len() >= 2
+                        && line[0] == line[line.len() - 1]
+                        && (line[0] == b'\'' || line[0] == b'"');
+                    if !quoted {
+                        return Err(CodecError::InvalidData(
+                            "STRING opcode argument must be quoted".to_string(),
+                        ));
+                    }
+                    let body = escape::unescape_string_repr(&line[1..line.len() - 1])?;
+                    self.push(PickleValue::Bytes(body));
                 }
 
                 // -- Unicode strings --
@@ -241,8 +242,7 @@ impl<'a> Decoder<'a> {
                 }
                 UNICODE => {
                     let line = self.read_line()?;
-                    let s = std::str::from_utf8(line).map_err(|_| CodecError::InvalidUtf8)?;
-                    self.push(PickleValue::String(s.to_string()));
+                    self.push(PickleValue::String(escape::decode_raw_unicode_escape(line)?));
                 }
                 BINUNICODE8 => {
                     let n = self.read_u64()?;
@@ -627,27 +627,18 @@ impl<'a> Decoder<'a> {
                                     }
                                 }
                                 _ => {
-                                    // Can't decompose further — wrap as-is
-                                    self.push_at(PickleValue::Instance(Box::new(InstanceData {
-                                        module: String::new(),
-                                        name: String::new(),
+                                    // BUILD after REDUCE/NEWOBJ on a callable that is not a
+                                    // Global (e.g. the result of another REDUCE): the Reduce
+                                    // keeps the state and re-encodes as
+                                    // `callable args REDUCE|NEWOBJ state BUILD` (#25).
+                                    self.push_at(PickleValue::Reduce {
+                                        callable,
+                                        args,
                                         dict_items,
                                         list_items,
-                                        state: Box::new(PickleValue::Dict(vec![
-                                            (
-                                                PickleValue::String("@callable".to_string()),
-                                                *callable,
-                                            ),
-                                            (
-                                                PickleValue::String("@args".to_string()),
-                                                *args,
-                                            ),
-                                            (
-                                                PickleValue::String("@state".to_string()),
-                                                state,
-                                            ),
-                                        ])),
-                                    })), Self::nest(build_depth)?);
+                                        newobj,
+                                        state: Some(Box::new(state)),
+                                    }, build_depth);
                                 }
                             }
                         }

@@ -1350,6 +1350,15 @@ fn try_decode_single_key_marker(
                 return Ok(Some(PickleValue::Dict(pairs)));
             }
         }
+        "@inst" => {
+            return Ok(Some(PickleValue::Instance(Box::new(InstanceData {
+                module: String::new(),
+                name: String::new(),
+                state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
+                dict_items: None,
+                list_items: None,
+            }))));
+        }
         "@set" => {
             if let Ok(list) = v.cast::<PyList>() {
                 let items: PyResult<Vec<PickleValue>> = list
@@ -2039,6 +2048,24 @@ thread_local! {
         const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Run `f` on the thread-local encode buffer. If it is already borrowed (an
+/// `encode_zodb_record` re-entered from Python code that runs inside an outer
+/// encode) `f` gets a fresh local buffer instead of a panic (#25).
+fn with_encode_buf<R>(f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    ENCODE_BUF.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut buf) => f(&mut buf),
+        Err(_) => f(&mut Vec::new()),
+    })
+}
+
+/// Same for the class pickle cache: a re-entrant call works on an empty cache.
+fn with_class_cache<R>(f: impl FnOnce(&mut Vec<(String, String, Vec<u8>)>) -> R) -> R {
+    CLASS_PICKLE_CACHE.with(|cell| match cell.try_borrow_mut() {
+        Ok(mut cache) => f(&mut cache),
+        Err(_) => f(&mut Vec::new()),
+    })
+}
+
 /// Build the class pickle bytes for a ZODB record: PROTO 2 + ((module, name), None) + STOP.
 /// This is the format produced by ZODB's PersistentPickler and expected
 /// by ZODB's standard unpickling (ObjectReader and zodb_unpickle).
@@ -2061,15 +2088,13 @@ pub fn encode_zodb_record_direct(
     name: &str,
     state_obj: &Bound<'_, pyo3::PyAny>,
 ) -> PyResult<Py<PyBytes>> {
-    ENCODE_BUF.with(|cell| {
-        let mut buf = cell.borrow_mut();
+    with_encode_buf(|buf| {
         buf.clear(); // keep capacity from previous calls
 
         let btree_info = btrees::classify_btree(module, name);
 
         // Class pickle: use cached bytes (identical for all records of same class)
-        CLASS_PICKLE_CACHE.with(|cache_cell| {
-            let mut cache = cache_cell.borrow_mut();
+        with_class_cache(|cache| {
             if let Some(pos) = cache.iter().position(|(m, n, _)| m == module && n == name) {
                 buf.extend_from_slice(&cache[pos].2);
                 // Move-to-front: hot classes stay at the head of the scan.
@@ -2089,13 +2114,13 @@ pub fn encode_zodb_record_direct(
         // State pickle: PROTO 2 + state opcodes + STOP
         buf.extend_from_slice(&[PROTO, 2]);
         if let Some(info) = btree_info {
-            encode_btree_state_to_pickle(&info, state_obj, &mut buf, true)?;
+            encode_btree_state_to_pickle(&info, state_obj, buf, true)?;
         } else {
-            encode_pyobject_to_pickle(state_obj, &mut buf, true)?;
+            encode_pyobject_to_pickle(state_obj, buf, true)?;
         }
         buf.push(STOP);
 
-        let bytes: Py<PyBytes> = PyBytes::new(py, &buf).into();
+        let bytes: Py<PyBytes> = PyBytes::new(py, buf).into();
         if buf.capacity() > MAX_RETAINED_CAPACITY {
             // one huge record must not pin its buffer for the thread's lifetime
             *buf = Vec::new();
@@ -2376,6 +2401,18 @@ fn try_encode_marker_to_pickle(
     expand_refs: bool,
 ) -> PyResult<bool> {
     match key {
+        "@inst" => {
+            // anonymous instance: defer to the PickleValue encoder like the other complex markers
+            let pv = PickleValue::Instance(Box::new(InstanceData {
+                module: String::new(),
+                name: String::new(),
+                state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
+                dict_items: None,
+                list_items: None,
+            }));
+            encode_value_into(&pv, buf)?;
+            Ok(true)
+        }
         "@ref" => {
             if expand_refs {
                 // Oid only: "0000000000000003" -> (oid, None) BINPERSID
@@ -3012,5 +3049,34 @@ mod tests {
         assert_eq!(bytes[0], PROTO);
         assert_eq!(bytes[1], 2);
         assert_eq!(*bytes.last().unwrap(), STOP);
+    }
+}
+
+#[cfg(test)]
+mod reentrancy_tests {
+    use super::{with_class_cache, with_encode_buf};
+
+    #[test]
+    fn nested_encode_buf_keeps_outer_content() {
+        let (outer, inner) = with_encode_buf(|outer| {
+            outer.clear();
+            outer.extend_from_slice(b"outer");
+            let inner = with_encode_buf(|inner| {
+                inner.extend_from_slice(b"in");
+                inner.to_vec()
+            });
+            (outer.to_vec(), inner)
+        });
+        assert_eq!(outer, b"outer");
+        assert_eq!(inner, b"in");
+    }
+
+    #[test]
+    fn nested_class_cache_does_not_panic() {
+        with_class_cache(|outer| {
+            outer.push(("m".to_string(), "C".to_string(), vec![1]));
+            with_class_cache(|inner| assert!(inner.is_empty()));
+            assert_eq!(outer.len(), 1);
+        });
     }
 }

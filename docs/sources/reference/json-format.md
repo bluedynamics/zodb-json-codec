@@ -248,7 +248,10 @@ Optional keys inside `@reduce`:
   instead of calling the callable (`REDUCE`). Absent means `REDUCE`.
 
 `state`
-: `BUILD` state that followed a `REDUCE` with non-empty arguments.
+: `BUILD` state that followed the call: after a `REDUCE` with non-empty
+  arguments, or after a `REDUCE`/`NEWOBJ` whose callable is not a global (the
+  result of another `REDUCE`, for example a `functools.partial`), with any
+  arguments.
 
 ```json
 {
@@ -277,7 +280,9 @@ such instances.
 Keys starting with `@` inside an instance state are reserved for the codec:
 a state that is exactly `{"@args": ..., "@state": ...}` is always read as
 constructor arguments plus state. A `@reduce` with both `newobj` and `state`
-is accepted (it encodes like the `@cls`/`@s` form above) but never written.
+is written only when the class itself is not a global (`NEWOBJ` on a class
+pickled by value, then `BUILD`); for a global class the `@cls`/`@s` form above
+is used. Readers accept both.
 
 ### `@ns` -- String with NUL bytes (PostgreSQL storage)
 
@@ -298,6 +303,21 @@ The encoders (`encode_zodb_record`, `json_to_pickle`) restore both forms.
 Keys that genuinely start with `@ns:` are escaped the same way by every
 decode path, so they survive a round trip too. Single-key dicts `{"@ns": str}`
 are reserved for the marker, like every other `@`-prefixed single-key dict.
+
+### `@inst` -- BUILD on a non-instance
+
+`BUILD` applied to a value that is not a class instance (a corrupt or hand-made
+pickle) is kept as an anonymous instance and re-encoded as `value state BUILD`:
+
+```json
+{"@inst": {"@obj": {}, "@state": {}}}
+```
+
+Releases before 1.7.0 also wrote `{"@inst": {"@callable": ..., "@args": ...,
+"@state": ...}}` for `BUILD` after a `REDUCE` whose callable is not a global;
+that stored form is still read and encodes as `callable args REDUCE state
+BUILD`. New output uses `@reduce` with the `state` key instead. Any other
+`@inst` content is rejected by the encoders.
 
 ### `@pkl` -- Raw Pickle Escape Hatch
 

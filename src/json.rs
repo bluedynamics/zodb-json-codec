@@ -244,6 +244,11 @@ pub fn pickle_value_to_json_string_pg(
 /// Write the PG JSON for `val` into the thread-local buffer (capacity is
 /// retained across calls). Read it back with `with_json_buf` on the same
 /// thread before the next call overwrites it.
+///
+/// The `borrow_mut` cannot collide with a re-entrant call: the write runs with
+/// the GIL released (no Python code can run on this thread meanwhile) and the
+/// read in `with_json_buf` follows before anything that can run Python code
+/// (#23), so no `try_borrow_mut` fallback is needed here (#25).
 pub fn write_json_string_pg_to_buf(
     val: &PickleValue,
     module: &str,
@@ -763,6 +768,15 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                 return Ok(pv);
             }
             // Check for instance: has both @cls and @s
+            if let (Some(v), 1) = (map.get("@inst"), map.len()) {
+                return Ok(PickleValue::Instance(Box::new(InstanceData {
+                    module: String::new(),
+                    name: String::new(),
+                    state: Box::new(json_to_pickle_value(v)?),
+                    dict_items: None,
+                    list_items: None,
+                })));
+            }
             if map.contains_key("@cls") && map.contains_key("@s") {
                 if let Some(Value::Array(cls)) = map.get("@cls") {
                     if cls.len() == 2 {

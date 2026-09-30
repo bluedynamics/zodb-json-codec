@@ -1,6 +1,7 @@
 mod btrees;
 mod decode;
 mod encode;
+mod escape;
 mod error;
 mod json;
 mod json_writer;

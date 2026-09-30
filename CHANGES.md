@@ -8,6 +8,25 @@
   re-entrancy the extension no longer has to consider. 3.15 wheels follow once
   the release is out [#41]
 
+- Protocol 0 text opcodes decode like CPython: `STRING` unescapes the bytes repr
+  (`\'`, `\xNN`, octal, ...; it used to keep the backslashes) and requires the
+  quotes, `UNICODE` is read as raw-unicode-escape (Latin-1 bytes plus `\uXXXX`;
+  non-ASCII used to raise `InvalidUtf8` and `\u` escapes stayed literal); lone
+  surrogate escapes are rejected, like invalid UTF-8 on the `BINUNICODE` path
+  [#25]
+
+- Anonymous instances (`@inst`) round-trip: `BUILD` after a `REDUCE`/`NEWOBJ`
+  whose callable is not a global now decodes to `@reduce` with `state` and
+  re-encodes faithfully; `@inst` written by earlier releases (`@callable`,
+  `@args`, `@state`) and `BUILD` on a non-instance (`@obj`, `@state`) are read
+  by all encoder paths, which used to write them back as a plain dict or as a
+  `GLOBAL` with empty module and name [#25]
+
+- `encode_zodb_record` no longer panics with `already borrowed` if it is
+  re-entered on the same thread while an encode is running: the thread-local
+  buffer and class cache fall back to a fresh local one for the inner call
+  [#25]
+
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
   the compact `["oid", "module.Class"]` form is now only recognized when both
