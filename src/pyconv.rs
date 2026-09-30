@@ -1076,8 +1076,8 @@ fn pydict_to_pickle_value(
                         module,
                         name,
                         state: Box::new(state),
-                        dict_items: None,
-                        list_items: None,
+                        dict_items: dict_items_from_pyobject(dict.get_item(intern!(py, "@items"))?, expand_refs)?,
+                        list_items: list_items_from_pyobject(dict.get_item(intern!(py, "@appends"))?, expand_refs)?,
                     })));
                 }
                 return Ok(PickleValue::Global { module, name });
@@ -1185,20 +1185,7 @@ fn pydict_to_pickle_value(
     // @reduce — Generic reduce
     if let Some(v) = dict.get_item(intern!(py, "@reduce"))? {
         if let Ok(reduce_dict) = v.cast::<PyDict>() {
-            let callable_obj = reduce_dict
-                .get_item(intern!(py, "callable"))?
-                .unwrap_or_else(|| py.None().into_bound(py));
-            let args_obj = reduce_dict
-                .get_item(intern!(py, "args"))?
-                .unwrap_or_else(|| py.None().into_bound(py));
-            let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
-            let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
-            return Ok(PickleValue::Reduce {
-                callable: Box::new(callable),
-                args: Box::new(args),
-                dict_items: None,
-                list_items: None,
-            });
+            return reduce_dict_to_pickle_value(py, reduce_dict, expand_refs);
         }
     }
 
@@ -1374,20 +1361,7 @@ fn try_decode_single_key_marker(
         }
         "@reduce" => {
             if let Ok(reduce_dict) = v.cast::<PyDict>() {
-                let callable_obj = reduce_dict
-                    .get_item(intern!(py, "callable"))?
-                    .unwrap_or_else(|| py.None().into_bound(py));
-                let args_obj = reduce_dict
-                    .get_item(intern!(py, "args"))?
-                    .unwrap_or_else(|| py.None().into_bound(py));
-                let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
-                let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
-                return Ok(Some(PickleValue::Reduce {
-                    callable: Box::new(callable),
-                    args: Box::new(args),
-                    dict_items: None,
-                    list_items: None,
-                }));
+                return Ok(Some(reduce_dict_to_pickle_value(py, reduce_dict, expand_refs)?));
             }
         }
         _ => {}
@@ -1398,6 +1372,59 @@ fn try_decode_single_key_marker(
 // ---------------------------------------------------------------------------
 // Reverse: persistent ref expansion
 // ---------------------------------------------------------------------------
+
+/// `[[k, v], ...]` (JSON `items` / `@items`) to SETITEMS pairs.
+fn dict_items_from_pyobject(
+    v: Option<Bound<'_, pyo3::PyAny>>,
+    expand_refs: bool,
+) -> PyResult<Option<Box<Vec<(PickleValue, PickleValue)>>>> {
+    let Some(v) = v else { return Ok(None) };
+    let list = v.cast::<PyList>()?;
+    let mut pairs = Vec::with_capacity(list.len());
+    for pair_obj in list.iter() {
+        let pair = pair_obj.cast::<PyList>()?;
+        if pair.len() != 2 {
+            return Err(CodecError::InvalidData("items entry must be [key, value]".into()).into());
+        }
+        pairs.push((
+            pyobject_to_pickle_value(&pair.get_item(0)?, expand_refs)?,
+            pyobject_to_pickle_value(&pair.get_item(1)?, expand_refs)?,
+        ));
+    }
+    Ok(Some(Box::new(pairs)))
+}
+
+/// `[v, ...]` (JSON `appends` / `@appends`) to APPENDS items.
+fn list_items_from_pyobject(
+    v: Option<Bound<'_, pyo3::PyAny>>,
+    expand_refs: bool,
+) -> PyResult<Option<Box<Vec<PickleValue>>>> {
+    let Some(v) = v else { return Ok(None) };
+    let list = v.cast::<PyList>()?;
+    let items: PyResult<Vec<PickleValue>> =
+        list.iter().map(|i| pyobject_to_pickle_value(&i, expand_refs)).collect();
+    Ok(Some(Box::new(items?)))
+}
+
+/// `{"callable": ..., "args": ..., "items": ..., "appends": ...}` to a Reduce.
+fn reduce_dict_to_pickle_value(
+    py: Python<'_>,
+    reduce_dict: &Bound<'_, PyDict>,
+    expand_refs: bool,
+) -> PyResult<PickleValue> {
+    let callable_obj = reduce_dict
+        .get_item(intern!(py, "callable"))?
+        .unwrap_or_else(|| py.None().into_bound(py));
+    let args_obj = reduce_dict
+        .get_item(intern!(py, "args"))?
+        .unwrap_or_else(|| py.None().into_bound(py));
+    Ok(PickleValue::Reduce {
+        callable: Box::new(pyobject_to_pickle_value(&callable_obj, expand_refs)?),
+        args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
+        dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs)?,
+        list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs)?,
+    })
+}
 
 /// Expand a compact ZODB persistent ref from Py<PyAny>.
 fn expand_compact_ref(ref_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue> {
@@ -2021,6 +2048,16 @@ fn encode_pydict_to_pickle(
                 ) {
                     let module = mod_py.to_str()?;
                     let name = name_py.to_str()?;
+
+                    // Instances with SETITEMS/APPENDS data need the PickleValue path,
+                    // which emits items before BUILD like CPython does.
+                    if dict.get_item(intern!(py, "@items"))?.is_some()
+                        || dict.get_item(intern!(py, "@appends"))?.is_some()
+                    {
+                        let pv = pydict_to_pickle_value(dict, expand_refs)?;
+                        encode_value_into(&pv, buf)?;
+                        return Ok(());
+                    }
 
                     if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
                         // Instance: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
