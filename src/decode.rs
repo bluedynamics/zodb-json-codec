@@ -57,6 +57,22 @@ struct Decoder<'a> {
     meta_depth: Vec<Vec<u32>>,
     /// Depth of each memo entry (parallel to memo).
     memo_depth: Vec<u32>,
+    /// Which memo indices are ever read by a GET/BINGET/LONG_BINGET in this
+    /// stream (pre-scanned). Puts to any other index are skipped entirely:
+    /// no clone at BINPUT, no binding bookkeeping, no dirty sync at pop.
+    memo_needed: MemoNeeds,
+    /// Number of memo puts seen so far (MEMOIZE's auto-index, protocol 4:
+    /// CPython uses `len(memo)`). Counted even when the put is skipped, so
+    /// later indices stay aligned.
+    memoize_count: usize,
+}
+
+/// Result of the memo-read pre-scan.
+enum MemoNeeds {
+    /// The scan could not follow the stream; keep every memo entry.
+    All,
+    /// Exactly these indices are read; anything else is never looked at again.
+    Only(Vec<bool>),
 }
 
 impl<'a> Decoder<'a> {
@@ -73,6 +89,8 @@ impl<'a> Decoder<'a> {
             depth: Vec::with_capacity(16),
             meta_depth: Vec::with_capacity(4),
             memo_depth: Vec::with_capacity(16),
+            memo_needed: scan_memo_reads(data),
+            memoize_count: 0,
         }
     }
 
@@ -713,24 +731,17 @@ impl<'a> Decoder<'a> {
                 // -- Memo --
                 BINPUT => {
                     let idx = self.read_u8()? as usize;
-                    let val = self.peek_value()?.clone();
-                    let d = self.top_depth();
-                    self.memo_put(idx, val, d)?;
-                    self.record_memo_binding(idx);
+                    self.memo_store(idx)?;
                 }
                 LONG_BINPUT => {
                     let idx = self.read_u32()? as usize;
-                    let val = self.peek_value()?.clone();
-                    let d = self.top_depth();
-                    self.memo_put(idx, val, d)?;
-                    self.record_memo_binding(idx);
+                    self.memo_store(idx)?;
                 }
                 MEMOIZE => {
-                    let val = self.peek_value()?.clone();
-                    let idx = self.memo.len();
-                    let d = self.top_depth();
-                    self.memo_put(idx, val, d)?;
-                    self.record_memo_binding(idx);
+                    // CPython: memo[len(memo)] = top; the index is the number of
+                    // memo puts so far, whether or not they were stored.
+                    let idx = self.memoize_count;
+                    self.memo_store(idx)?;
                 }
                 BINGET => {
                     let idx = self.read_u8()? as usize;
@@ -749,10 +760,7 @@ impl<'a> Decoder<'a> {
                         .trim()
                         .parse()
                         .map_err(|e| CodecError::InvalidData(format!("PUT index: {e}")))?;
-                    let val = self.peek_value()?.clone();
-                    let d = self.top_depth();
-                    self.memo_put(idx, val, d)?;
-                    self.record_memo_binding(idx);
+                    self.memo_store(idx)?;
                 }
                 GET => {
                     let line = self.read_line()?;
@@ -951,6 +959,36 @@ impl<'a> Decoder<'a> {
 
     // -- Memo operations --
 
+    /// True if some later opcode reads memo entry `idx`.
+    #[inline]
+    fn memo_needed(&self, idx: usize) -> bool {
+        match &self.memo_needed {
+            MemoNeeds::All => true,
+            MemoNeeds::Only(needed) => needed.get(idx).copied().unwrap_or(false),
+        }
+    }
+
+    /// Store the stack top in memo slot `idx`, but only if something later
+    /// reads that slot; skipping the put avoids the clone entirely (#22).
+    #[inline]
+    fn memo_store(&mut self, idx: usize) -> Result<(), CodecError> {
+        if idx >= MAX_MEMO_SIZE {
+            return Err(CodecError::InvalidData(format!(
+                "memo index {idx} exceeds maximum {MAX_MEMO_SIZE}"
+            )));
+        }
+        self.peek_value()?; // the stack must not be empty even when the put is skipped
+        self.memoize_count += 1;
+        if !self.memo_needed(idx) {
+            return Ok(());
+        }
+        let val = self.peek_value()?.clone();
+        let d = self.top_depth();
+        self.memo_put(idx, val, d)?;
+        self.record_memo_binding(idx);
+        Ok(())
+    }
+
     fn memo_put(&mut self, idx: usize, val: PickleValue, depth: u32) -> Result<(), CodecError> {
         if idx >= MAX_MEMO_SIZE {
             return Err(CodecError::InvalidData(format!("memo index {idx} exceeds maximum {MAX_MEMO_SIZE}")));
@@ -1026,6 +1064,124 @@ impl<'a> Decoder<'a> {
             }
         }
     }
+}
+
+/// Pre-scan the opcode stream and collect the memo indices that are read by
+/// GET / BINGET / LONG_BINGET. Everything else the pickler memoized (in
+/// protocol 2/3 that is every string and every container) is never looked
+/// at again, so the decoder can skip those puts.
+///
+/// The walk uses the same argument-length rules as the decoder, so it never
+/// gets ahead of what the decoder itself parses: wherever the walk stops on
+/// truncated input, the decoder fails at the same opcode. On an opcode it
+/// cannot size it gives up and reports `MemoNeeds::All`. A ZODB record is
+/// two pickles sharing one memo: the caller passes the whole record.
+fn scan_memo_reads(data: &[u8]) -> MemoNeeds {
+    fn mark(needed: &mut Vec<bool>, idx: usize) {
+        if idx < MAX_MEMO_SIZE {
+            if idx >= needed.len() {
+                needed.resize(idx + 1, false);
+            }
+            needed[idx] = true;
+        }
+    }
+    fn skip_line(data: &[u8], mut pos: usize) -> usize {
+        while pos < data.len() && data[pos] != b'\n' {
+            pos += 1;
+        }
+        pos + 1
+    }
+
+    let mut needed: Vec<bool> = Vec::new();
+    let n = data.len();
+    let mut pos = 0usize;
+    while pos < n {
+        let op = data[pos];
+        pos += 1;
+        match op {
+            BINGET => {
+                if pos >= n {
+                    break;
+                }
+                mark(&mut needed, data[pos] as usize);
+                pos += 1;
+            }
+            LONG_BINGET => {
+                if pos + 4 > n {
+                    break;
+                }
+                let idx = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                mark(&mut needed, idx);
+                pos += 4;
+            }
+            GET => {
+                let end = skip_line(data, pos);
+                if let Ok(s) = std::str::from_utf8(&data[pos..(end - 1).min(n)]) {
+                    if let Ok(idx) = s.trim().parse::<usize>() {
+                        mark(&mut needed, idx);
+                    }
+                }
+                pos = end;
+            }
+            STOP | NONE | NEWTRUE | NEWFALSE | EMPTY_DICT | EMPTY_LIST | EMPTY_TUPLE
+            | EMPTY_SET | MARK | POP | DUP | APPEND | APPENDS | BUILD | SETITEM | SETITEMS
+            | ADDITEMS | REDUCE | NEWOBJ | BINPERSID | TUPLE | TUPLE1 | TUPLE2 | TUPLE3
+            | LIST | DICT | FROZENSET | STACK_GLOBAL | MEMOIZE | NEWOBJ_EX => {}
+            PROTO | BININT1 | BINPUT => pos += 1,
+            BININT2 => pos += 2,
+            BININT | LONG_BINPUT => pos += 4,
+            BINFLOAT | FRAME => pos += 8,
+            BINUNICODE | BINSTRING | BINBYTES => {
+                if pos + 4 > n {
+                    break;
+                }
+                let len = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+                pos += 4;
+                pos = match pos.checked_add(len) {
+                    Some(p) => p,
+                    None => break,
+                };
+            }
+            SHORT_BINUNICODE | SHORT_BINSTRING | SHORT_BINBYTES | LONG1 => {
+                if pos >= n {
+                    break;
+                }
+                let len = data[pos] as usize;
+                pos += 1 + len;
+            }
+            BINUNICODE8 | BINBYTES8 => {
+                if pos + 8 > n {
+                    break;
+                }
+                let len = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                pos += 8;
+                pos = match usize::try_from(len).ok().and_then(|l| pos.checked_add(l)) {
+                    Some(p) => p,
+                    None => break,
+                };
+            }
+            LONG4 => {
+                if pos + 4 > n {
+                    break;
+                }
+                let len = i32::from_le_bytes(data[pos..pos + 4].try_into().unwrap());
+                pos += 4;
+                if len < 0 {
+                    break;
+                }
+                pos += len as usize;
+            }
+            INT | LONG | FLOAT | STRING | UNICODE | PUT | PERSID => {
+                pos = skip_line(data, pos);
+            }
+            GLOBAL => {
+                pos = skip_line(data, pos);
+                pos = skip_line(data, pos);
+            }
+            _ => return MemoNeeds::All,
+        }
+    }
+    MemoNeeds::Only(needed)
 }
 
 /// Convert a flat list [k1, v1, k2, v2, ...] into pairs [(k1, v1), (k2, v2), ...].
@@ -1558,6 +1714,121 @@ mod tests {
             assert_eq!(items[0].1, PickleValue::Int(1));
         } else {
             panic!("expected Instance, got {:?}", result);
+        }
+    }
+
+    fn run_decoder(data: &[u8]) -> (Result<PickleValue, CodecError>, usize) {
+        let mut d = Decoder::new(data);
+        let r = d.run();
+        (r, d.memo.len())
+    }
+
+    #[test]
+    fn test_prescan_skips_unread_puts() {
+        // {"k": "v"} as CPython writes it: every value memoized, nothing read
+        let data: &[u8] = &[
+            0x80, 0x03, b'}', b'q', 0x00, b'X', 1, 0, 0, 0, b'k', b'q', 0x01, b'X', 1, 0, 0, 0,
+            b'v', b'q', 0x02, b's', b'.',
+        ];
+        let (result, memo_len) = run_decoder(data);
+        assert_eq!(
+            result.unwrap(),
+            PickleValue::Dict(vec![(PickleValue::String("k".into()), PickleValue::String("v".into()))])
+        );
+        assert_eq!(memo_len, 0, "no memo entry may be stored when nothing reads it");
+    }
+
+    #[test]
+    fn test_prescan_keeps_read_entry_and_dirty_sync() {
+        // EMPTY_DICT BINPUT 0 MARK "a" 1 SETITEMS BINGET 0 TUPLE2 STOP: the read
+        // index is kept and the 1.6.0 dirty sync still delivers the filled dict
+        let data: &[u8] = &[
+            0x80, 0x03, b'}', b'q', 0x00, b'(', b'X', 1, 0, 0, 0, b'a', b'K', 0x01, b'u', b'h',
+            0x00, 0x86, b'.',
+        ];
+        let (result, memo_len) = run_decoder(data);
+        let filled = PickleValue::Dict(vec![(PickleValue::String("a".into()), PickleValue::Int(1))]);
+        assert_eq!(result.unwrap(), PickleValue::Tuple(vec![filled.clone(), filled]));
+        assert_eq!(memo_len, 1);
+    }
+
+    #[test]
+    fn test_prescan_read_before_fill() {
+        // EMPTY_DICT BINPUT 0 BINGET 0 TUPLE2 STOP: read with no fill in between
+        let data: &[u8] = &[0x80, 0x03, b'}', b'q', 0x00, b'h', 0x00, 0x86, b'.'];
+        let (result, _) = run_decoder(data);
+        assert_eq!(
+            result.unwrap(),
+            PickleValue::Tuple(vec![PickleValue::Dict(vec![]), PickleValue::Dict(vec![])])
+        );
+    }
+
+    #[test]
+    fn test_prescan_overwritten_index() {
+        // BININT1 1 BINPUT 0 POP BININT1 2 BINPUT 0 BINGET 0 TUPLE1 STOP -> (2,)
+        let data: &[u8] = &[
+            0x80, 0x03, b'K', 1, b'q', 0x00, b'0', b'K', 2, b'q', 0x00, b'h', 0x00, 0x85, b'.',
+        ];
+        let (result, _) = run_decoder(data);
+        assert_eq!(result.unwrap(), PickleValue::Tuple(vec![PickleValue::Int(2)]));
+    }
+
+    #[test]
+    fn test_prescan_protocol0_put_get() {
+        // ] p0\n g0\n TUPLE2 . -> ([], [])
+        let data: &[u8] = b"]p0\ng0\n\x86.";
+        let (result, memo_len) = run_decoder(data);
+        assert_eq!(
+            result.unwrap(),
+            PickleValue::Tuple(vec![PickleValue::List(vec![]), PickleValue::List(vec![])])
+        );
+        assert_eq!(memo_len, 1);
+    }
+
+    #[test]
+    fn test_prescan_memoize_counts_skipped_puts() {
+        // protocol 4: FRAME, EMPTY_LIST MEMOIZE (index 0, never read), BININT1 1
+        // MEMOIZE (index 1, read), POP, BINGET 1, TUPLE2 -> ([], 1); the second
+        // MEMOIZE must get index 1 although the first put was skipped, or the
+        // BINGET fails
+        let body: &[u8] = &[b']', 0x94, b'K', 1, 0x94, b'0', b'h', 0x01, 0x86, b'.'];
+        let mut data = vec![0x80, 0x04, 0x95];
+        data.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        data.extend_from_slice(body);
+        let (result, memo_len) = run_decoder(&data);
+        assert_eq!(
+            result.unwrap(),
+            PickleValue::Tuple(vec![PickleValue::List(vec![]), PickleValue::Int(1)])
+        );
+        assert_eq!(memo_len, 2, "index 1 is stored, index 0 stays an unused slot");
+    }
+
+    #[test]
+    fn test_prescan_get_of_unput_index_errors() {
+        let data: &[u8] = &[0x80, 0x03, b'h', 0x05, b'.'];
+        let err = decode_pickle(data).unwrap_err();
+        assert!(matches!(err, CodecError::InvalidData(ref m) if m.contains("memo index 5 not found")), "{err:?}");
+    }
+
+    #[test]
+    fn test_prescan_truncated_argument() {
+        // BINUNICODE announces 100 bytes, 3 follow: the scan stops, the decoder fails cleanly
+        let data: &[u8] = &[0x80, 0x03, b'}', b'q', 0x00, b'X', 100, 0, 0, 0, b'a', b'b', b'c'];
+        assert!(matches!(decode_pickle(data), Err(CodecError::UnexpectedEof)));
+        let data: &[u8] = &[0x80, 0x03, b'}', b'q', 0x00, b'X', 1, 0];
+        assert!(matches!(decode_pickle(data), Err(CodecError::UnexpectedEof)));
+    }
+
+    #[test]
+    fn test_prescan_unknown_opcode_keeps_all() {
+        // 0x97 (NEXT_BUFFER) is not sized by the scan: it reports All ...
+        assert!(matches!(scan_memo_reads(&[0x80, 0x03, b'}', b'q', 0x00, 0x97, b'.']), MemoNeeds::All));
+        // ... and the decoder itself still rejects the opcode as before
+        assert!(decode_pickle(&[0x80, 0x03, b'}', b'q', 0x00, 0x97, b'.']).is_err());
+        // a normal stream reports exactly the indices read
+        match scan_memo_reads(&[0x80, 0x03, b'}', b'q', 0x00, b'h', 0x00, b'q', 0x02, b'.']) {
+            MemoNeeds::Only(needed) => assert_eq!(needed, vec![true]),
+            MemoNeeds::All => panic!("expected Only"),
         }
     }
 }
