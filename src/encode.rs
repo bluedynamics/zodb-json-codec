@@ -281,8 +281,17 @@ impl Encoder {
                 self.write_u8(b'\n');
                 self.write_u8(EMPTY_TUPLE);
                 self.write_u8(NEWOBJ);
-                // Dict/list subclass items go before the state, the order CPython's
-                // save_reduce writes them (APPENDS, SETITEMS, then BUILD).
+                // Dict/list subclass items go before the state, in the order CPython's
+                // save_reduce writes them: APPENDS, then SETITEMS, then BUILD.
+                if let Some(items) = list_items {
+                    if !items.is_empty() {
+                        self.write_u8(MARK);
+                        for item in items.iter() {
+                            self.encode_value(item, depth + 1)?;
+                        }
+                        self.write_u8(APPENDS);
+                    }
+                }
                 if let Some(pairs) = dict_items {
                     if !pairs.is_empty() {
                         self.write_u8(MARK);
@@ -291,15 +300,6 @@ impl Encoder {
                             self.encode_value(v, depth + 1)?;
                         }
                         self.write_u8(SETITEMS);
-                    }
-                }
-                if let Some(items) = list_items {
-                    if !items.is_empty() {
-                        self.write_u8(MARK);
-                        for item in items.iter() {
-                            self.encode_value(item, depth + 1)?;
-                        }
-                        self.write_u8(APPENDS);
                     }
                 }
                 self.encode_value(state, depth + 1)?;
@@ -318,7 +318,16 @@ impl Encoder {
                 self.encode_value(callable, depth + 1)?;
                 self.encode_value(args, depth + 1)?;
                 self.write_u8(REDUCE);
-                // Emit post-REDUCE dict items (dict subclasses)
+                // Post-REDUCE items in CPython's save_reduce order: APPENDS, then SETITEMS.
+                if let Some(items) = list_items {
+                    if !items.is_empty() {
+                        self.write_u8(MARK);
+                        for item in items.iter() {
+                            self.encode_value(item, depth + 1)?;
+                        }
+                        self.write_u8(APPENDS);
+                    }
+                }
                 if let Some(pairs) = dict_items {
                     if !pairs.is_empty() {
                         self.write_u8(MARK);
@@ -327,16 +336,6 @@ impl Encoder {
                             self.encode_value(v, depth + 1)?;
                         }
                         self.write_u8(SETITEMS);
-                    }
-                }
-                // Emit post-REDUCE list items (list subclasses)
-                if let Some(items) = list_items {
-                    if !items.is_empty() {
-                        self.write_u8(MARK);
-                        for item in items.iter() {
-                            self.encode_value(item, depth + 1)?;
-                        }
-                        self.write_u8(APPENDS);
                     }
                 }
             }
@@ -504,11 +503,34 @@ mod tests {
         }));
         let bytes = encode_pickle(&val).unwrap();
         // CPython's save_reduce: NEWOBJ, then the items (MARK ... SETITEMS), then state + BUILD.
+        // Byte scan is safe: none of the payload strings contain 'u' (SETITEMS) or 'b' (BUILD).
         let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();
         assert_eq!(bytes[newobj + 1], MARK, "items block must start right after NEWOBJ");
         let last_setitems = bytes.iter().rposition(|&b| b == SETITEMS).unwrap();
         let build = bytes.iter().position(|&b| b == BUILD).unwrap();
         assert!(last_setitems < build, "the items' SETITEMS must precede BUILD");
+        assert_eq!(decode_pickle(&bytes).unwrap(), val);
+    }
+
+    #[test]
+    fn test_instance_appends_emitted_before_setitems() {
+        // CPython's save_reduce writes listitems (APPENDS) before dictitems (SETITEMS).
+        // Byte scan is safe here: no payload string contains 'e' (APPENDS), 'u' (SETITEMS)
+        // or 'b' (BUILD), and the scan starts after NEWOBJ.
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "mod".into(),
+            name: "Cls".into(),
+            state: Box::new(PickleValue::Dict(vec![])),
+            dict_items: Some(Box::new(vec![(PickleValue::Int(1), PickleValue::Int(2))])),
+            list_items: Some(Box::new(vec![PickleValue::Int(3)])),
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();
+        let tail = &bytes[newobj..];
+        let appends = tail.iter().position(|&b| b == APPENDS).unwrap();
+        let setitems = tail.iter().position(|&b| b == SETITEMS).unwrap();
+        let build = tail.iter().position(|&b| b == BUILD).unwrap();
+        assert!(appends < setitems && setitems < build, "expected APPENDS, SETITEMS, BUILD");
         assert_eq!(decode_pickle(&bytes).unwrap(), val);
     }
 
