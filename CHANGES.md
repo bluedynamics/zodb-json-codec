@@ -2,6 +2,11 @@
 
 ## unreleased
 
+- Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
+  (the profile-guided build put the end-of-slice check on the pointer step of
+  the string loop) and the performance page is re-measured with the fixed
+  writer, where the PGO build is the fastest on the storage path [#52]
+
 - PG JSON writer: strings are scanned eight bytes at a time with a SWAR mask
   of the bytes that need escaping (below 0x20, `"`, `\`), so clean runs are
   copied whole and each escape is reached directly. The byte loop it replaces
@@ -17,8 +22,7 @@
 
 - Docs: the performance page is re-measured on 1.7.0 against CPython pickle,
   v1.5.0 and 1.6.1, with and without PGO, one session, build and protocol
-  stated once for every table; the journal's cumulative table follows. PGO
-  turns out to slow the PG JSON pipeline on real records (see #52) [#27]
+  stated once for every table; the journal's cumulative table follows [#27]
 
 - Release wheels: the PGO profile now includes the PG JSON path
   (`bench.py pg-compare`), which the profile used to leave out [#52]

@@ -579,20 +579,121 @@ entry and the pre-scan entry are not additive.
 **Lesson:** on an allocation-bound workload, benchmark the allocator early.
 It was worth more than any single optimization above.
 
+### 22. PGO and the JSON string loop
+
+**Technique:** locate before touching code. The release wheels are PGO builds,
+and entry 21's session showed them slower than a plain build on the PG JSON
+pipeline over the sample database (median 9.8 to 10.9 µs, P95 26 to 37 µs)
+while every synthetic category was equal or faster. Three profile mixes (the
+release recipe, plus `pg-compare`, real data only through the production
+path) and both LTO modes gave the same picture, and `-pgo-warn-missing-function`
+reported no function without profile data, so neither coverage nor a stale
+profile was the cause. Timing every record of the sample under both builds
+(`decode_zodb_record_for_pg_json`, median of 31 interleaved passes) put the
+loss where the non-ASCII text is: the records with 4,700 to 8,300 non-ASCII
+characters cost 1.45 to 1.60x, records of the same size made of references and
+ASCII 1.0 to 1.2x. A probe with one content feature per record then isolated
+it:
+
+| Record (20 values each unless noted) | dict path PGO/plain | JSON path PGO/plain |
+|---|---|---|
+| ASCII, 300 chars | 0.93 | 1.84 |
+| Latin-1 (2-byte UTF-8), 300 chars | 0.98 | 1.52 |
+| Cyrillic (2-byte), 300 chars | 0.95 | 1.51 |
+| CJK (3-byte), 300 chars | 1.01 | 1.57 |
+| ASCII with an escape every 6 bytes, 300 chars | 0.97 | 1.06 |
+| 500 short ASCII strings | 0.96 | 0.94 |
+| 500 short Cyrillic strings | 1.01 | 0.96 |
+
+Only the JSON path, only long strings, and not strings whose time goes into
+the escape branches: that is the clean-run scan of `write_escaped`, the byte
+loop that copies runs of bytes needing no escape. The scan is now explicit:
+eight bytes are loaded at a time and one SWAR mask marks the bytes that need
+an escape (below 0x20, that is the top three bits clear, `"` and `\`, each
+an exact zero-byte test), clean chunks are skipped, and each escape is reached
+through the mask with `trailing_zeros`; only the tail shorter than a chunk
+keeps the byte loop. A first version walked a chunk byte by byte once the
+mask was non-zero and cost 14 to 19% on a string with an escape every six
+bytes; the exact mask made that case faster than before as well. Output is
+byte-identical (the 1,692-record sample and a test that walks every escape
+byte over every offset up to 40 bytes, dense escapes, DEL and high bytes
+next to quotes).
+
+**Why it helps:** the old loop was reproduced in a standalone crate (same
+`opt-level`, `codegen-units = 1`, fat LTO) and built plain and with a profile
+from a workload of the same mix: the profiled binary runs the loop 1.5x
+slower (2.9 to 3.2 versus 4.5 to 4.7 µs per round). The two loop bodies show
+why. Plain:
+
+```text
+.LBB8_2: cmpq %rbp,%r14 ; je .end
+         movq %r14,%rax ; movq %rdx,%rcx ; movzbl (%r14),%ebx
+         cmpq $32,%rbx ; jb .escape ; cmpq $34,%rbx ; je .escape
+         leaq 1(%rax),%r14 ; leaq 1(%rcx),%rdx
+         cmpl $92,%ebx ; jne .LBB8_2
+```
+
+With the profile:
+
+```text
+.LBB8_2: movq %rbx,%r12 ; xorl %ebx,%ebx
+         cmpq %rbp,%rax ; setne %cl ; je .end
+         movb %cl,%bl ; leaq (%rax,%rbx),%r14 ; addq %r12,%rbx
+         movzbl (%rax),%r13d
+         cmpq $32,%r13 ; jb .escape ; cmpq $34,%r13 ; je .escape
+         movq %r14,%rax ; cmpl $92,%r13d ; jne .LBB8_2
+```
+
+The profile-guided build if-converted the end check of the iterator into a
+`setne`-based step: the next pointer is `rax + (rax != end)`, computed
+through `setne`, `movb` and `lea`, so every byte's pointer increment waits
+for the compare instead of being one unconditional `lea`. The loop-carried
+chain grows from about one to about four cycles per byte, and long clean
+runs are where that shows. The chunked scan fixes the shape of the hot path
+in the source: one 8-byte load and about fifteen ALU instructions per chunk
+with a plain `i += 8`, whatever the profile says, and a clean run of any
+length is one `push_str`.
+
+**Impact:** the same probe after the change, minimum of two passes on one
+pinned core (`plain` is the build without PGO):
+
+| Record | fix plain / old plain | fix PGO / fix plain | old PGO / old plain |
+|---|---|---|---|
+| ASCII, 300 chars | 0.75 | 0.86 | 1.84 |
+| Latin-1, 300 chars | 0.86 | 0.98 | 1.52 |
+| Cyrillic, 300 chars | 0.86 | 1.02 | 1.51 |
+| CJK, 300 chars | 0.77 | 1.06 | 1.57 |
+| ASCII with an escape every 6 bytes | 0.85 | 1.01 | 1.06 |
+| 500 short ASCII strings | 0.98 | 0.88 | 0.94 |
+| 500 short Cyrillic strings | 0.99 | 0.91 | 0.96 |
+| Cyrillic and ASCII words mixed | 0.83 | 1.00 | 1.57 |
+
+On the sample database (PG JSON pipeline, minimum of three interleaved
+rounds): the plain build goes from 11.1 to 10.7 µs median and 32.1 to 30.4
+µs P95 with the change; its PGO build is now the fastest of all at 9.5 µs
+median and 29.4 µs P95, where the PGO build of the old code was the slowest
+(10.9 and 37.4 µs in entry 21's session). Every other benchmark category is
+unchanged (the dict paths and the encoder do not run this code).
+
+**Lesson:** a profile can make a hot loop slower, and a benchmark category
+that mixes features cannot say which one. Time per record on real data, then
+probe one content feature at a time; the dict-versus-JSON split of the same
+decoder was what pointed at the writer.
+
 ## Cumulative result
 
-1.7.0 (`main` at 7b26c79, fat LTO, mimalloc, no PGO) against CPython pickle
+1.7.0 (the tree with #52 applied, fat LTO, mimalloc, no PGO) against CPython pickle
 measured in the same session, one pinned core, minimum of medians over three
 interleaved rounds (the tables with every category and the 1.5.0 and 1.6.1
 columns are on the performance page):
 
 | Operation | vs CPython pickle |
 |---|---|
-| Encode (synthetic) | 1.5-8.3x faster |
-| Encode (real FileStorage) | 4.5x faster |
+| Encode (synthetic) | 1.6-9.3x faster |
+| Encode (real FileStorage) | 4.4x faster |
 | Decode (synthetic) | 1.0-2.4x faster (`deep_nesting` at parity) |
 | Decode (real FileStorage) | 1.6x faster |
-| PG JSON path vs dict path plus `json.dumps` | 1.5-3.9x faster, 2.4x on the FileStorage median, GIL-free |
+| PG JSON path vs dict path plus `json.dumps` | 1.3-3.4x faster, 2.4x on the FileStorage median, GIL-free |
 
 ## Lessons learned
 

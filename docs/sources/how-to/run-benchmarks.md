@@ -77,7 +77,7 @@ All benchmark commands accept:
 
 ## PGO builds, the way the wheels are built
 
-The release wheels are Profile-Guided Optimization (PGO) builds, so a local PGO build reproduces what users install. PGO is not simply faster: it speeds up the Python-dict paths and encode, but makes the PG JSON pipeline on real records slower than a build without PGO (see #52 and the performance page); measure both when the storage path matters.
+The release wheels are Profile-Guided Optimization (PGO) builds, so a local PGO build reproduces what users install. PGO is not simply faster for every path: until 1.7.0 it made the PG JSON pipeline on real records slower than a build without PGO (#52, a byte loop in the JSON string writer that the profile-guided build compiled worse; the performance page has the numbers before and after the fix). Measure both builds when a change touches the storage path.
 
 ### 1. install LLVM tools
 
@@ -96,8 +96,8 @@ RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
 ### 3. generate profiles
 
 Run all three benchmark modes so the profile covers the Python-dict paths and
-the PG JSON path (the one zodb-pgjsonb runs; a profile without it makes the
-JSON writer slower, see #52):
+the PG JSON path (the one zodb-pgjsonb runs; a profile without it leaves the
+JSON writer without counts, and the optimizer treats it as cold):
 
 ```bash
 python benchmarks/bench.py synthetic --iterations 5000
