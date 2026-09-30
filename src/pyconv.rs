@@ -332,6 +332,9 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@cls"), cls_list)?;
                 dict.set_item(intern!(py, "@s"), state_obj)?;
+                if !newobj {
+                    dict.set_item(intern!(py, "@newobj"), false)?;
+                }
                 // SETITEMS/APPENDS data of dict/list subclasses (same keys as the JSON writer)
                 if let Some(pairs) = dict_items {
                     dict.set_item(intern!(py, "@items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
@@ -1156,7 +1159,10 @@ fn pydict_to_pickle_value(
                         state: Box::new(state),
                         dict_items: dict_items_from_pyobject(dict.get_item(intern!(py, "@items"))?, expand_refs, "@items")?,
                         list_items: list_items_from_pyobject(dict.get_item(intern!(py, "@appends"))?, expand_refs, "@appends")?,
-                        newobj: true,
+                        newobj: !matches!(
+                            dict.get_item(intern!(py, "@newobj"))?.map(|v| v.extract::<bool>()),
+                            Some(Ok(false))
+                        ),
                     })));
                 }
                 if dict.get_item(intern!(py, "@items"))?.is_some()
@@ -2266,12 +2272,13 @@ fn encode_pydict_to_pickle(
                     let module = mod_py.to_str()?;
                     let name = name_py.to_str()?;
 
-                    // Instances with SETITEMS/APPENDS data need the PickleValue path,
-                    // which emits items before BUILD like CPython does.
+                    // Instances with SETITEMS/APPENDS data or the REDUCE kind (#32) need the
+                    // PickleValue path, which emits items before BUILD like CPython does.
                     // Only a 3- or 4-key dict can carry them; skip the lookups otherwise.
                     if len > 2
                         && (dict.get_item(intern!(py, "@items"))?.is_some()
-                            || dict.get_item(intern!(py, "@appends"))?.is_some())
+                            || dict.get_item(intern!(py, "@appends"))?.is_some()
+                            || dict.get_item(intern!(py, "@newobj"))?.is_some())
                     {
                         let pv = pydict_to_pickle_value(dict, expand_refs)?;
                         encode_value_into(&pv, buf)?;

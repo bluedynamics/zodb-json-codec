@@ -127,6 +127,9 @@ fn pickle_value_to_json_impl(
                     "@cls": [module, name],
                     "@s": state_json,
                 });
+                if !newobj {
+                    obj.as_object_mut().unwrap().insert("@newobj".to_string(), json!(false));
+                }
                 if let Some(pairs) = dict_items {
                     let items_json: Result<Vec<Value>, CodecError> = pairs
                         .iter()
@@ -479,6 +482,11 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                 } else {
                     recurse(w, state)?;
                 }
+                if !newobj {
+                    w.write_comma();
+                    w.write_key_literal("@newobj");
+                    w.write_bool(false);
+                }
                 if let Some(pairs) = dict_items {
                     w.write_comma();
                     w.write_key_literal("@items");
@@ -817,7 +825,7 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                             state: Box::new(state),
                             dict_items,
                             list_items,
-                            newobj: true,
+                            newobj: !matches!(map.get("@newobj"), Some(Value::Bool(false))),
                         })));
                     }
                 }

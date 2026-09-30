@@ -359,7 +359,7 @@ impl Encoder {
                     Some(args) => self.encode_value(args, depth + 1)?,
                     None => self.write_u8(EMPTY_TUPLE),
                 }
-                self.write_u8(NEWOBJ);
+                self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
                 // Dict/list subclass items go before the state, in the order CPython's
                 // save_reduce writes them: APPENDS, then SETITEMS, then BUILD.
                 if let Some(items) = list_items {
@@ -620,6 +620,36 @@ mod tests {
         let build = tail.iter().position(|&b| b == BUILD).unwrap();
         assert!(appends < setitems && setitems < build, "expected APPENDS, SETITEMS, BUILD");
         assert_eq!(decode_pickle(&bytes).unwrap(), val);
+    }
+
+    #[test]
+    fn test_reduce_kind_instance_emits_reduce() {
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "m".into(),
+            name: "C".into(),
+            state: Box::new(PickleValue::Dict(vec![])),
+            dict_items: None,
+            list_items: None,
+            newobj: false,
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        assert!(bytes.contains(&REDUCE) && !bytes.contains(&NEWOBJ));
+        // with the @args/@state shape: GLOBAL args REDUCE state BUILD
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "m".into(),
+            name: "C".into(),
+            state: Box::new(PickleValue::Dict(vec![
+                (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::Int(1)])),
+                (PickleValue::String("@state".into()), PickleValue::Dict(vec![])),
+            ])),
+            dict_items: None,
+            list_items: None,
+            newobj: false,
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
+        let b = bytes.iter().position(|&b| b == BUILD).unwrap();
+        assert!(r < b && !bytes.contains(&NEWOBJ));
     }
 
     fn reduce(newobj: bool, state: Option<PickleValue>) -> PickleValue {

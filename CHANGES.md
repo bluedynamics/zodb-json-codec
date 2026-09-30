@@ -2,6 +2,14 @@
 
 ## unreleased
 
+- Instances that a pickler wrote as `REDUCE(cls, ()) + BUILD` (a `__reduce__`
+  returning the class with empty arguments, for example `OrderedDict`
+  subclasses with a `__dict__`) re-encode as `REDUCE` again, so `__init__`
+  runs on unpickling as it did for the original pickle; they used to come
+  back as `NEWOBJ`. The JSON carries `"@newobj": false` next to `@cls`/`@s`
+  for such instances; absent means `NEWOBJ`, so stored data is unaffected
+  [#32]
+
 - Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
   (the profile-guided build put the end-of-slice check on the pointer step of
   the string loop) and the performance page is re-measured with the fixed
