@@ -2,6 +2,17 @@
 
 ## unreleased
 
+- Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
+  (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
+  the compact `["oid", "module.Class"]` form is now only recognized when both
+  elements are strings, all other forms are encoded generically. `refs` now
+  includes bare-oid references (classes with `__getnewargs__`) like
+  `ZODB.serialize.referencesf` does. Compact refs are validated (8-byte oid,
+  class path string). Note for zodb-pgjsonb: rows stored by earlier codec
+  versions that contain bare-oid references have an incomplete `refs` column
+  until they are rewritten; recompute `refs` before the first pack if such
+  classes exist in the database [#17]
+
 - Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
   and user subclasses): the Python-dict decode path now emits their
   `items`/`appends` (`@items`/`@appends` for instances) and both encoder paths
