@@ -17,7 +17,7 @@ concurrency:
 env:
   # Python versions to build wheels for (must match pyproject.toml requires-python
   # and be supported by the PyO3 version in Cargo.toml)
-  PYTHON_TARGETS: "-i 3.12 -i 3.13 -i 3.14"
+  PYTHON_TARGETS: "-i 3.12 -i 3.13 -i 3.14 -i 3.15"
 
 jobs:
   linux:
