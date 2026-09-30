@@ -40,7 +40,9 @@ pub fn decode_zodb_pickles(data: &[u8]) -> Result<(PickleValue, PickleValue), Co
 #[derive(Default)]
 struct Scratch {
     stack: Vec<PickleValue>,
-    memo: Vec<PickleValue>,
+    /// `None` for an index that was never put (a put above it grows the
+    /// vector); a `GET` of such an index is an error, as in CPython (#47).
+    memo: Vec<Option<PickleValue>>,
     stack_memo: Vec<Vec<usize>>,
     marks: Vec<usize>,
     dirty_memo: Vec<bool>,
@@ -105,7 +107,7 @@ struct Decoder<'a> {
     data: &'a [u8],
     pos: usize,
     stack: Vec<PickleValue>,
-    memo: Vec<PickleValue>,
+    memo: Vec<Option<PickleValue>>,
     /// Tracks which memo indices are bound to each stack slot (parallel to stack).
     /// When BINPUT stores from stack top, the memo index is recorded here.
     stack_memo: Vec<Vec<usize>>,
@@ -1005,7 +1007,7 @@ impl<'a> Decoder<'a> {
                 for &idx in &bindings {
                     if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
                         if idx < self.memo.len() {
-                            self.memo[idx] = val.clone();
+                            self.memo[idx] = Some(val.clone());
                             self.memo_depth[idx] = depth;
                         }
                         self.dirty_memo[idx] = false;
@@ -1081,7 +1083,7 @@ impl<'a> Decoder<'a> {
                 let idx = self.stack_memo[si][bi];
                 if idx < self.dirty_memo.len() && self.dirty_memo[idx] {
                     if idx < self.memo.len() {
-                        self.memo[idx] = self.stack[si].clone();
+                        self.memo[idx] = Some(self.stack[si].clone());
                         self.memo_depth[idx] = self.depth[si];
                     }
                     self.dirty_memo[idx] = false;
@@ -1145,11 +1147,11 @@ impl<'a> Decoder<'a> {
             return Err(CodecError::InvalidData(format!("memo index {idx} exceeds maximum {MAX_MEMO_SIZE}")));
         }
         if idx >= self.memo.len() {
-            self.memo.resize(idx + 1, PickleValue::None);
+            self.memo.resize(idx + 1, None);
             self.dirty_memo.resize(idx + 1, false);
             self.memo_depth.resize(idx + 1, 0);
         }
-        self.memo[idx] = val;
+        self.memo[idx] = Some(val);
         self.memo_depth[idx] = depth;
         self.dirty_memo[idx] = false;
         Ok(())
@@ -1163,7 +1165,7 @@ impl<'a> Decoder<'a> {
         let val = self
             .memo
             .get(idx)
-            .cloned()
+            .and_then(|slot| slot.clone())
             .ok_or_else(|| CodecError::InvalidData(format!("memo index {idx} not found")))?;
         Ok((val, self.memo_depth[idx]))
     }
@@ -1175,7 +1177,7 @@ impl<'a> Decoder<'a> {
         // newest binding first: a re-PUT of the same index binds the newer slot
         for (si, bindings) in self.stack_memo.iter().enumerate().rev() {
             if bindings.contains(&memo_idx) {
-                self.memo[memo_idx] = self.stack[si].clone();
+                self.memo[memo_idx] = Some(self.stack[si].clone());
                 self.memo_depth[memo_idx] = self.depth[si];
                 self.dirty_memo[memo_idx] = false;
                 return;
@@ -1887,6 +1889,27 @@ mod tests {
         assert_eq!(decode_pickle(b"\x80\x02K\x01K\x020.").unwrap(), PickleValue::Int(1));
         // empty stack, no mark: still an error
         assert!(decode_pickle(b"\x80\x020K\x01.").is_err());
+    }
+
+    #[test]
+    fn test_get_of_never_put_index_below_a_put_one_is_an_error() {
+        // PROTO 3, BININT1 1, BINPUT 4, BINGET 4, BINGET 0, TUPLE2, STOP
+        let err = decode_pickle(b"\x80\x03K\x01q\x04h\x04h\x00\x86.").unwrap_err();
+        assert!(err.to_string().contains("memo index 0 not found"), "{err}");
+        // protocol 0 text opcodes, same shape
+        let err = decode_pickle(b"I1\np4\ng4\ng0\n\x86.").unwrap_err();
+        assert!(err.to_string().contains("memo index 0 not found"), "{err}");
+        // a put that is never read followed by a read of a higher index is fine
+        assert_eq!(
+            decode_pickle(b"\x80\x03K\x01q\x00K\x02q\x04h\x04.").unwrap(),
+            PickleValue::Int(2)
+        );
+        // a dirty entry (container mutated after the put) after a gap put resolves live
+        // EMPTY_LIST BINPUT 3, K1 APPEND, BINGET 3, STOP -> [1]
+        assert_eq!(
+            decode_pickle(b"\x80\x03]q\x03K\x01ah\x03.").unwrap(),
+            PickleValue::List(vec![PickleValue::Int(1)])
+        );
     }
 
     #[test]

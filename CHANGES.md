@@ -28,6 +28,11 @@
   `POP`s instead. Such records used to raise `unknown pickle opcode` or
   `stack underflow` [#49]
 
+- Decoder: a `GET` of a memo index that was never put raises
+  `memo index N not found` (CPython: `Memo value not found at index N`); it
+  used to yield `None` when a higher index had been put before, which grows
+  the memo with placeholders [#47]
+
 - Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
   (the profile-guided build put the end-of-slice check on the pointer step of
   the string loop) and the performance page is re-measured with the fixed
