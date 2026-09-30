@@ -878,7 +878,23 @@ impl<'a> Decoder<'a> {
 
                 // -- Stack manipulation --
                 POP => {
-                    self.pop_value()?;
+                    // Nothing above the last MARK: CPython's load_pop discards
+                    // the mark itself (protocol 0 writes `POP`s to unwind a
+                    // recursive tuple, #49); otherwise the top value.
+                    if self.stack.len() <= self.floor() && !self.marks.is_empty() {
+                        self.marks.pop();
+                    } else {
+                        self.pop_value()?;
+                    }
+                }
+                POP_MARK => {
+                    // Discard everything above the last MARK and the mark; the
+                    // memo bindings of the discarded slots are flushed live
+                    // first (#49).
+                    let mark = self.begin_pop_mark()?;
+                    self.stack.truncate(mark);
+                    self.stack_memo.truncate(mark);
+                    self.depth.truncate(mark);
                 }
                 DUP => {
                     let val = self.peek_value()?.clone();
@@ -1250,7 +1266,7 @@ fn scan_memo_reads(data: &[u8]) -> MemoNeeds {
                 pos = end;
             }
             STOP | NONE | NEWTRUE | NEWFALSE | EMPTY_DICT | EMPTY_LIST | EMPTY_TUPLE
-            | EMPTY_SET | MARK | POP | DUP | APPEND | APPENDS | BUILD | SETITEM | SETITEMS
+            | EMPTY_SET | MARK | POP | POP_MARK | DUP | APPEND | APPENDS | BUILD | SETITEM | SETITEMS
             | ADDITEMS | REDUCE | NEWOBJ | BINPERSID | TUPLE | TUPLE1 | TUPLE2 | TUPLE3
             | LIST | DICT | FROZENSET | STACK_GLOBAL | MEMOIZE | NEWOBJ_EX => {}
             PROTO | BININT1 | BINPUT => pos += 1,
@@ -1846,6 +1862,30 @@ mod tests {
             }
             other => panic!("expected Reduce with state, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_pop_mark_discards_to_the_mark() {
+        // PROTO 2, MARK, K1, K2, POP_MARK, K3, STOP -> 3
+        assert_eq!(decode_pickle(b"\x80\x02(K\x01K\x021K\x03.").unwrap(), PickleValue::Int(3));
+        // memo bindings above the mark are flushed live before the discard:
+        // MARK, EMPTY_LIST, BINPUT 1, K1, APPEND, POP_MARK, BINGET 1, STOP -> [1]
+        assert_eq!(
+            decode_pickle(b"\x80\x02(]q\x01K\x01a1h\x01.").unwrap(),
+            PickleValue::List(vec![PickleValue::Int(1)])
+        );
+        // no mark: error
+        assert!(decode_pickle(b"\x80\x02K\x011.").is_err());
+    }
+
+    #[test]
+    fn test_pop_at_a_mark_pops_the_mark() {
+        // MARK, POP, K3, STOP -> 3 (CPython: the stack is at the fence, so POP removes the mark)
+        assert_eq!(decode_pickle(b"\x80\x02(0K\x03.").unwrap(), PickleValue::Int(3));
+        // POP of a value is unchanged: K1, K2, POP, STOP -> 1
+        assert_eq!(decode_pickle(b"\x80\x02K\x01K\x020.").unwrap(), PickleValue::Int(1));
+        // empty stack, no mark: still an error
+        assert!(decode_pickle(b"\x80\x020K\x01.").is_err());
     }
 
     #[test]
