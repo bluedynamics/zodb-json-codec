@@ -112,6 +112,38 @@ pub fn collect_refs_from_pickle_value(val: &PickleValue, refs: &mut Vec<i64>) {
     }
 }
 
+/// Convert SETITEMS pairs to a Python list of [key, value] lists.
+fn pairs_to_pylist(
+    py: Python<'_>,
+    pairs: &[(PickleValue, PickleValue)],
+    compact_refs: bool,
+    sanitize_nulls: bool,
+    depth: usize,
+) -> PyResult<Py<PyAny>> {
+    let mut out = Vec::with_capacity(pairs.len());
+    for (k, v) in pairs {
+        let pk = pickle_value_to_pyobject_impl(py, k, compact_refs, sanitize_nulls, depth + 1)?;
+        let pv = pickle_value_to_pyobject_impl(py, v, compact_refs, sanitize_nulls, depth + 1)?;
+        out.push(PyList::new(py, [pk, pv])?.into_any().unbind());
+    }
+    Ok(PyList::new(py, out)?.into_any().unbind())
+}
+
+/// Convert APPENDS items to a Python list.
+fn items_to_pylist(
+    py: Python<'_>,
+    items: &[PickleValue],
+    compact_refs: bool,
+    sanitize_nulls: bool,
+    depth: usize,
+) -> PyResult<Py<PyAny>> {
+    let py_items: PyResult<Vec<Py<PyAny>>> = items
+        .iter()
+        .map(|i| pickle_value_to_pyobject_impl(py, i, compact_refs, sanitize_nulls, depth + 1))
+        .collect();
+    Ok(PyList::new(py, py_items?)?.into_any().unbind())
+}
+
 /// Core implementation with optional null-byte sanitization for PG JSONB.
 fn pickle_value_to_pyobject_impl(
     py: Python<'_>,
@@ -228,7 +260,7 @@ fn pickle_value_to_pyobject_impl(
             Ok(dict.into_any().unbind())
         }
         PickleValue::Instance(inst) => {
-            let InstanceData { module, name, state, .. } = inst.as_ref();
+            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(obj) =
                 try_instance_to_pyobject(py, module, name, state, compact_refs)?
@@ -251,6 +283,13 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@cls"), cls_list)?;
                 dict.set_item(intern!(py, "@s"), state_obj)?;
+                // SETITEMS/APPENDS data of dict/list subclasses (same keys as the JSON writer)
+                if let Some(pairs) = dict_items {
+                    dict.set_item(intern!(py, "@items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
+                }
+                if let Some(items) = list_items {
+                    dict.set_item(intern!(py, "@appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+                }
                 Ok(dict.into_any().unbind())
             }
         }
@@ -264,7 +303,7 @@ fn pickle_value_to_pyobject_impl(
                 Ok(dict.into_any().unbind())
             }
         }
-        PickleValue::Reduce { callable, args, .. } => {
+        PickleValue::Reduce { callable, args, dict_items, list_items } => {
             // Try known type handlers first (datetime, Decimal, set, etc.)
             if let Some(obj) =
                 try_reduce_to_pyobject_impl(py, callable, args, compact_refs, sanitize_nulls, depth)?
@@ -277,6 +316,12 @@ fn pickle_value_to_pyobject_impl(
             let inner_dict = PyDict::new(py);
             inner_dict.set_item(intern!(py, "callable"), callable_obj)?;
             inner_dict.set_item(intern!(py, "args"), args_obj)?;
+            if let Some(pairs) = dict_items {
+                inner_dict.set_item(intern!(py, "items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
+            }
+            if let Some(items) = list_items {
+                inner_dict.set_item(intern!(py, "appends"), items_to_pylist(py, items, compact_refs, sanitize_nulls, depth)?)?;
+            }
             let dict = PyDict::new(py);
             dict.set_item(intern!(py, "@reduce"), inner_dict)?;
             Ok(dict.into_any().unbind())
@@ -1031,9 +1076,17 @@ fn pydict_to_pickle_value(
                         module,
                         name,
                         state: Box::new(state),
-                        dict_items: None,
-                        list_items: None,
+                        dict_items: dict_items_from_pyobject(dict.get_item(intern!(py, "@items"))?, expand_refs, "@items")?,
+                        list_items: list_items_from_pyobject(dict.get_item(intern!(py, "@appends"))?, expand_refs, "@appends")?,
                     })));
+                }
+                if dict.get_item(intern!(py, "@items"))?.is_some()
+                    || dict.get_item(intern!(py, "@appends"))?.is_some()
+                {
+                    return Err(CodecError::InvalidData(
+                        "@items/@appends require an instance state (@s)".into(),
+                    )
+                    .into());
                 }
                 return Ok(PickleValue::Global { module, name });
             }
@@ -1140,20 +1193,7 @@ fn pydict_to_pickle_value(
     // @reduce — Generic reduce
     if let Some(v) = dict.get_item(intern!(py, "@reduce"))? {
         if let Ok(reduce_dict) = v.cast::<PyDict>() {
-            let callable_obj = reduce_dict
-                .get_item(intern!(py, "callable"))?
-                .unwrap_or_else(|| py.None().into_bound(py));
-            let args_obj = reduce_dict
-                .get_item(intern!(py, "args"))?
-                .unwrap_or_else(|| py.None().into_bound(py));
-            let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
-            let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
-            return Ok(PickleValue::Reduce {
-                callable: Box::new(callable),
-                args: Box::new(args),
-                dict_items: None,
-                list_items: None,
-            });
+            return reduce_dict_to_pickle_value(py, reduce_dict, expand_refs);
         }
     }
 
@@ -1329,20 +1369,7 @@ fn try_decode_single_key_marker(
         }
         "@reduce" => {
             if let Ok(reduce_dict) = v.cast::<PyDict>() {
-                let callable_obj = reduce_dict
-                    .get_item(intern!(py, "callable"))?
-                    .unwrap_or_else(|| py.None().into_bound(py));
-                let args_obj = reduce_dict
-                    .get_item(intern!(py, "args"))?
-                    .unwrap_or_else(|| py.None().into_bound(py));
-                let callable = pyobject_to_pickle_value(&callable_obj, expand_refs)?;
-                let args = pyobject_to_pickle_value(&args_obj, expand_refs)?;
-                return Ok(Some(PickleValue::Reduce {
-                    callable: Box::new(callable),
-                    args: Box::new(args),
-                    dict_items: None,
-                    list_items: None,
-                }));
+                return Ok(Some(reduce_dict_to_pickle_value(py, reduce_dict, expand_refs)?));
             }
         }
         _ => {}
@@ -1353,6 +1380,64 @@ fn try_decode_single_key_marker(
 // ---------------------------------------------------------------------------
 // Reverse: persistent ref expansion
 // ---------------------------------------------------------------------------
+
+/// `[[k, v], ...]` (JSON `items` / `@items`) to SETITEMS pairs.
+fn dict_items_from_pyobject(
+    v: Option<Bound<'_, pyo3::PyAny>>,
+    expand_refs: bool,
+    key: &str,
+) -> PyResult<Option<Box<Vec<(PickleValue, PickleValue)>>>> {
+    let Some(v) = v else { return Ok(None) };
+    let bad = || CodecError::InvalidData(format!("{key} must be a list of [key, value] pairs"));
+    let list = v.cast::<PyList>().map_err(|_| bad())?;
+    let mut pairs = Vec::with_capacity(list.len());
+    for pair_obj in list.iter() {
+        let pair = pair_obj.cast::<PyList>().map_err(|_| bad())?;
+        if pair.len() != 2 {
+            return Err(bad().into());
+        }
+        pairs.push((
+            pyobject_to_pickle_value(&pair.get_item(0)?, expand_refs)?,
+            pyobject_to_pickle_value(&pair.get_item(1)?, expand_refs)?,
+        ));
+    }
+    Ok(Some(Box::new(pairs)))
+}
+
+/// `[v, ...]` (JSON `appends` / `@appends`) to APPENDS items.
+fn list_items_from_pyobject(
+    v: Option<Bound<'_, pyo3::PyAny>>,
+    expand_refs: bool,
+    key: &str,
+) -> PyResult<Option<Box<Vec<PickleValue>>>> {
+    let Some(v) = v else { return Ok(None) };
+    let list = v
+        .cast::<PyList>()
+        .map_err(|_| CodecError::InvalidData(format!("{key} must be a list")))?;
+    let items: PyResult<Vec<PickleValue>> =
+        list.iter().map(|i| pyobject_to_pickle_value(&i, expand_refs)).collect();
+    Ok(Some(Box::new(items?)))
+}
+
+/// `{"callable": ..., "args": ..., "items": ..., "appends": ...}` to a Reduce.
+fn reduce_dict_to_pickle_value(
+    py: Python<'_>,
+    reduce_dict: &Bound<'_, PyDict>,
+    expand_refs: bool,
+) -> PyResult<PickleValue> {
+    let callable_obj = reduce_dict
+        .get_item(intern!(py, "callable"))?
+        .unwrap_or_else(|| py.None().into_bound(py));
+    let args_obj = reduce_dict
+        .get_item(intern!(py, "args"))?
+        .unwrap_or_else(|| py.None().into_bound(py));
+    Ok(PickleValue::Reduce {
+        callable: Box::new(pyobject_to_pickle_value(&callable_obj, expand_refs)?),
+        args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
+        dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs, "items")?,
+        list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs, "appends")?,
+    })
+}
 
 /// Expand a compact ZODB persistent ref from Py<PyAny>.
 fn expand_compact_ref(ref_val: &Bound<'_, pyo3::PyAny>) -> PyResult<PickleValue> {
@@ -1977,6 +2062,18 @@ fn encode_pydict_to_pickle(
                     let module = mod_py.to_str()?;
                     let name = name_py.to_str()?;
 
+                    // Instances with SETITEMS/APPENDS data need the PickleValue path,
+                    // which emits items before BUILD like CPython does.
+                    // Only a 3- or 4-key dict can carry them; skip the lookups otherwise.
+                    if len > 2
+                        && (dict.get_item(intern!(py, "@items"))?.is_some()
+                            || dict.get_item(intern!(py, "@appends"))?.is_some())
+                    {
+                        let pv = pydict_to_pickle_value(dict, expand_refs)?;
+                        encode_value_into(&pv, buf)?;
+                        return Ok(());
+                    }
+
                     if let Some(state_val) = dict.get_item(intern!(py, "@s"))? {
                         // Instance: GLOBAL module\nname\n EMPTY_TUPLE NEWOBJ state BUILD
                         write_global(buf, module, name);
@@ -1989,6 +2086,13 @@ fn encode_pydict_to_pickle(
                             encode_pyobject_to_pickle(&state_val, buf, expand_refs)?;
                         }
                         buf.push(BUILD);
+                        return Ok(());
+                    }
+                    // @cls with other keys but no @s: let the PickleValue path decide
+                    // (it rejects @items/@appends without an instance state).
+                    if len > 1 {
+                        let pv = pydict_to_pickle_value(dict, expand_refs)?;
+                        encode_value_into(&pv, buf)?;
                         return Ok(());
                     }
                     // @cls alone → GLOBAL

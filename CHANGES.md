@@ -2,6 +2,12 @@
 
 ## unreleased
 
+- Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
+  and user subclasses): the Python-dict decode path now emits their
+  `items`/`appends` (`@items`/`@appends` for instances) and both encoder paths
+  read them back; the `PickleValue` encoder emits items before `BUILD` like
+  CPython [#16]
+
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
 
