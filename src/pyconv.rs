@@ -1411,6 +1411,12 @@ fn try_decode_single_key_marker(
                 }
             }
         }
+        "@ns" => {
+            // String with NUL bytes, base64-encoded by the PG decode paths
+            if let Ok(s) = v.cast::<PyString>() {
+                return Ok(Some(PickleValue::String(decode_ns_marker(s.to_str()?)?)));
+            }
+        }
         "@reduce" => {
             if let Ok(reduce_dict) = v.cast::<PyDict>() {
                 return Ok(Some(reduce_dict_to_pickle_value(py, reduce_dict, expand_refs)?));
@@ -1537,6 +1543,24 @@ fn parse_compact_ref(list: &Bound<'_, PyList>) -> PyResult<Option<(Vec<u8>, Stri
         None => (String::new(), class_path.to_string()),
     };
     Ok(Some((oid, module, name)))
+}
+
+/// Decode the payload of an `@ns` marker (base64 of a UTF-8 string containing NUL bytes).
+fn decode_ns_marker(b64: &str) -> PyResult<String> {
+    let bytes = BASE64
+        .decode(b64)
+        .map_err(|e| CodecError::InvalidData(format!("@ns marker is not valid base64: {e}")))?;
+    String::from_utf8(bytes)
+        .map_err(|_| CodecError::InvalidData("@ns marker does not decode to UTF-8".into()).into())
+}
+
+/// Dict keys with NUL bytes are stored as `"@ns:<base64>"` by the PG decode paths.
+#[inline]
+fn dict_key(key: &str) -> PyResult<std::borrow::Cow<'_, str>> {
+    match key.strip_prefix("@ns:") {
+        Some(b64) => Ok(std::borrow::Cow::Owned(decode_ns_marker(b64)?)),
+        None => Ok(std::borrow::Cow::Borrowed(key)),
+    }
 }
 
 /// Expand a compact ZODB persistent ref from Py<PyAny>.
@@ -2489,6 +2513,14 @@ fn try_encode_marker_to_pickle(
                     buf.push(REDUCE);
                     return Ok(true);
                 }
+            }
+            Ok(false)
+        }
+        "@ns" => {
+            // String with NUL bytes, base64-encoded by the PG decode paths
+            if let Ok(s) = v.cast::<PyString>() {
+                write_string(buf, &decode_ns_marker(s.to_str()?)?);
+                return Ok(true);
             }
             Ok(false)
         }
