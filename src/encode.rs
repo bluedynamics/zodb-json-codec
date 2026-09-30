@@ -155,8 +155,9 @@ impl Encoder {
     /// is not an instance, kept as `o s BUILD`. `{"@callable": c, "@args": a,
     /// "@state": s}` is what releases before 1.7.0 stored for BUILD after a
     /// REDUCE whose callable is not a global (now a Reduce with `state`); it
-    /// encodes as `c a REDUCE s BUILD`. Anything else is an error: an
-    /// Instance with empty module and name has no valid GLOBAL form.
+    /// encodes as `c a REDUCE s BUILD`. Anything else, including extra keys,
+    /// is an error: an Instance with empty module and name has no valid GLOBAL
+    /// form and silently dropping keys would lose data.
     fn encode_anonymous_instance(
         &mut self,
         state: &PickleValue,
@@ -174,13 +175,13 @@ impl Encoder {
                 .map(|(_, v)| v)
         };
         match (get("@obj"), get("@callable"), get("@args"), get("@state")) {
-            (Some(obj), None, None, Some(st)) => {
+            (Some(obj), None, None, Some(st)) if pairs.len() == 2 => {
                 self.encode_value(obj, depth + 1)?;
                 self.encode_value(st, depth + 1)?;
                 self.write_u8(BUILD);
                 Ok(())
             }
-            (None, Some(callable), Some(args), Some(st)) => {
+            (None, Some(callable), Some(args), Some(st)) if pairs.len() == 3 => {
                 self.encode_value(callable, depth + 1)?;
                 self.encode_value(args, depth + 1)?;
                 self.write_u8(REDUCE);

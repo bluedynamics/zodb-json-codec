@@ -60,28 +60,39 @@ pub fn unescape_string_repr(body: &[u8]) -> Result<Vec<u8>, CodecError> {
 }
 
 /// Decode a protocol 0 `UNICODE` argument: raw-unicode-escape, i.e. Latin-1 bytes
-/// with `\uXXXX` and `\UXXXXXXXX` escapes. CPython's pickler escapes the backslash
-/// itself as `\`, so a backslash not followed by `u` or `U` is literal.
+/// with `\uXXXX` and `\UXXXXXXXX` escapes. Like CPython's decoder, backslashes
+/// are copied in pairs: only an odd run of them followed by `u` or `U` is an
+/// escape, every other backslash is literal. (CPython's pickler writes a
+/// backslash as `\u005c`, so real streams never contain a bare one.)
 pub fn decode_raw_unicode_escape(body: &[u8]) -> Result<String, CodecError> {
     let mut out = String::with_capacity(body.len());
     let mut i = 0;
     while i < body.len() {
-        let width = match (body[i], body.get(i + 1)) {
-            (b'\\', Some(b'u')) => 4,
-            (b'\\', Some(b'U')) => 8,
-            (b, _) => {
-                out.push(char::from(b)); // Latin-1: every byte is one char
-                i += 1;
+        if body[i] != b'\\' {
+            out.push(char::from(body[i])); // Latin-1: every byte is one char
+            i += 1;
+            continue;
+        }
+        let run = body[i..].iter().take_while(|&&b| b == b'\\').count();
+        let width = match (run % 2 == 1, body.get(i + run)) {
+            (true, Some(b'u')) => 4,
+            (true, Some(b'U')) => 8,
+            _ => {
+                out.extend(std::iter::repeat_n('\\', run));
+                i += run;
                 continue;
             }
         };
+        out.extend(std::iter::repeat_n('\\', run - 1));
+        let escape_at = i + run - 1;
+        let start = i + run + 1;
         let hex = body
-            .get(i + 2..i + 2 + width)
+            .get(start..start + width)
             .filter(|h| h.iter().all(u8::is_ascii_hexdigit))
             .ok_or_else(|| {
                 CodecError::InvalidData(format!(
-                    "UNICODE: truncated \\{} escape at byte {i}",
-                    body[i + 1] as char
+                    "UNICODE: truncated \\{} escape at byte {escape_at}",
+                    body[i + run] as char
                 ))
             })?;
         let code = u32::from_str_radix(std::str::from_utf8(hex).unwrap(), 16).unwrap();
@@ -89,7 +100,7 @@ pub fn decode_raw_unicode_escape(body: &[u8]) -> Result<String, CodecError> {
             CodecError::InvalidData(format!("UNICODE: U+{code:04X} is not a valid scalar value"))
         })?;
         out.push(ch);
-        i += 2 + width;
+        i = start + width;
     }
     Ok(out)
 }
@@ -122,6 +133,10 @@ mod tests {
         );
         // only \u and \U are escapes
         assert_eq!(decode_raw_unicode_escape(b"a\\nb\\").unwrap(), "a\\nb\\");
+        // CPython: an even run of backslashes before `u` is literal, an odd run escapes
+        assert_eq!(decode_raw_unicode_escape(b"\\\\u0041").unwrap(), "\\\\u0041");
+        assert_eq!(decode_raw_unicode_escape(b"\\\\\\u0041").unwrap(), "\\\\A");
+        assert_eq!(decode_raw_unicode_escape(b"\\\\u0d").unwrap(), "\\\\u0d");
         assert!(decode_raw_unicode_escape(b"\\u12").is_err());
         assert!(decode_raw_unicode_escape(b"\\ud800").is_err());
     }

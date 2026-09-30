@@ -43,6 +43,15 @@ def test_string_opcode_unescapes_repr():
 
 
 @pytest.mark.parametrize(
+    "line", [b"\\\\u0041", b"\\\\\\u0041", b"\\\\u0d", b"x\\\\", b"\\u00e9\\\\"]
+)
+def test_unicode_backslash_runs_match_cpython(line):
+    # CPython decodes \u only behind an odd run of backslashes; even runs are literal
+    data = b"V" + line + b"\n."
+    assert json.loads(zodb_json_codec.pickle_to_json(data)) == pickle.loads(data)
+
+
+@pytest.mark.parametrize(
     "data, message",
     [
         (b"Sunquoted\n.", "quoted"),

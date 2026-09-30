@@ -248,7 +248,10 @@ Optional keys inside `@reduce`:
   instead of calling the callable (`REDUCE`). Absent means `REDUCE`.
 
 `state`
-: `BUILD` state that followed a `REDUCE` with non-empty arguments.
+: `BUILD` state that followed the call: after a `REDUCE` with non-empty
+  arguments, or after a `REDUCE`/`NEWOBJ` whose callable is not a global (the
+  result of another `REDUCE`, for example a `functools.partial`), with any
+  arguments.
 
 ```json
 {
@@ -277,7 +280,9 @@ such instances.
 Keys starting with `@` inside an instance state are reserved for the codec:
 a state that is exactly `{"@args": ..., "@state": ...}` is always read as
 constructor arguments plus state. A `@reduce` with both `newobj` and `state`
-is accepted (it encodes like the `@cls`/`@s` form above) but never written.
+is written only when the class itself is not a global (`NEWOBJ` on a class
+pickled by value, then `BUILD`); for a global class the `@cls`/`@s` form above
+is used. Readers accept both.
 
 ### `@ns` -- String with NUL bytes (PostgreSQL storage)
 

@@ -133,6 +133,15 @@ def test_build_on_non_instance_roundtrips_opcodes():
         {"@inst": {"x": 1}},
         {"@inst": {"@callable": {"@cls": ["m", "f"]}}},
         {"@inst": 5},
+        {"@inst": {"@obj": {}, "@state": {}, "junk": 1}},
+        {
+            "@inst": {
+                "@callable": {"@cls": ["m", "f"]},
+                "@args": {"@t": []},
+                "@state": {},
+                "@extra": 1,
+            }
+        },
     ],
 )
 def test_malformed_inst_raises(bad):

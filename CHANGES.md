@@ -11,7 +11,9 @@
 - Protocol 0 text opcodes decode like CPython: `STRING` unescapes the bytes repr
   (`\'`, `\xNN`, octal, ...; it used to keep the backslashes) and requires the
   quotes, `UNICODE` is read as raw-unicode-escape (Latin-1 bytes plus `\uXXXX`;
-  non-ASCII used to raise `InvalidUtf8` and `\u` escapes stayed literal) [#25]
+  non-ASCII used to raise `InvalidUtf8` and `\u` escapes stayed literal); lone
+  surrogate escapes are rejected, like invalid UTF-8 on the `BINUNICODE` path
+  [#25]
 
 - Anonymous instances (`@inst`) round-trip: `BUILD` after a `REDUCE`/`NEWOBJ`
   whose callable is not a global now decodes to `@reduce` with `state` and
