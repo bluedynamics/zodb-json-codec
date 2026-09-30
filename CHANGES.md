@@ -2,6 +2,11 @@
 
 ## unreleased
 
+- Docs: the round-trip claim now says what holds (an equal object, not
+  identical bytes) and lists what differs; the tutorial example is run by a
+  test; the architecture page names `decode_zodb_record_for_pg_json` as the
+  storage path [#27]
+
 - Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
   3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage
   collector can run finalizers inside any GC-tracked allocation, a class of

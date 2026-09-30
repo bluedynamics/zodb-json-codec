@@ -189,8 +189,8 @@ print(result)
 
 ## Roundtrip verification
 
-A key property of the codec is **roundtrip fidelity**: encoding to JSON and
-back produces identical pickle bytes.
+A key property of the codec is **round-trip fidelity**: encoding to JSON and
+back yields a pickle that unpickles to an equal object.
 
 ```python
 import pickle
@@ -209,19 +209,22 @@ pickled = pickle.dumps(original, protocol=3)
 # Roundtrip via JSON string
 json_str = zodb_json_codec.pickle_to_json(pickled)
 restored_pickle = zodb_json_codec.json_to_pickle(json_str)
-assert pickled == restored_pickle  # identical bytes
+assert pickle.loads(restored_pickle) == original
 
 # Roundtrip via Python dict
 as_dict = zodb_json_codec.pickle_to_dict(pickled)
 restored_pickle2 = zodb_json_codec.dict_to_pickle(as_dict)
-assert pickled == restored_pickle2  # identical bytes
+assert pickle.loads(restored_pickle2) == original
 ```
 
-Both paths -- JSON string and Python dict -- produce the exact same pickle
-bytes as the original.
-This guarantee means you can transcode ZODB data to JSON
-for storage and querying, then reconstruct the original pickle when ZODB needs
-it back.
+Both paths -- JSON string and Python dict -- give back a pickle that unpickles
+to an object equal to the original. The bytes are not the input bytes: memo
+opcodes for values that are not shared are dropped, the protocol header is
+rewritten (protocol 3 on the JSON string path, protocol 2 on the dict path),
+the JSON string path sorts dict keys, and a ZODB class pickle comes back in
+its `((module, name), None)` form. That is enough to transcode ZODB data to
+JSON for storage and querying and give ZODB a pickle it loads identically when
+it needs the object back. The test suite runs this example.
 
 ## Nested structures
 

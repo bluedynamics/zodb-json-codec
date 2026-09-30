@@ -183,11 +183,13 @@ The `zodb.rs` module manages the two-pickle protocol:
   info, and combines the results into `{"@cls:" [module, name], "@s:" state}`.
 - On encode, it generates the class pickle from the `@cls` marker and the
   state pickle from the `@s` value.
-- The `decode_zodb_record_for_pg` function combines decode, persistent
+- The `decode_zodb_record_for_pg_json` function combines decode, persistent
   reference extraction, and null-byte sanitization (required for PostgreSQL
-  `JSONB`, which cannot store `\u0000`) in a single pass.
-- The `decode_zodb_record_for_pg_json` function does the same but outputs a
-  JSON string directly, with the GIL released for the entire conversion.
+  `JSONB`, which cannot store `\u0000`) in a single pass and writes the JSON
+  string directly with the GIL released; this is the function zodb-pgjsonb
+  stores with.
+- The `decode_zodb_record_for_pg` function applies the same rules but returns
+  a Python dict; it serves tooling and tests, not the storage path.
 
 ## Module summary
 

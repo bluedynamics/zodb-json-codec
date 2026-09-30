@@ -4,8 +4,14 @@
 
 This page describes how Python types are represented in JSON by
 zodb-json-codec.
-All representations are **roundtrip-safe**: encoding to
-JSON and decoding back produces identical pickle bytes.
+All representations are **round-trip safe**: encoding to JSON and decoding
+back yields a pickle that unpickles to an equal object. The bytes are not
+identical to the input: memo opcodes (`BINPUT`/`BINGET` for values that are
+not shared) are dropped, the protocol header is rewritten, and a ZODB class
+pickle is written in the `((module, name), None)` form. The JSON string path
+also sorts dict keys and writes protocol 3, while the Python-dict path keeps
+key order and writes protocol 2, so the two paths differ from each other as
+well.
 
 ## Native JSON types
 
