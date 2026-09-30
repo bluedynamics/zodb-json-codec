@@ -581,16 +581,18 @@ It was worth more than any single optimization above.
 
 ## Cumulative result
 
+1.7.0 (`main` at 7b26c79, fat LTO, mimalloc, no PGO) against CPython pickle
+measured in the same session, one pinned core, minimum of medians over three
+interleaved rounds (the tables with every category and the 1.5.0 and 1.6.1
+columns are on the performance page):
+
 | Operation | vs CPython pickle |
 |---|---|
-| Encode (synthetic) | 1.7-9.2x faster |
-| Encode (real FileStorage) | 3-5x faster |
-| Decode (synthetic) | 1.0-2.3x faster |
-| Decode (real FileStorage) | Near parity |
-| PG JSON path | 1.3-3.3x faster, GIL-free |
-
-The table predates entry 18 and the 1.6.0 regression; it is re-measured with
-#27.
+| Encode (synthetic) | 1.5-8.3x faster |
+| Encode (real FileStorage) | 4.5x faster |
+| Decode (synthetic) | 1.0-2.4x faster (`deep_nesting` at parity) |
+| Decode (real FileStorage) | 1.6x faster |
+| PG JSON path vs dict path plus `json.dumps` | 1.5-3.9x faster, 2.4x on the FileStorage median, GIL-free |
 
 ## Lessons learned
 

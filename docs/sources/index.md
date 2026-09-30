@@ -10,13 +10,15 @@
 
 Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.
 
-Converts ZODB pickle records into human-readable, JSONB-queryable JSON while maintaining full roundtrip fidelity.
+Converts ZODB pickle records into human-readable, JSONB-queryable JSON while staying round-trip safe.
 Designed as the codec layer for a PostgreSQL JSONB storage backend.
 
 **Key capabilities:**
 
-- Full roundtrip fidelity: encode to JSON and back produces identical pickle bytes
-- Human-readable JSON with compact type markers (`@dt`, `@ref`, `@kv`, ...)
+- Round-trip safe: encode to JSON and back yields a pickle that unpickles to an
+  equal object (the bytes differ: memo puts are dropped and the header is
+  rewritten, see {doc}`reference/json-format`)
+- Human-readable JSON with compact type markers (`@dt`, `@ref`, `@t`, ...)
 - JSONB-queryable output for PostgreSQL
 - Faster than CPython's C pickle extension on most operations
 - GIL released during Rust phases for multi-threaded Python

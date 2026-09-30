@@ -3,7 +3,7 @@
 <!-- diataxis: how-to -->
 
 The codec recognizes a set of common Python types and converts them to compact, human-readable JSON markers.
-Types it does not recognize are still preserved with full roundtrip fidelity through fallback markers.
+Types it does not recognize are still preserved, round-trip safe, through fallback markers.
 
 ## Known types with dedicated markers
 

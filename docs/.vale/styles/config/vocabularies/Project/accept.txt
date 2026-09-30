@@ -144,3 +144,7 @@ special_types
 wide_dict
 [Bb]ackend[s]?
 [Aa]uto(detect(ed|s|ion)?|discover(ed|s|y)|creat(ed|es))
+unpickle(s|d)?
+mimalloc
+glibc
+pymalloc

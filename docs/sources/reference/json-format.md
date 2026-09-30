@@ -4,8 +4,16 @@
 
 This page describes how Python types are represented in JSON by
 zodb-json-codec.
-All representations are **roundtrip-safe**: encoding to
-JSON and decoding back produces identical pickle bytes.
+All representations are **round-trip safe**: encoding to JSON and decoding
+back yields a pickle that unpickles to an equal object. The bytes are not
+identical to the input: memo puts (`BINPUT`, `LONG_BINPUT`, `MEMOIZE`) for
+values that are never read back are dropped, the protocol header is
+rewritten, a ZODB class pickle is written in the `((module, name), None)`
+form, and shared sub-objects come back as equal copies. The string API
+`pickle_to_json` sorts dict keys and `json_to_pickle` writes protocol 3; the
+record functions (`decode_zodb_record`, `decode_zodb_record_for_pg_json`,
+`encode_zodb_record`) and `dict_to_pickle` keep key order and write
+protocol 2.
 
 ## Native JSON types
 
