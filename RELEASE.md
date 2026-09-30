@@ -115,11 +115,11 @@ to **PyPI**.
 
 | Platform | Architecture | Wheels |
 |----------|-------------|--------|
-| Linux (manylinux) | x86_64 | Python 3.12-3.14 |
-| Linux (manylinux) | aarch64 | Python 3.12-3.14 |
-| macOS | x86_64 | Python 3.12-3.14 |
-| macOS | arm64 (Apple Silicon) | Python 3.12-3.14 |
-| Windows | x64 | Python 3.12-3.14 |
+| Linux (manylinux) | x86_64 | Python 3.12-3.15 |
+| Linux (manylinux) | aarch64 | Python 3.12-3.15 |
+| macOS | x86_64 | Python 3.12-3.15 |
+| macOS | arm64 (Apple Silicon) | Python 3.12-3.15 |
+| Windows | x64 | Python 3.12-3.15 |
 | Source | - | sdist |
 
 ## Workflow Overview

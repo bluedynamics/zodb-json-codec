@@ -5,8 +5,8 @@
 - Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
   3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage
   collector can run finalizers inside any GC-tracked allocation, a class of
-  re-entrancy the extension no longer has to consider. 3.15 wheels follow once
-  the release is out [#41]
+  re-entrancy the extension no longer has to consider; Python 3.15 wheels and
+  CI are added (PyO3 0.29) [#41]
 
 - Protocol 0 text opcodes decode like CPython: `STRING` unescapes the bytes repr
   (`\'`, `\xNN`, octal, ...; it used to keep the backslashes) and requires the
