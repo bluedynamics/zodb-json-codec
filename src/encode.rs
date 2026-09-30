@@ -132,8 +132,9 @@ fn newobj_args_state(state: &PickleValue) -> Option<(&PickleValue, &PickleValue)
     }
 }
 
-/// The `NEWOBJ_EX` shape earlier releases wrote (#35): a dict with exactly the
-/// keys `@args` (a tuple) and `@kwargs` (a dict), in any order.
+/// The `NEWOBJ_EX` shape 1.6.x wrote (#35): a dict with exactly the keys
+/// `@args` (a tuple) and `@kwargs` (a dict), in any order. A dict is never a
+/// valid `REDUCE`/`NEWOBJ` argument, so translating it loses nothing.
 fn newobj_ex_legacy(args: &PickleValue) -> Option<(&PickleValue, &PickleValue)> {
     let PickleValue::Dict(pairs) = args else {
         return None;
@@ -181,8 +182,9 @@ impl Encoder {
         self.write_u8(GLOBAL);
         self.write_bytes(b"copyreg\n__newobj_ex__\n");
         write_cls(self)?;
-        self.encode_value(args, depth + 1)?;
-        self.encode_value(kwargs, depth + 1)?;
+        // items of the TUPLE3 written below: one level deeper than the call
+        self.encode_value(args, depth + 2)?;
+        self.encode_value(kwargs, depth + 2)?;
         self.write_u8(TUPLE3);
         self.write_u8(REDUCE);
         Ok(())
@@ -453,8 +455,8 @@ impl Encoder {
                 newobj,
                 state,
             } => {
-                match if *newobj { newobj_ex_legacy(args) } else { None } {
-                    // the NEWOBJ_EX shape earlier releases wrote (#35)
+                match newobj_ex_legacy(args) {
+                    // the NEWOBJ_EX shape 1.6.x wrote, with or without `newobj` (#35)
                     Some((a, k)) => {
                         self.write_newobj_ex_call(|s| s.encode_value(callable, depth + 1), a, k, depth)?;
                     }
@@ -738,18 +740,22 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("copyreg\n__newobj_ex__\n"), "{text:?}");
         assert!(bytes.contains(&REDUCE) && !bytes.contains(&NEWOBJ));
-        // without newobj the dict args are an ordinary REDUCE argument
+        // 1.6.1 wrote the shape without a `newobj` key: translated as well
         let val = PickleValue::Reduce {
             callable: Box::new(PickleValue::Global { module: "m".into(), name: "C".into() }),
             args: Box::new(legacy_newobj_ex_args()),
             dict_items: None,
             list_items: None,
             newobj: false,
-            state: None,
+            state: Some(Box::new(PickleValue::Dict(vec![]))),
         };
         let bytes = encode_pickle(&val).unwrap();
-        assert!(!String::from_utf8_lossy(&bytes).contains("copyreg"));
-        assert!(bytes.contains(&REDUCE));
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("copyreg\n__newobj_ex__\n"), "{text:?}");
+        let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
+        // BUILD is b'b', which also occurs inside "__newobj_ex__": look after the REDUCE
+        let b = r + bytes[r..].iter().position(|&b| b == BUILD).unwrap();
+        assert!(r < b && !bytes.contains(&NEWOBJ));
     }
 
     fn reduce(newobj: bool, state: Option<PickleValue>) -> PickleValue {

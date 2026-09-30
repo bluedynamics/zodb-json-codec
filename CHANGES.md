@@ -8,7 +8,8 @@
   loads to an equal object, with or without `BUILD` state; it used to produce
   a pickle CPython rejects (`NEWOBJ args argument must be a tuple`). JSON
   written by earlier releases for such objects (`@args`/`@kwargs` under
-  `args`, or nested in an instance state) encodes the same way [#35]
+  `args`, with or without a `newobj` key, or nested in an instance state)
+  encodes the same way [#35]
 
 - Instances that a pickler wrote as `REDUCE(cls, ()) + BUILD` (a `__reduce__`
   returning the class with empty arguments, for example `OrderedDict`

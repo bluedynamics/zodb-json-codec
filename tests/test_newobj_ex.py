@@ -1,5 +1,7 @@
 """NEWOBJ_EX (protocol 4) objects re-encode as copyreg.__newobj_ex__ REDUCE and load equal (#35)."""
 
+import copyreg
+import io
 import json
 import pickle
 import pickletools
@@ -32,7 +34,32 @@ class KwNewWithState(KwNew):
         self.extra = state["extra"]
 
 
-CLASS_PICKLE = pickle.dumps(("persistent.mapping", "PersistentMapping"), protocol=3)
+class EmptyBoth:
+    """NEWOBJ_EX with empty args and empty kwargs: only a custom __reduce_ex__ produces it."""
+
+    def __reduce_ex__(self, protocol):
+        return (copyreg.__newobj_ex__, (EmptyBoth, (), {}), {"tag": self.tag})
+
+
+class KwOnly:
+    """NEWOBJ_EX with empty args and one keyword argument."""
+
+    def __new__(cls, *, k):
+        self = object.__new__(cls)
+        self.k = k
+        return self
+
+    def __reduce_ex__(self, protocol):
+        return (copyreg.__newobj_ex__, (KwOnly, (), {"k": self.k}))
+
+
+def zodb_record(state, protocol):
+    """A ZODB record: class pickle and state pickle from one pickler, sharing the memo."""
+    buf = io.BytesIO()
+    pickler = pickle.Pickler(buf, protocol=protocol)
+    pickler.dump(("persistent.mapping", "PersistentMapping"))
+    pickler.dump(state)
+    return buf.getvalue()
 
 
 def opcodes(data):
@@ -90,15 +117,30 @@ def test_json_shape_is_the_copyreg_form():
     assert "newobj" not in js["@reduce"]
 
 
+def test_empty_args_and_kwargs():
+    e = EmptyBoth()
+    e.tag = "t"
+    data = pickle.dumps(e, protocol=4)
+    assert "NEWOBJ_EX" in opcodes(data)
+    back = zodb_json_codec.json_to_pickle(zodb_json_codec.pickle_to_json(data))
+    assert pickle.loads(back).tag == "t"
+    data = pickle.dumps(KwOnly.__new__(KwOnly, k=9), protocol=4)
+    assert "NEWOBJ_EX" in opcodes(data)
+    back = zodb_json_codec.dict_to_pickle(zodb_json_codec.pickle_to_dict(data))
+    assert pickle.loads(back).k == 9
+
+
 def test_record_path_protocol_4():
     obj = make(KwNewWithState, 2, "z", extra="e")
-    rec = CLASS_PICKLE + pickle.dumps({"data": {"v": obj}}, protocol=4)
+    # the repeated string is a memo reference across the shared memo of the record
+    rec = zodb_record({"data": {"v": obj, "again": "persistent.mapping"}}, protocol=4)
     _, _, js, _ = zodb_json_codec.decode_zodb_record_for_pg_json(rec)
     inner = json.loads(js)["data"]["v"]
     assert inner["@reduce"]["callable"] == {"@cls": ["copyreg", "__newobj_ex__"]}
     back = zodb_json_codec.encode_zodb_record(zodb_json_codec.decode_zodb_record(rec))
     loaded = pickle.loads(state_pickle(back))
     assert loaded["data"]["v"].__dict__ == {"a": 2, "k": "z", "extra": "e"}
+    assert loaded["data"]["again"] == "persistent.mapping"
 
 
 def test_legacy_json_shapes_encode():
@@ -114,6 +156,17 @@ def test_legacy_json_shapes_encode():
     )
     obj = pickle.loads(zodb_json_codec.json_to_pickle(legacy_reduce))
     assert obj.__dict__ == {"a": 5, "k": "legacy"}
+    # 1.6.1 had no newobj key at all
+    legacy_161 = json.dumps(
+        {
+            "@reduce": {
+                "callable": {"@cls": [mod, "KwNew"]},
+                "args": {"@args": {"@t": [8]}, "@kwargs": {"k": "161"}},
+            }
+        }
+    )
+    obj = pickle.loads(zodb_json_codec.json_to_pickle(legacy_161))
+    assert obj.__dict__ == {"a": 8, "k": "161"}
     legacy_instance = json.dumps(
         {
             "@cls": [mod, "KwNewWithState"],
