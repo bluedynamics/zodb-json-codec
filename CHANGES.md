@@ -20,6 +20,11 @@
   by all encoder paths, which used to write them back as a plain dict or as a
   `GLOBAL` with empty module and name [#25]
 
+- `encode_zodb_record` no longer panics with `already borrowed` if it is
+  re-entered on the same thread while an encode is running: the thread-local
+  buffer and class cache fall back to a fresh local one for the inner call
+  [#25]
+
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
   the compact `["oid", "module.Class"]` form is now only recognized when both
