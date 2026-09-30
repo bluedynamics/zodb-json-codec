@@ -1,4 +1,3 @@
-#[cfg(test)]
 use crate::error::CodecError;
 use crate::types::PickleValue;
 
@@ -147,7 +146,7 @@ fn decode_zodb_record(data: &[u8]) -> Result<Value, CodecError> {
     let (class_val, state_val) = crate::decode::decode_zodb_pickles(data)?;
 
     // Extract class info
-    let (module, name) = extract_class_info(&class_val);
+    let (module, name) = extract_class_info(&class_val)?;
 
     // Use BTree-specific state conversion if applicable
     let state_json = if let Some(info) = btrees::classify_btree(&module, &name) {
@@ -346,39 +345,52 @@ fn try_expand_ref(ref_val: &Value) -> Option<Value> {
 
 /// Extract (module, name) from a class pickle value.
 ///
-/// ZODB class pickles come in several formats:
-///   1. GLOBAL opcode: `PickleValue::Global { module, name }`
-///   2. Nested tuple: `((module, name), None_or_args)` — from PersistentPickler
-///   3. Flat tuple: `(module, name)` — legacy/simplified
-pub fn extract_class_info(val: &PickleValue) -> (String, String) {
+/// ZODB class pickles come in several formats (`ZODB.serialize.ObjectWriter.serialize`):
+///   1. `klass` as a GLOBAL: `PickleValue::Global { module, name }`
+///   2. `(klass, newargs)` with a GLOBAL class
+///   3. `((module, name), newargs)` for persistent classes
+///   4. `(module, name)` flat tuple (legacy/simplified)
+///
+/// `newargs` is `None` or `()` for every class this codec can represent. Anything
+/// else means the class needs constructor arguments that the JSON record format
+/// has no place for, so it is an error rather than silent loss.
+pub fn extract_class_info(val: &PickleValue) -> Result<(String, String), CodecError> {
     match val {
-        PickleValue::Global { module, name } => (module.clone(), name.clone()),
+        PickleValue::Global { module, name } => Ok((module.clone(), name.clone())),
         PickleValue::Tuple(items) if items.len() == 2 => {
-            match &items[0] {
-                // Nested tuple: ((module, name), None_or_args)
+            let (module, name) = match &items[0] {
                 PickleValue::Tuple(inner) if inner.len() == 2 => {
-                    let module = match &inner[0] {
-                        PickleValue::String(s) => s.clone(),
-                        _ => String::new(),
-                    };
-                    let name = match &inner[1] {
-                        PickleValue::String(s) => s.clone(),
-                        _ => String::new(),
-                    };
-                    (module, name)
+                    (string_or_empty(&inner[0]), string_or_empty(&inner[1]))
                 }
+                PickleValue::Global { module, name } => (module.clone(), name.clone()),
                 // Flat tuple: (module_str, name_str)
                 PickleValue::String(module) => {
-                    let name = match &items[1] {
-                        PickleValue::String(s) => s.clone(),
-                        _ => String::new(),
-                    };
-                    (module.clone(), name)
+                    return Ok((module.clone(), string_or_empty(&items[1])));
                 }
-                _ => (String::new(), String::new()),
-            }
+                _ => return Ok((String::new(), String::new())),
+            };
+            check_no_newargs(&items[1])?;
+            Ok((module, name))
         }
-        _ => (String::new(), String::new()),
+        _ => Ok((String::new(), String::new())),
+    }
+}
+
+fn check_no_newargs(newargs: &PickleValue) -> Result<(), CodecError> {
+    match newargs {
+        PickleValue::None => Ok(()),
+        PickleValue::Tuple(items) if items.is_empty() => Ok(()),
+        _ => Err(CodecError::InvalidData(
+            "class pickle carries __getnewargs__ arguments, which the JSON record format cannot store"
+                .to_string(),
+        )),
+    }
+}
+
+fn string_or_empty(v: &PickleValue) -> String {
+    match v {
+        PickleValue::String(s) => s.clone(),
+        _ => String::new(),
     }
 }
 
