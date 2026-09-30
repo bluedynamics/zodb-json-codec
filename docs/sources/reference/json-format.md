@@ -293,6 +293,16 @@ Optional keys inside `@reduce`:
 }
 ```
 
+A protocol 4 `NEWOBJ_EX` (`cls.__new__(cls, *args, **kwargs)`, from
+`__getnewargs_ex__` with keyword arguments) is written as the reduce form
+CPython's own `__reduce_ex__` returns for it: callable
+`copyreg.__newobj_ex__`, args `(cls, args, kwargs)`, and `state` for a
+following `BUILD`. The encoders write it as a `REDUCE`, which loads to the same
+object on any Python 3.4 or newer, and they translate the shape earlier
+releases wrote for these objects (a dict `args` holding `@args` and
+`@kwargs`, with or without `newobj`, also nested in an instance state) into
+the same call.
+
 Instances created with `NEWOBJ` and non-empty constructor arguments
 (`__getnewargs__`) followed by `BUILD` keep the `@cls`/`@s` form; their state
 holds both parts:

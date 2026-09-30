@@ -798,19 +798,21 @@ impl<'a> Decoder<'a> {
                     let (kwargs, dk) = self.pop_value_d()?;
                     let (args, da) = self.pop_value_d()?;
                     let (cls, dc) = self.pop_value_d()?;
-                    // args and kwargs are wrapped in a dict below: two levels
-                    let d = Self::nest(Self::nest(dk.max(da))?.max(dc))?;
-                    // For now, combine args and kwargs
-                    let combined_args = PickleValue::Dict(vec![
-                        (PickleValue::String("@args".to_string()), args),
-                        (PickleValue::String("@kwargs".to_string()), kwargs),
-                    ]);
+                    // `cls.__new__(cls, *args, **kwargs)` as the reduce form CPython's own
+                    // `object.__reduce_ex__` returns for `__getnewargs_ex__` objects:
+                    // `copyreg.__newobj_ex__(cls, args, kwargs)`. Protocol 3 can express
+                    // it as a plain REDUCE, a following BUILD becomes its state (#35).
+                    let tuple_depth = Self::nest(dk.max(da).max(dc))?;
+                    let d = Self::nest(tuple_depth)?;
                     self.push_at(PickleValue::Reduce {
-                        callable: Box::new(cls),
-                        args: Box::new(combined_args),
+                        callable: Box::new(PickleValue::Global {
+                            module: "copyreg".to_string(),
+                            name: "__newobj_ex__".to_string(),
+                        }),
+                        args: Box::new(PickleValue::Tuple(vec![cls, args, kwargs])),
                         dict_items: None,
                         list_items: None,
-                        newobj: true,
+                        newobj: false,
                         state: None,
                     }, d);
                 }
@@ -1807,6 +1809,42 @@ mod tests {
                 );
             }
             other => panic!("expected Instance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_newobj_ex_decodes_to_copyreg_newobj_ex_reduce() {
+        // PROTO 4, GLOBAL m.C, (1,), {"k": 2}, NEWOBJ_EX, STOP
+        let data = b"\x80\x04cm\nC\nK\x01\x85}X\x01\x00\x00\x00kK\x02s\x92.";
+        match decode_pickle(data).unwrap() {
+            PickleValue::Reduce { callable, args, newobj, state, .. } => {
+                assert_eq!(
+                    *callable,
+                    PickleValue::Global { module: "copyreg".into(), name: "__newobj_ex__".into() }
+                );
+                assert_eq!(
+                    *args,
+                    PickleValue::Tuple(vec![
+                        PickleValue::Global { module: "m".into(), name: "C".into() },
+                        PickleValue::Tuple(vec![PickleValue::Int(1)]),
+                        PickleValue::Dict(vec![(PickleValue::String("k".into()), PickleValue::Int(2))]),
+                    ])
+                );
+                assert!(!newobj);
+                assert!(state.is_none());
+            }
+            other => panic!("expected Reduce, got {other:?}"),
+        }
+        // with BUILD: the state rides on the Reduce
+        let data = b"\x80\x04cm\nC\nK\x01\x85}X\x01\x00\x00\x00kK\x02s\x92}X\x01\x00\x00\x00xK\x03sb.";
+        match decode_pickle(data).unwrap() {
+            PickleValue::Reduce { state: Some(st), newobj: false, .. } => {
+                assert_eq!(
+                    *st,
+                    PickleValue::Dict(vec![(PickleValue::String("x".into()), PickleValue::Int(3))])
+                );
+            }
+            other => panic!("expected Reduce with state, got {other:?}"),
         }
     }
 

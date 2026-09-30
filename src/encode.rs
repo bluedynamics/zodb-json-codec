@@ -126,6 +126,33 @@ fn newobj_args_state(state: &PickleValue) -> Option<(&PickleValue, &PickleValue)
     }
     match (args, inner) {
         (Some(a @ PickleValue::Tuple(_)), Some(i)) => Some((a, i)),
+        // the NEWOBJ_EX-with-state shape earlier releases wrote (#35)
+        (Some(a), Some(i)) if newobj_ex_legacy(a).is_some() => Some((a, i)),
+        _ => None,
+    }
+}
+
+/// The `NEWOBJ_EX` shape 1.6.x wrote (#35): a dict with exactly the keys
+/// `@args` (a tuple) and `@kwargs` (a dict), in any order. A dict is never a
+/// valid `REDUCE`/`NEWOBJ` argument, so translating it loses nothing.
+fn newobj_ex_legacy(args: &PickleValue) -> Option<(&PickleValue, &PickleValue)> {
+    let PickleValue::Dict(pairs) = args else {
+        return None;
+    };
+    if pairs.len() != 2 {
+        return None;
+    }
+    let mut a = None;
+    let mut k = None;
+    for (key, v) in pairs {
+        match key {
+            PickleValue::String(s) if s == "@args" => a = Some(v),
+            PickleValue::String(s) if s == "@kwargs" => k = Some(v),
+            _ => return None,
+        }
+    }
+    match (a, k) {
+        (Some(a @ PickleValue::Tuple(_)), Some(k @ PickleValue::Dict(_))) => Some((a, k)),
         _ => None,
     }
 }
@@ -142,6 +169,27 @@ impl Encoder {
     }
 
     #[inline]
+    /// `copyreg.__newobj_ex__(cls, args, kwargs)` as a REDUCE call: what a
+    /// protocol 4 `NEWOBJ_EX` means, expressed in protocol 3 (#35). `write_cls`
+    /// writes the class.
+    fn write_newobj_ex_call(
+        &mut self,
+        write_cls: impl FnOnce(&mut Self) -> Result<(), CodecError>,
+        args: &PickleValue,
+        kwargs: &PickleValue,
+        depth: usize,
+    ) -> Result<(), CodecError> {
+        self.write_u8(GLOBAL);
+        self.write_bytes(b"copyreg\n__newobj_ex__\n");
+        write_cls(self)?;
+        // items of the TUPLE3 written below: one level deeper than the call
+        self.encode_value(args, depth + 2)?;
+        self.encode_value(kwargs, depth + 2)?;
+        self.write_u8(TUPLE3);
+        self.write_u8(REDUCE);
+        Ok(())
+    }
+
     fn write_u8(&mut self, b: u8) {
         self.buf.push(b);
     }
@@ -351,16 +399,26 @@ impl Encoder {
                     None => (None, state.as_ref()),
                 };
                 self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+opcode
-                self.write_u8(GLOBAL);
-                self.write_bytes(module.as_bytes());
-                self.write_u8(b'\n');
-                self.write_bytes(name.as_bytes());
-                self.write_u8(b'\n');
-                match args {
-                    Some(args) => self.encode_value(args, depth + 1)?,
-                    None => self.write_u8(EMPTY_TUPLE),
+                let write_cls = |s: &mut Self| {
+                    s.write_u8(GLOBAL);
+                    s.write_bytes(module.as_bytes());
+                    s.write_u8(b'\n');
+                    s.write_bytes(name.as_bytes());
+                    s.write_u8(b'\n');
+                    Ok(())
+                };
+                match args.and_then(newobj_ex_legacy) {
+                    // the NEWOBJ_EX-with-state shape 1.6.x wrote (#35)
+                    Some((a, k)) => self.write_newobj_ex_call(write_cls, a, k, depth)?,
+                    None => {
+                        write_cls(self)?;
+                        match args {
+                            Some(args) => self.encode_value(args, depth + 1)?,
+                            None => self.write_u8(EMPTY_TUPLE),
+                        }
+                        self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
+                    }
                 }
-                self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
                 // Dict/list subclass items go before the state, in the order CPython's
                 // save_reduce writes them: APPENDS, then SETITEMS, then BUILD.
                 if let Some(items) = list_items {
@@ -397,9 +455,17 @@ impl Encoder {
                 newobj,
                 state,
             } => {
-                self.encode_value(callable, depth + 1)?;
-                self.encode_value(args, depth + 1)?;
-                self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
+                match newobj_ex_legacy(args) {
+                    // the NEWOBJ_EX shape 1.6.x wrote, with or without `newobj` (#35)
+                    Some((a, k)) => {
+                        self.write_newobj_ex_call(|s| s.encode_value(callable, depth + 1), a, k, depth)?;
+                    }
+                    None => {
+                        self.encode_value(callable, depth + 1)?;
+                        self.encode_value(args, depth + 1)?;
+                        self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
+                    }
+                }
                 // Post-REDUCE items in CPython's save_reduce order: APPENDS, then SETITEMS.
                 if let Some(items) = list_items {
                     if !items.is_empty() {
@@ -650,6 +716,45 @@ mod tests {
         let bytes = encode_pickle(&val).unwrap();
         let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
         let b = bytes.iter().position(|&b| b == BUILD).unwrap();
+        assert!(r < b && !bytes.contains(&NEWOBJ));
+    }
+
+    fn legacy_newobj_ex_args() -> PickleValue {
+        PickleValue::Dict(vec![
+            (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::Int(1)])),
+            (PickleValue::String("@kwargs".into()), PickleValue::Dict(vec![(PickleValue::String("k".into()), PickleValue::Int(2))])),
+        ])
+    }
+
+    #[test]
+    fn test_legacy_newobj_ex_reduce_shape_emits_copyreg_call() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global { module: "m".into(), name: "C".into() }),
+            args: Box::new(legacy_newobj_ex_args()),
+            dict_items: None,
+            list_items: None,
+            newobj: true,
+            state: None,
+        };
+        let bytes = encode_pickle(&val).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("copyreg\n__newobj_ex__\n"), "{text:?}");
+        assert!(bytes.contains(&REDUCE) && !bytes.contains(&NEWOBJ));
+        // 1.6.1 wrote the shape without a `newobj` key: translated as well
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global { module: "m".into(), name: "C".into() }),
+            args: Box::new(legacy_newobj_ex_args()),
+            dict_items: None,
+            list_items: None,
+            newobj: false,
+            state: Some(Box::new(PickleValue::Dict(vec![]))),
+        };
+        let bytes = encode_pickle(&val).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("copyreg\n__newobj_ex__\n"), "{text:?}");
+        let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
+        // BUILD is b'b', which also occurs inside "__newobj_ex__": look after the REDUCE
+        let b = r + bytes[r..].iter().position(|&b| b == BUILD).unwrap();
         assert!(r < b && !bytes.contains(&NEWOBJ));
     }
 
