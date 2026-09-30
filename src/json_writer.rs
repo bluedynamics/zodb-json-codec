@@ -1,8 +1,6 @@
 //! Direct JSON string writer — writes JSON tokens to a String buffer
 //! without allocating intermediate serde_json::Value nodes.
 
-use std::fmt::Write;
-
 /// A low-level JSON token writer that appends directly to a String buffer.
 pub struct JsonWriter {
     buf: String,
@@ -310,6 +308,31 @@ mod tests {
         let mut w = JsonWriter::new();
         w.write_string("日本語");
         assert_eq!(w.into_string(), "\"日本語\"");
+    }
+
+    #[test]
+    fn test_escape_runs_long_mixed() {
+        // long safe runs around a few escapes: output must be exactly what serde_json writes
+        let mut text = String::new();
+        for i in 0..200 {
+            text.push_str("The quick brown fox jumps over the lazy dog, again and again ");
+            if i % 7 == 0 {
+                text.push('\n');
+            }
+            if i % 11 == 0 {
+                text.push('"');
+            }
+            if i % 13 == 0 {
+                text.push('\u{1f}');
+            }
+            if i % 17 == 0 {
+                text.push_str("Zürich 日本語 \\ ");
+            }
+        }
+        let mut w = JsonWriter::new();
+        w.write_string(&text);
+        let expected = serde_json::to_string(&text).unwrap();
+        assert_eq!(w.into_string(), expected);
     }
 
     #[test]
