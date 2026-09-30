@@ -95,11 +95,14 @@ RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" maturin develop --release
 
 ### 3. generate profiles
 
-Run both benchmark types to capture representative workload data:
+Run all three benchmark modes so the profile covers the Python-dict paths and
+the PG JSON path (the one zodb-pgjsonb runs; a profile without it makes the
+JSON writer slower, see #52):
 
 ```bash
 python benchmarks/bench.py synthetic --iterations 5000
 python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
+python benchmarks/bench.py pg-compare --iterations 2000 --filestorage benchmarks/bench_data/Data.fs
 ```
 
 ### 4. merge profile data

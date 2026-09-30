@@ -71,6 +71,9 @@ jobs:
               gunzip -k benchmarks/bench_data/Data.fs.gz || true
               $PYTHON benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
               $PYTHON benchmarks/bench.py synthetic --iterations 2000
+              # the PG JSON path is what zodb-pgjsonb runs; without it in the
+              # profile the optimizer treats the JSON writer as cold (#52)
+              $PYTHON benchmarks/bench.py pg-compare --iterations 2000 --filestorage benchmarks/bench_data/Data.fs
 
               # 4. Merge profiles and set RUSTFLAGS for the final build
               LLVM_PROFDATA=$(find /root/.rustup -name llvm-profdata 2>/dev/null | head -1 || true)
@@ -114,6 +117,7 @@ jobs:
           gunzip -k benchmarks/bench_data/Data.fs.gz
           python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
           python benchmarks/bench.py synthetic --iterations 2000
+          python benchmarks/bench.py pg-compare --iterations 2000 --filestorage benchmarks/bench_data/Data.fs
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" -name llvm-profdata | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls /tmp/pgo-data/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o /tmp/pgo-data/merged.profdata /tmp/pgo-data/*.profraw
@@ -155,6 +159,7 @@ jobs:
           gunzip -k benchmarks/bench_data/Data.fs.gz
           python benchmarks/bench.py filestorage benchmarks/bench_data/Data.fs
           python benchmarks/bench.py synthetic --iterations 2000
+          python benchmarks/bench.py pg-compare --iterations 2000 --filestorage benchmarks/bench_data/Data.fs
           LLVM_PROFDATA=$(find "$(rustc --print sysroot)" \( -name llvm-profdata -o -name llvm-profdata.exe \) | head -1)
           if [ -n "$LLVM_PROFDATA" ] && ls "$PGO_DIR"/*.profraw 1>/dev/null 2>&1; then
             "$LLVM_PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR"/*.profraw

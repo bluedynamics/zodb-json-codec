@@ -12,6 +12,12 @@
   stated once for every table; the journal's cumulative table follows. PGO
   turns out to slow the PG JSON pipeline on real records (see #52) [#27]
 
+- Release wheels: the PGO profile now includes the PG JSON path
+  (`bench.py pg-compare`), which the profile used to leave out. Note that PGO
+  still makes the PG JSON pipeline on real records slower than a build without
+  PGO (median 9.8 to 10.4 µs, P95 26 to 35 µs) while it speeds up the
+  Python-dict paths; the cause is open in #52 [#52]
+
 - Require Python 3.12 or newer: wheels and CI for 3.10 and 3.11 are dropped.
   3.10 reaches end of life on 2026-10-04, and on 3.10/3.11 the cyclic garbage
   collector can run finalizers inside any GC-tracked allocation, a class of
