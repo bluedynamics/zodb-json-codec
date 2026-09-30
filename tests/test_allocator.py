@@ -1,10 +1,11 @@
-"""The Rust-side allocator (mimalloc, #24) behaves across Python threads.
+"""The Rust-side allocator (mimalloc, #24) under Python thread churn.
 
-mimalloc keeps a heap per thread and frees blocks that another thread
-allocated through a deferred path. Python threads come and go under the
-extension module's feet, so pin that decoding, encoding and the JSON path
-stay correct with concurrent threads and with threads that are created and
-torn down repeatedly.
+mimalloc keeps a heap per thread, created on first use and torn down by a
+TLS destructor when the thread exits. All Rust allocations of the codec are
+thread-confined (freed inside the call that made them, or held in the
+thread's own buffers), so this is a crash smoke test for heap creation and
+teardown with concurrent threads and with threads created and joined
+repeatedly; it cannot detect leaks.
 """
 
 from concurrent.futures import ThreadPoolExecutor
@@ -42,18 +43,15 @@ def test_concurrent_threads():
 
 
 def test_thread_churn():
-    # every thread gets its own allocator heap; creating and joining many of
-    # them must neither leak nor crash when their blocks are freed elsewhere
+    # each thread creates its own allocator heap on first use and tears it
+    # down on exit; the main thread must keep working afterwards
     keep = []
     for i in range(50):
         t = threading.Thread(
-            target=lambda: keep.append(
-                zodb_json_codec.decode_zodb_record(RECORDS[i][0])
-            )
+            target=lambda r: keep.append(zodb_json_codec.decode_zodb_record(r)),
+            args=(RECORDS[i][0],),
         )
         t.start()
         t.join()
     assert len(keep) == 50
-    # blocks allocated on threads that are gone are released from this thread
-    del keep[:]
     churn(0, rounds=50)

@@ -462,7 +462,9 @@ previous release (#21).
 `lib.rs`, built with the `local_dynamic_tls` feature because the extension
 module is loaded with `dlopen`: initial-exec TLS would take part of glibc's
 fixed static TLS surplus and can make imports fail once other modules have
-used it up.
+used it up. The measured build is mimalloc 3.3.2 (`libmimalloc-sys` 0.1.49
+through `mimalloc` 0.1.52, pinned exactly: the v2 to v3 switch happened inside
+the 0.1 series and the two differ in speed and purge behaviour).
 
 **Why it helps:** the decode path is allocation-bound. Every string, list,
 dict and boxed instance in the `PickleValue` AST is a heap allocation, and all
@@ -476,8 +478,14 @@ before and after the change: FileStorage decode 38.8 to 22.2 µs per record,
 PG JSON pipeline median 39.3 to 20.7 µs and P95 76 to 53 µs, wide_dict decode
 413 to 202 µs, large_flat_dict 30.3 to 18.5 µs, deep_nesting 27.1 to 15.4 µs,
 small records 0 to 10%, encode 0 to 14%. The wheel grows by about 170 KB and
-building from source needs a C compiler (present on the manylinux, macOS and
-Windows release runners).
+building from source needs a C compiler (the release workflow was run on the
+branch for all wheels before merging). Local-dynamic TLS costs 5 to 12% of
+decode against an initial-exec build (FileStorage decode 20.2 versus 22.8 µs);
+that is the price of a module loaded with `dlopen`. Peak RSS on very large
+records is up to twice glibc's and freed pages are returned lazily (see the
+performance page). The allocator's share of the gain shrinks once the memo
+pre-scan (#22) removes the clone-heavy path that 1.6.x still has, so this
+entry and the pre-scan entry are not additive.
 
 **Lesson:** on an allocation-bound workload, benchmark the allocator early.
 It was worth more than any single optimization above.
@@ -491,6 +499,9 @@ It was worth more than any single optimization above.
 | Decode (synthetic) | 1.0-2.3x faster |
 | Decode (real FileStorage) | Near parity |
 | PG JSON path | 1.3-3.3x faster, GIL-free |
+
+The table predates entry 18 and the 1.6.0 regression; it is re-measured with
+#27.
 
 ## Lessons learned
 

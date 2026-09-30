@@ -213,6 +213,25 @@ The allocator is built with local-dynamic thread-local storage: the module is
 loaded with `dlopen`, and initial-exec TLS would take part of glibc's fixed
 static TLS surplus, which can make later imports fail with "cannot allocate
 memory in static TLS block".
+That build costs 5 to 12% of decode time against an initial-exec build
+(FileStorage decode 22.8 versus 20.2 us) and is kept for the import safety.
+The measured allocator is mimalloc 3.3.2 (crate `mimalloc` 0.1.52 with
+`libmimalloc-sys` 0.1.49), pinned exactly in `Cargo.toml`.
+
+Memory behaviour differs from glibc malloc in two ways an operator will see
+on RSS graphs.
+Peak RSS while decoding one very large record is up to twice as high (a 41 MB
+pickle: about 600 MB extra with glibc, about 1 GB with mimalloc), and after
+such a record mimalloc returns the freed pages lazily: a worker that decodes
+one huge record and then only idles keeps that memory until the next
+medium-sized activity, while under normal traffic it drops back within about
+a second (glibc never returns most of it).
+`MIMALLOC_PURGE_DELAY=10` (milliseconds) makes the release immediate at a small
+cost; `MIMALLOC_SHOW_STATS=1` prints allocator statistics at exit.
+mimalloc has no fork handlers: a process that forks while another thread is
+decoding with the GIL released (the `multiprocessing` fork start method, for
+example) can deadlock in the child on its next Rust allocation, a case glibc
+malloc handles. Zope and Plone workers are threads, not forks.
 
 ## Summary
 

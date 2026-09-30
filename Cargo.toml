@@ -28,4 +28,6 @@ itoa = "1"
 # local_dynamic_tls: the extension is dlopen'ed; initial-exec TLS would claim part of
 # glibc's fixed static-TLS surplus and can fail imports ("cannot allocate memory in
 # static TLS block") once other modules have used it up.
-mimalloc = { version = "0.1", default-features = false, features = ["local_dynamic_tls"] }
+# Pinned exactly: the mimalloc v2 to v3 switch happened inside the 0.1 series and the
+# two differ in speed and purge behaviour; bump deliberately, with a benchmark.
+mimalloc = { version = "=0.1.52", default-features = false, features = ["local_dynamic_tls"] }
