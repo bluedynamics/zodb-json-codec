@@ -833,6 +833,11 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
             // Check for standalone @cls (Global reference)
             if let Some(Value::Array(cls)) = map.get("@cls") {
                 if cls.len() == 2 && !map.contains_key("@s") {
+                    if ["@items", "@appends", "@newobj"].iter().any(|k| map.contains_key(*k)) {
+                        return Err(CodecError::InvalidData(
+                            "@items/@appends/@newobj require an instance state (@s)".to_string(),
+                        ));
+                    }
                     let module = cls[0].as_str().unwrap_or("").to_string();
                     let name = cls[1].as_str().unwrap_or("").to_string();
                     return Ok(PickleValue::Global { module, name });
@@ -1212,6 +1217,18 @@ mod tests {
     #[test]
     fn test_direct_none() {
         assert_pg_paths_match(&PickleValue::None, "", "");
+        assert_pg_paths_match(
+            &PickleValue::Instance(Box::new(InstanceData {
+                module: "m".into(),
+                name: "C".into(),
+                state: Box::new(PickleValue::Dict(vec![(PickleValue::String("x".into()), PickleValue::Int(1))])),
+                dict_items: None,
+                list_items: None,
+                newobj: false,
+            })),
+            "",
+            "",
+        );
     }
 
     #[test]

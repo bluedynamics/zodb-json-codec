@@ -343,13 +343,14 @@ impl Encoder {
                 if module.is_empty() && name.is_empty() {
                     return self.encode_anonymous_instance(state, depth);
                 }
-                // Emit as: GLOBAL module\nname\n args NEWOBJ [items] state BUILD, where args is
-                // EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12).
+                // Emit as: GLOBAL module\nname\n args NEWOBJ|REDUCE [items] state BUILD, where args
+                // is EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12)
+                // and the opcode follows the construction kind (#32).
                 let (args, state) = match newobj_args_state(state) {
                     Some((args, inner)) => (Some(args), inner),
                     None => (None, state.as_ref()),
                 };
-                self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+NEWOBJ
+                self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+opcode
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
                 self.write_u8(b'\n');

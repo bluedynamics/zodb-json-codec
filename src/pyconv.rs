@@ -1064,9 +1064,10 @@ pub fn pyobject_to_pickle_value(
 /// Convert a PyDict to PickleValue, checking for marker keys.
 ///
 /// Optimized dispatch:
-/// - len > 4: skip marker checks (no marker dict has >4 keys)
+/// - len > 5: skip marker checks (no marker dict has more than 5 keys:
+///   `@cls`, `@s`, `@newobj`, `@items`, `@appends`)
 /// - len == 1: direct key match (avoids all hash-based get_item lookups)
-/// - len 2-4: single-pass '@' scan, then targeted marker checks
+/// - len 2-5: single-pass '@' scan, then targeted marker checks
 fn pydict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
     expand_refs: bool,
@@ -1074,8 +1075,8 @@ fn pydict_to_pickle_value(
     let py = dict.py();
     let len = dict.len();
 
-    // Fast path: no JSON marker dict has more than 4 keys.
-    if len > 4 {
+    // Fast path: no JSON marker dict has more than 5 keys (#32).
+    if len > 5 {
         return plain_dict_to_pickle_value(dict, expand_refs);
     }
 
@@ -1167,9 +1168,10 @@ fn pydict_to_pickle_value(
                 }
                 if dict.get_item(intern!(py, "@items"))?.is_some()
                     || dict.get_item(intern!(py, "@appends"))?.is_some()
+                    || dict.get_item(intern!(py, "@newobj"))?.is_some()
                 {
                     return Err(CodecError::InvalidData(
-                        "@items/@appends require an instance state (@s)".into(),
+                        "@items/@appends/@newobj require an instance state (@s)".into(),
                     )
                     .into());
                 }
@@ -2221,8 +2223,8 @@ fn encode_pydict_to_pickle(
 ) -> PyResult<()> {
     let len = dict.len();
 
-    // Fast path: no marker dict has more than 4 keys
-    if len > 4 {
+    // Fast path: no marker dict has more than 5 keys (#32)
+    if len > 5 {
         return encode_plain_dict_to_pickle(dict, buf, expand_refs);
     }
 
@@ -2274,7 +2276,7 @@ fn encode_pydict_to_pickle(
 
                     // Instances with SETITEMS/APPENDS data or the REDUCE kind (#32) need the
                     // PickleValue path, which emits items before BUILD like CPython does.
-                    // Only a 3- or 4-key dict can carry them; skip the lookups otherwise.
+                    // Only a 3- to 5-key dict can carry them; skip the lookups otherwise.
                     if len > 2
                         && (dict.get_item(intern!(py, "@items"))?.is_some()
                             || dict.get_item(intern!(py, "@appends"))?.is_some()

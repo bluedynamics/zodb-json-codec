@@ -218,12 +218,16 @@ ZODB record.
 ### `@newobj` -- Construction Kind
 
 Written as `false`, next to `@cls`/`@s`, when the pickle created the instance
-by calling the class (`REDUCE` with empty arguments, the shape of a
-`__reduce__` that returns `(cls, (), state)`, for example `OrderedDict`
-subclasses with a `__dict__`). Absent means the instance was created with
-`NEWOBJ` (`cls.__new__(cls)`), the common case. The encoders emit the same
-opcode again, so `__init__` runs on unpickling exactly when it did for the
-original pickle.
+by calling the callable named by `@cls`, usually the class (`REDUCE` with
+empty arguments, the shape of a `__reduce__` that returns `(cls, (), state)`,
+for example `OrderedDict` subclasses with a `__dict__`). Absent means the
+instance was created with `NEWOBJ` (`cls.__new__(cls)`), the common case. The
+encoders emit the same opcode again, so `__init__` runs on unpickling exactly
+when it did for the original pickle. Note the opposite default of the
+`newobj` key inside `@reduce` below: there, absent means `REDUCE`; each
+default is the common case of its form. `@newobj`, like `@items` and
+`@appends`, is only valid next to `@s`; readers reject it on a bare class
+reference.
 
 ```json
 {

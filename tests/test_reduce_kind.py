@@ -3,6 +3,8 @@
 import json
 import pickle
 import pickletools
+
+import pytest
 from collections import OrderedDict
 
 import zodb_json_codec
@@ -39,6 +41,14 @@ def record(value):
 
 def opcodes(data):
     return [op.name for op, _, _ in pickletools.genops(data)]
+
+
+def state_pickle(rec):
+    """The second pickle of a ZODB record (genops stops at the class pickle's STOP)."""
+    for op, _, pos in pickletools.genops(rec):
+        if op.name == "STOP":
+            return rec[pos + 1 :]
+    raise AssertionError("no STOP in the class pickle")
 
 
 def test_pg_json_marks_reduce_kind():
@@ -92,7 +102,7 @@ def test_dict_path_reencode_runs_init():
     rec = zodb_json_codec.decode_zodb_record(record(c))
     assert rec["@s"]["data"]["v"]["@newobj"] is False
     back_rec = zodb_json_codec.encode_zodb_record(rec)
-    assert "NEWOBJ" not in opcodes(back_rec)
+    assert "NEWOBJ" not in opcodes(state_pickle(back_rec))
 
 
 def test_reduce_kind_with_items():
@@ -121,3 +131,82 @@ def test_flag_other_than_false_means_newobj():
             flag,
         )
         assert "NEWOBJ" in opcodes(zodb_json_codec.json_to_pickle(stored))
+
+
+class Both(list):
+    """__reduce__ with state, list items and dict items: five marker keys in JSON (#32 review)."""
+
+    def __init__(self):
+        INIT_CALLS.append("both")
+        self.extra = {}
+
+    def __setitem__(self, key, value):
+        self.extra[key] = value
+
+    def __reduce__(self):
+        return (Both, (), {"tag": self.tag}, iter(list(self)), iter(self.extra.items()))
+
+    def __setstate__(self, state):
+        self.tag = state["tag"]
+
+
+def test_five_key_instance_dict_takes_the_marker_path():
+    b = Both()
+    b.append(1)
+    b["k"] = "v"
+    b.tag = "t"
+    data = pickle.dumps(b, protocol=3)
+    as_dict = zodb_json_codec.pickle_to_dict(data)
+    assert set(as_dict) == {"@cls", "@s", "@newobj", "@items", "@appends"}
+    for back in (
+        zodb_json_codec.dict_to_pickle(as_dict),
+        zodb_json_codec.json_to_pickle(zodb_json_codec.pickle_to_json(data)),
+    ):
+        ops = opcodes(back)
+        assert "NEWOBJ" not in ops
+        assert (
+            ops.index("REDUCE")
+            < ops.index("APPENDS")
+            < ops.index("SETITEMS")
+            < ops.index("BUILD")
+        )
+        INIT_CALLS.clear()
+        loaded = pickle.loads(back)
+        assert isinstance(loaded, Both)
+        assert (list(loaded), loaded.extra, loaded.tag, INIT_CALLS) == (
+            [1],
+            {"k": "v"},
+            "t",
+            ["both"],
+        )
+    rec = zodb_json_codec.decode_zodb_record(record(b))
+    assert set(rec["@s"]["data"]["v"]) == {
+        "@cls",
+        "@s",
+        "@newobj",
+        "@items",
+        "@appends",
+    }
+    back_rec = zodb_json_codec.encode_zodb_record(rec)
+    assert "NEWOBJ" not in opcodes(state_pickle(back_rec)) and "SETITEMS" in opcodes(
+        state_pickle(back_rec)
+    )
+
+
+def test_dict_path_flag_other_than_false_means_newobj():
+    for flag in (True, None, 0, "false"):
+        d = {"@cls": [__name__, "Counted"], "@s": {"x": 1}, "@newobj": flag}
+        assert "NEWOBJ" in opcodes(zodb_json_codec.dict_to_pickle(d))
+        rec = {"@cls": ["persistent.mapping", "PersistentMapping"], "@s": {"v": d}}
+        assert "NEWOBJ" in opcodes(
+            state_pickle(zodb_json_codec.encode_zodb_record(rec))
+        )
+
+
+def test_instance_keys_without_state_are_rejected():
+    for key, value in (("@newobj", False), ("@items", []), ("@appends", [])):
+        bad = {"@cls": [__name__, "Counted"], key: value}
+        with pytest.raises(ValueError):
+            zodb_json_codec.json_to_pickle(json.dumps(bad))
+        with pytest.raises(ValueError):
+            zodb_json_codec.dict_to_pickle(bad)

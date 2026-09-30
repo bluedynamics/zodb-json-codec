@@ -7,8 +7,11 @@
   subclasses with a `__dict__`) re-encode as `REDUCE` again, so `__init__`
   runs on unpickling as it did for the original pickle; they used to come
   back as `NEWOBJ`. The JSON carries `"@newobj": false` next to `@cls`/`@s`
-  for such instances; absent means `NEWOBJ`, so stored data is unaffected
-  [#32]
+  for such instances; absent means `NEWOBJ`, so stored data is unaffected.
+  The Python-dict readers now recognise instance dicts of five keys
+  (`@cls`, `@s`, `@newobj`, `@items`, `@appends`), and every reader rejects
+  `@newobj`, `@items` or `@appends` on a bare class reference without `@s`
+  (the JSON reader used to drop them silently) [#32]
 
 - Docs: journal entry 22 explains the PGO slowdown of the PG JSON path
   (the profile-guided build put the end-of-slice check on the pointer step of
