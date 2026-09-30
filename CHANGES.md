@@ -31,6 +31,12 @@
   an `i64` directly instead of going through `BigInt` (a record of 2,500 such
   ints decodes 17% faster; the sample database has none) [#26]
 
+- PG JSON performance: persistent references (hex oid and class path), bytes,
+  `@ns` strings and keys and `@pkl` are written straight into the output
+  buffer instead of through temporary strings (PG JSON pipeline median 17.1 to
+  16.4 µs on the sample database, which has 9 references and 12 bytes values
+  per record) [#26]
+
 - Decode performance: memo puts that no later `GET`/`BINGET` reads are skipped
   after a pre-scan of the opcode stream. The 1.6.0 memo fix deep-copied every
   container into the memo once per nesting level (typical records decoded 30
