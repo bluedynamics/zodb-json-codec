@@ -1,6 +1,6 @@
 # Changelog
 
-## unreleased
+## 1.7.0 (2026-10-01)
 
 - `NEWOBJ_EX` (protocol 4, `__getnewargs_ex__` with keyword arguments)
   decodes to the `copyreg.__newobj_ex__` reduce form, the one CPython's own
@@ -194,7 +194,9 @@
   used to overflow the stack); both raise `ValueError`. The bound assumes the
   platform's default thread stack (8 MiB on glibc); threads created with a
   much smaller `threading.stack_size()` can still overflow on deep input, see
-  #40 [#19]
+  #40. The encoder guard costs about a third on the `deep_nesting` encode
+  micro-benchmark (1.3 to 1.8 us for 100 levels) and nothing measurable on
+  the other categories or the FileStorage sample [#19]
 
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
