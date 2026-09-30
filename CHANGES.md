@@ -65,6 +65,12 @@
   free-threaded Python 3.13t, which the wheels never targeted; 3.10 to 3.14
   stay supported [#31]
 
+- Nesting depth is bounded everywhere: the decoder refuses pickles that would
+  build values nested deeper than 1000 levels (they used to crash the
+  interpreter when the value was dropped), and `encode_zodb_record` /
+  `dict_to_pickle` refuse Python input nested deeper than 1000 levels (they
+  used to overflow the stack); both raise `ValueError` [#19]
+
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.
 
