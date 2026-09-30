@@ -592,7 +592,7 @@ columns are on the performance page):
 | Encode (real FileStorage) | 4.5x faster |
 | Decode (synthetic) | 1.0-2.4x faster (`deep_nesting` at parity) |
 | Decode (real FileStorage) | 1.6x faster |
-| PG JSON path vs dict path plus `json.dumps` | 1.5-3.6x faster, 2.4x on the FileStorage median, GIL-free |
+| PG JSON path vs dict path plus `json.dumps` | 1.5-3.9x faster, 2.4x on the FileStorage median, GIL-free |
 
 ## Lessons learned
 

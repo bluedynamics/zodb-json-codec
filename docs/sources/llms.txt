@@ -3,7 +3,7 @@
 > Fast pickle-to-JSON transcoder for ZODB, implemented in Rust via PyO3.
 
 zodb-json-codec converts ZODB pickle records into human-readable, JSONB-queryable JSON
-while maintaining full roundtrip fidelity. It is designed as the codec layer for
+while staying round-trip safe. It is designed as the codec layer for
 zodb-pgjsonb, a PostgreSQL JSONB storage backend for ZODB.
 
 ## Key Facts
@@ -11,7 +11,7 @@ zodb-pgjsonb, a PostgreSQL JSONB storage backend for ZODB.
 - Package: zodb-json-codec
 - License: MIT
 - Python: 3.12+
-- Rust: 1.70+ (PyO3 0.28)
+- Rust: 1.70+ (PyO3 0.29)
 - Repository: https://github.com/bluedynamics/zodb-json-codec
 - PyPI: https://pypi.org/project/zodb-json-codec/
 

@@ -26,10 +26,14 @@ categories the tables mark as parity.
 ## How the numbers were measured
 
 All tables on this page come from one session on 2026-09-30: one desktop core
-(`taskset`), glibc, Python 3.13.12, minimum of the medians over three
-interleaved rounds of `benchmarks/bench.py` (5,000 iterations per synthetic
-category, 100 warmup; the 1,692-record FileStorage sample; the PG comparison
-mode). Columns:
+(`taskset`), glibc, Python 3.13.12, `benchmarks/bench.py` driven by an
+interleaved A/B runner. Synthetic tables: minimum over three rounds of the
+median of 5,000 iterations (200 warmup). FileStorage tables: minimum over
+three rounds of the per-record median of the 1,692-record sample. The PG
+comparison tables: `bench.py pg-compare` (5,000 iterations, 100 warmup)
+prints means per category and mean, median and P95 for the sample; each
+cell is the minimum of that statistic over three rounds. Ratios use
+unrounded values. Columns:
 
 - **CPython pickle**: `pickle.loads` / `pickle.dumps` measured in the same run
   as the 1.7.0 codec.
@@ -42,8 +46,12 @@ mode). Columns:
   (`RUSTFLAGS=-Cprofile-generate`, the profiling workload of `release.yml`,
   then `-Cprofile-use`).
 
-Debug builds are 3 to 8 times slower than release builds; always benchmark
-`maturin develop --release`.
+The tags build with PyO3 0.28, 1.7.0 with PyO3 0.29. Each column other than
+1.7.0 was measured in its own interleaved run against 1.7.0, so the
+resolution of the page is the spread of the 1.7.0 build across those runs:
+2 to 8% on decode, 14 to 20% on the sub-microsecond encode categories.
+Differences inside that spread are noise. Debug builds are 3 to 8 times
+slower than release builds; always benchmark `maturin develop --release`.
 
 ## Synthetic micro-benchmarks
 
@@ -64,7 +72,7 @@ Debug builds are 3 to 8 times slower than release builds; always benchmark
 
 Parity means within 5% of CPython pickle: `deep_nesting`.
 
-1.6.1 was slower than 1.5.0 on every category (the 1.6.0 memo fix deep-copied
+1.6.1 was slower than 1.5.0 on every decode category (the 1.6.0 memo fix deep-copied
 every container into the memo, journal entry 19). 1.7.0 recovers that and
 more through the memo pre-scan, the single value stack with per-thread
 scratch vectors, and mimalloc (journal entries 19 to 21).
@@ -84,30 +92,35 @@ scratch vectors, and mimalloc (journal entries 19 to 21).
 | wide_dict | 60.2 us | 15.4 us | 15.4 us | 15.6 us | 14.8 us | 3.9x |
 | deep_nesting | 2.71 us | 1.24 us | 1.24 us | 1.80 us | 1.34 us | 1.5x |
 
-Encode is unchanged in 1.7.0 apart from the nesting-depth guard (#19), which
-costs a few nanoseconds per container and shows on `deep_nesting` and
-`nested_dict`. The Rust encoder writes pickle opcodes directly from Python
-objects; known types (`@dt`, `@date`, ...) are encoded inline.
+The encoder changes of 1.7.0 were correctness work (see the changelog:
+subclass items, NUL markers, anonymous instances, big ints, unknown types,
+re-entrancy); their cost shows on `nested_dict`, `large_flat_dict` and
+`deep_nesting`, the last from the nesting-depth guard
+([#19](https://github.com/bluedynamics/zodb-json-codec/issues/19)), a few
+nanoseconds per container. The Rust encoder writes pickle opcodes directly
+from Python objects; known types (`@dt`, `@date`, ...) are encoded inline.
 
 ### Decode to JSON string (PG storage path)
 
-The direct path for PostgreSQL storage writes JSON tokens straight from the
-`PickleValue` AST into a thread-local buffer, entirely in Rust with the GIL
-released. Compared with the dict path plus `json.dumps()`, 1.7.0 without
-PGO:
+The direct path for PostgreSQL storage, `decode_zodb_record_for_pg_json`,
+writes JSON tokens straight from the `PickleValue` AST into a thread-local
+buffer, entirely in Rust with the GIL released. Compared with the dict
+variant `decode_zodb_record_for_pg` plus `json.dumps()`, 1.7.0 without PGO
+(means, as `bench.py pg-compare` prints them; the dict decode here is the
+PG variant, not the `decode_zodb_record` median of the decode table):
 
-| Category | Dict path decode | JSON path decode | Dict path + `json.dumps` | JSON path | Pipeline speedup |
-|---|---|---|---|---|---|
-| simple_flat_dict | 1.1 us | 0.9 us | 2.7 us | 1.0 us | 2.7x |
-| nested_dict | 1.8 us | 1.5 us | 3.8 us | 1.6 us | 2.4x |
-| large_flat_dict | 13.5 us | 11.1 us | 28.8 us | 11.2 us | 2.6x |
-| bytes_in_state | 1.6 us | 1.4 us | 5.5 us | 1.4 us | 3.9x |
-| special_types | 2.9 us | 2.6 us | 5.6 us | 2.5 us | 2.2x |
-| btree_small | 1.1 us | 1.0 us | 3.1 us | 1.1 us | 2.8x |
-| btree_length | 0.5 us | 0.5 us | 1.5 us | 0.5 us | 3.0x |
-| scalar_string | 0.5 us | 0.6 us | 0.9 us | 0.6 us | 1.5x |
-| wide_dict | 137.7 us | 99.2 us | 208.2 us | 98.5 us | 2.1x |
-| deep_nesting | 7.7 us | 6.4 us | 15.5 us | 6.6 us | 2.3x |
+| Category | `decode_zodb_record_for_pg` | plus `json.dumps` | `decode_zodb_record_for_pg_json` | Pipeline speedup |
+|---|---|---|---|---|
+| simple_flat_dict | 1.1 us | 2.7 us | 1.0 us | 2.7x |
+| nested_dict | 1.8 us | 3.8 us | 1.6 us | 2.4x |
+| large_flat_dict | 13.5 us | 28.8 us | 11.2 us | 2.6x |
+| bytes_in_state | 1.6 us | 5.5 us | 1.4 us | 3.9x |
+| special_types | 2.9 us | 5.6 us | 2.5 us | 2.2x |
+| btree_small | 1.1 us | 3.1 us | 1.1 us | 2.8x |
+| btree_length | 0.5 us | 1.5 us | 0.5 us | 3.0x |
+| scalar_string | 0.5 us | 0.9 us | 0.6 us | 1.5x |
+| wide_dict | 137.7 us | 208.2 us | 98.5 us | 2.1x |
+| deep_nesting | 7.7 us | 15.5 us | 6.6 us | 2.3x |
 
 ## FileStorage scan (real-world data)
 
@@ -117,7 +130,11 @@ PGO:
 |---|---|---|---|---|---|---|
 | decode | 22.3 us | 25.7 us | 38.6 us | 13.6 us | 12.9 us | 1.6x |
 | encode | 19.7 us | 4.70 us | 5.00 us | 4.37 us | 3.86 us | 4.5x |
-| roundtrip | 42.0 us | 32.9 us | 47.5 us | 17.5 us | 16.1 us | 2.4x |
+| roundtrip* | 42.0 us | 32.9 us | 47.5 us | 17.5 us | 16.1 us | 2.4x |
+
+\* `bench.py` times no pickle round trip; the CPython value is the sum of its
+decode and encode medians, the codec values are one timing of decode plus
+encode per record.
 
 Real records are dominated by `PersistentMapping` states with long text
 strings and persistent references. Up to 1.6.1 decode was slower than
@@ -160,20 +177,53 @@ JSON path:   pickle bytes -> Rust AST -> JSON string (direct write, GIL released
 | Median | 22.9 us | 10.9 us | 2.1x |
 | P95 | 53.9 us | 37.4 us | 1.4x |
 
+Mean, median and P95 are each the minimum of that statistic over the three
+rounds.
+
 ### PGO and the two paths
 
 The release wheels are PGO builds (`release.yml` profiles the FileStorage and
-synthetic dict-path benchmarks). In this session PGO made the Python-dict
-paths 2 to 15% faster and encode up to 25% faster, but the PG JSON pipeline on
-the FileStorage sample slower: median 9.8 to 10.9 us, P95 25 to 37 us. The
-synthetic JSON-path categories do not show this; the real records with long
+synthetic dict-path benchmarks; the recipe is in {doc}`/how-to/run-benchmarks`).
+In this session PGO made the Python-dict paths 0 to 15% faster and encode up
+to 25% faster, but the PG JSON pipeline on the FileStorage sample slower:
+median 9.7 to 10.9 us, P95 25.8 to 37.4 us. The synthetic JSON-path categories
+show nothing beyond noise (at most 10% either way); the real records with long
 strings, persistent references and BTree buckets do. Two other profile mixes
 (adding the PG comparison run, and weighting the real-data runs) gave the same
-picture (P95 34 to 38 us), so it is not a matter of profile coverage. The
+picture (P95 33.6 and 35.0 us), so it is not a matter of profile coverage. The
 cause is not identified; it is tracked in
 [#52](https://github.com/bluedynamics/zodb-json-codec/issues/52). Until it is,
 a build without PGO is the faster choice for the storage path, and the numbers
-zodb-pgjsonb sees from the PyPI wheels are the PGO column.
+zodb-pgjsonb will see from the PyPI wheels correspond to the PGO column.
+
+### Allocator notes for operators
+
+Since 1.7.0 the Rust side uses [mimalloc](https://github.com/microsoft/mimalloc)
+as its global allocator ([#24](https://github.com/bluedynamics/zodb-json-codec/issues/24),
+journal entry 21 has the before-and-after numbers); Python objects keep using
+pymalloc. The wheel grows by about 170 KB, building from source needs a C
+compiler, and the measured allocator is mimalloc 3.3.2 (crate `mimalloc`
+0.1.52 with `libmimalloc-sys` 0.1.49), pinned exactly in `Cargo.toml`. It is
+built with local-dynamic thread-local storage: the module is loaded with
+`dlopen`, and initial-exec TLS would take part of glibc's fixed static TLS
+surplus, which can make later imports fail with "cannot allocate memory in
+static TLS block"; that costs 5 to 12% of decode time against an initial-exec
+build and is kept for the import safety.
+
+Memory behaviour differs from glibc malloc in two ways an operator will see on
+RSS graphs. Peak RSS while decoding one very large record is up to twice as
+high (a 41 MB pickle: about 600 MB extra with glibc, about 1 GB with mimalloc),
+and after such a record mimalloc returns the freed pages lazily: a worker that
+decodes one huge record and then only idles keeps that memory until the next
+medium-sized activity, while under normal traffic it drops back within about a
+second (glibc never returns most of it). `MIMALLOC_PURGE_DELAY=10`
+(milliseconds) makes the release immediate at a small cost;
+`MIMALLOC_SHOW_STATS=1` prints allocator statistics at exit.
+
+mimalloc has no fork handlers: a process that forks while another thread is
+decoding with the GIL released (the `multiprocessing` fork start method, for
+example) can deadlock in the child on its next Rust allocation, a case glibc
+malloc handles. Zope and Plone workers are threads, not forks.
 
 ## Output size comparison
 

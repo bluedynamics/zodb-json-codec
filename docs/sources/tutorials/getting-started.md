@@ -219,12 +219,14 @@ assert pickle.loads(restored_pickle2) == original
 
 Both paths -- JSON string and Python dict -- give back a pickle that unpickles
 to an object equal to the original. The bytes are not the input bytes: memo
-opcodes for values that are not shared are dropped, the protocol header is
-rewritten (protocol 3 on the JSON string path, protocol 2 on the dict path),
-the JSON string path sorts dict keys, and a ZODB class pickle comes back in
-its `((module, name), None)` form. That is enough to transcode ZODB data to
-JSON for storage and querying and give ZODB a pickle it loads identically when
-it needs the object back. The test suite runs this example.
+puts for values that are never read back are dropped, the protocol header is
+rewritten (`json_to_pickle` writes protocol 3, `dict_to_pickle` and the record
+functions protocol 2), `pickle_to_json` sorts dict keys (the record functions
+keep the order), shared sub-objects come back as equal copies, and a ZODB
+class pickle comes back in its `((module, name), None)` form. That is enough
+to transcode ZODB data to JSON for storage and querying and give ZODB a pickle
+it loads identically when it needs the object back. The test suite runs this
+example.
 
 ## Nested structures
 
