@@ -1463,10 +1463,10 @@ fn reduce_dict_to_pickle_value(
         args: Box::new(pyobject_to_pickle_value(&args_obj, expand_refs)?),
         dict_items: dict_items_from_pyobject(reduce_dict.get_item(intern!(py, "items"))?, expand_refs, "items")?,
         list_items: list_items_from_pyobject(reduce_dict.get_item(intern!(py, "appends"))?, expand_refs, "appends")?,
+        // Strict `true`, like the serde reader: writers only ever emit a JSON true.
         newobj: reduce_dict
             .get_item(intern!(py, "newobj"))?
-            .map(|v| v.is_truthy())
-            .transpose()?
+            .and_then(|v| v.cast::<PyBool>().ok().map(|b| b.is_true()))
             .unwrap_or(false),
         state: match reduce_dict.get_item(intern!(py, "state"))? {
             Some(v) => Some(Box::new(pyobject_to_pickle_value(&v, expand_refs)?)),

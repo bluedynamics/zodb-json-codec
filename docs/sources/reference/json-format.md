@@ -274,6 +274,11 @@ holds both parts:
 `@items` and `@appends` next to `@cls`/`@s` carry dict/list subclass contents of
 such instances.
 
+Keys starting with `@` inside an instance state are reserved for the codec:
+a state that is exactly `{"@args": ..., "@state": ...}` is always read as
+constructor arguments plus state. A `@reduce` with both `newobj` and `state`
+is accepted (it encodes like the `@cls`/`@s` form above) but never written.
+
 ### `@pkl` -- Raw Pickle Escape Hatch
 
 Base64-encoded pickle fragment for types that cannot be represented in

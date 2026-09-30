@@ -18,8 +18,10 @@
   re-emitted with their args and as `NEWOBJ`, objects pickled with
   `REDUCE(cls, args)` followed by `BUILD` keep both; `@reduce` gained the
   additive keys `newobj` and `state`. Class pickles that carry `newargs`
-  now raise instead of silently dropping them, and ZODB's `(klass, None)`
-  class tuple form is read correctly [#12]
+  now raise (naming the class) instead of silently dropping them, and ZODB's
+  `(klass, None)` class tuple form is read correctly. Records written before
+  this release for stateless `NEWOBJ` objects carry no `newobj` key and keep
+  being re-emitted as `REDUCE`; the stored shape cannot tell the two apart [#12]
 
 - Fix data loss for dict/list subclasses (`OrderedDict`, `defaultdict`, `deque`,
   and user subclasses): the Python-dict decode path now emits their

@@ -1595,6 +1595,26 @@ mod tests {
     }
 
     #[test]
+    fn test_direct_reduce_with_newobj_and_state() {
+        let val = PickleValue::Reduce {
+            callable: Box::new(PickleValue::Global { module: "m".into(), name: "C".into() }),
+            args: Box::new(PickleValue::Tuple(vec![PickleValue::Int(1)])),
+            dict_items: None,
+            list_items: None,
+            newobj: true,
+            state: Some(Box::new(PickleValue::Dict(vec![(
+                PickleValue::String("x".into()),
+                PickleValue::Int(2),
+            )]))),
+        };
+        assert_pg_paths_match(&val, "", "");
+        let json = pickle_value_to_json(&val).unwrap();
+        assert_eq!(json["@reduce"]["newobj"], json!(true));
+        assert_eq!(json["@reduce"]["state"], json!({"x": 2}));
+        assert_eq!(json_to_pickle_value(&json).unwrap(), val);
+    }
+
+    #[test]
     fn test_direct_set_reduce() {
         let val = make_reduce(
             "builtins",

@@ -369,21 +369,21 @@ pub fn extract_class_info(val: &PickleValue) -> Result<(String, String), CodecEr
                 }
                 _ => return Ok((String::new(), String::new())),
             };
-            check_no_newargs(&items[1])?;
+            check_no_newargs(&items[1], &module, &name)?;
             Ok((module, name))
         }
         _ => Ok((String::new(), String::new())),
     }
 }
 
-fn check_no_newargs(newargs: &PickleValue) -> Result<(), CodecError> {
+fn check_no_newargs(newargs: &PickleValue, module: &str, name: &str) -> Result<(), CodecError> {
     match newargs {
         PickleValue::None => Ok(()),
         PickleValue::Tuple(items) if items.is_empty() => Ok(()),
-        _ => Err(CodecError::InvalidData(
-            "class pickle carries __getnewargs__ arguments, which the JSON record format cannot store"
-                .to_string(),
-        )),
+        _ => Err(CodecError::InvalidData(format!(
+            "class pickle for {module}.{name} carries __getnewargs__ arguments, \
+             which the JSON record format cannot store"
+        ))),
     }
 }
 

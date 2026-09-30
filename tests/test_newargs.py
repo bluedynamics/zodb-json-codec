@@ -5,6 +5,7 @@ from persistent.mapping import PersistentMapping
 import io
 import json
 import pickle
+import pickletools
 import pytest
 import zodb_json_codec
 
@@ -162,8 +163,25 @@ class TestStoredJson:
         data = zodb_json_codec.encode_zodb_record(
             {"@cls": ["m", "C"], "@s": json.loads(stored)}
         )
-        assert b"R" in data.split(b"StrSub")[1][:12]  # REDUCE opcode follows the args
+        state_pickle = data.split(b"\x80\x02", 2)[2]
+        ops = [op.name for op, _arg, _pos in pickletools.genops(state_pickle)]
+        assert "REDUCE" in ops and "NEWOBJ" not in ops
         assert load_state(data)["s"] == "x"
+
+    def test_newobj_flag_must_be_a_true_bool(self):
+        # Writers only emit `true`; readers agree that anything else means REDUCE
+        stored = (
+            '{"s":{"@reduce":{"callable":{"@cls":["test_newargs","StrSub"]},'
+            '"args":{"@t":["x"]},"newobj":1}}}'
+        )
+        data = zodb_json_codec.encode_zodb_record(
+            {"@cls": ["m", "C"], "@s": json.loads(stored)}
+        )
+        ops = [
+            op.name
+            for op, _arg, _pos in pickletools.genops(data.split(b"\x80\x02", 2)[2])
+        ]
+        assert "REDUCE" in ops and "NEWOBJ" not in ops
 
 
 class TestClassPickleNewargs:
@@ -177,7 +195,7 @@ class TestClassPickleNewargs:
     )
     def test_class_pickle_with_newargs_is_rejected(self, fn):
         record = two_pickles((("mymod", "MyCls"), (1, 2)), {"a": 1})
-        with pytest.raises(ValueError, match="__getnewargs__"):
+        with pytest.raises(ValueError, match=r"mymod\.MyCls.*__getnewargs__"):
             fn(record)
 
     def test_class_pickle_global_tuple_form(self):
