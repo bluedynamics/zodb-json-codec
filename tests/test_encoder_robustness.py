@@ -70,9 +70,9 @@ class TestUnknownTypes:
         ],
     )
     def test_unknown_types_raise_type_error(self, value, name):
-        with pytest.raises(TypeError, match=name):
+        with pytest.raises(TypeError, match=f"of type {name};"):
             zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": {"v": value}})
-        with pytest.raises(TypeError, match=name):
+        with pytest.raises(TypeError, match=f"of type {name};"):
             zodb_json_codec.dict_to_pickle({"v": value})
 
     def test_unknown_type_inside_marker_value(self):
@@ -94,6 +94,7 @@ class TestNonStringKeys:
     )
     def test_non_string_keys_encode(self, d):
         assert encode_state({"d": d}) == {"d": d}
+        assert pickle.loads(zodb_json_codec.dict_to_pickle({"d": d})) == {"d": d}
 
     def test_non_string_keys_inside_marker(self):
         # forces the PickleValue path for a dict nested in a tuple marker

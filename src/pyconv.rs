@@ -2068,12 +2068,9 @@ pub fn encode_pyobject_to_pickle(
 
     // Int (values beyond i64 go through the PickleValue path as LONG1/LONG4)
     if obj.is_instance_of::<PyInt>() {
-        match obj.extract::<i64>() {
-            Ok(i) => write_int(buf, i),
-            Err(e) if e.is_instance_of::<pyo3::exceptions::PyOverflowError>(obj.py()) => {
-                encode_value_into(&int_to_pickle_value(obj)?, buf)?;
-            }
-            Err(e) => return Err(e),
+        match int_to_pickle_value(obj)? {
+            PickleValue::Int(i) => write_int(buf, i),
+            big => encode_value_into(&big, buf)?,
         }
         return Ok(());
     }

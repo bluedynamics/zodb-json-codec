@@ -86,6 +86,11 @@ Raises
   : If `@cls` is missing, not a two-element list of strings, or if the
     state contains values that cannot be encoded.
 
+`TypeError`
+  if the state contains a Python object the encoder does not accept
+  (bytes, tuples, sets, datetimes, arbitrary instances); use the marker
+  forms (`@b`, `@t`, `@set`, `@dt`, ...) instead
+
 Example:
 
 ```python
@@ -262,6 +267,11 @@ Raises
   : If the dict contains values that cannot be encoded, or if recursion
     depth exceeds 1,000 levels.
 
+`TypeError`
+  if the state contains a Python object the encoder does not accept
+  (bytes, tuples, sets, datetimes, arbitrary instances); use the marker
+  forms (`@b`, `@t`, `@set`, `@dt`, ...) instead
+
 ---
 
 ### `pickle_to_json`
@@ -315,7 +325,8 @@ Raises
 
 ## Error handling
 
-All functions raise `ValueError` on failure.
+All functions raise `ValueError` on malformed input; the encoders raise
+`TypeError` for Python objects they do not accept.
 Common error conditions:
 
 - **Unexpected end of pickle stream** -- truncated input data.
