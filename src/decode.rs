@@ -1360,6 +1360,45 @@ mod tests {
         }
     }
 
+    fn tuple1_chain(n: usize) -> Vec<u8> {
+        let mut data = vec![0x80, 0x03, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(n));
+        data.push(b'.');
+        data
+    }
+
+    #[test]
+    fn test_decoder_depth_boundary() {
+        assert!(decode_pickle(&tuple1_chain(1000)).is_ok());
+        let err = decode_pickle(&tuple1_chain(1001)).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
+    }
+
+    #[test]
+    fn test_memo_depth_carries() {
+        // value of depth 999, memoized, fetched back and wrapped twice -> 1001
+        let mut data = vec![0x80, 0x03, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(999));
+        data.extend_from_slice(&[BINPUT, 0, POP, BINGET, 0, TUPLE1, TUPLE1, b'.']);
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
+        // wrapped once -> exactly 1000, fine
+        let mut ok = vec![0x80, 0x03, b'N'];
+        ok.extend(std::iter::repeat(TUPLE1).take(999));
+        ok.extend_from_slice(&[BINPUT, 0, POP, BINGET, 0, TUPLE1, b'.']);
+        assert!(decode_pickle(&ok).is_ok());
+    }
+
+    #[test]
+    fn test_mutation_raises_depth() {
+        // EMPTY_LIST, MARK, <value of depth 1000>, APPENDS  -> list of depth 1001
+        let mut data = vec![0x80, 0x03, EMPTY_LIST, MARK, b'N'];
+        data.extend(std::iter::repeat(TUPLE1).take(1000));
+        data.extend_from_slice(&[APPENDS, b'.']);
+        let err = decode_pickle(&data).unwrap_err();
+        assert!(err.to_string().contains("nesting depth"), "{err}");
+    }
+
     #[test]
     fn test_reduce_with_args_then_build_keeps_reduce_with_state() {
         // GLOBAL m.C, "a", TUPLE1, REDUCE, EMPTY_DICT, BUILD
