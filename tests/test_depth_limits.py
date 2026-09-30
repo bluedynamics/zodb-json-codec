@@ -1,6 +1,8 @@
 """Crafted nesting depth raises ValueError instead of crashing the interpreter (#19)."""
 
+import io
 import pickle
+import pytest
 import subprocess
 import sys
 import textwrap
@@ -16,6 +18,19 @@ def run_isolated(code):
 
 def class_pickle():
     return pickle.dumps(("m", "C"), protocol=3)
+
+
+def load_state(record):
+    u = pickle.Unpickler(io.BytesIO(record))
+    u.load()
+    return u.load()
+
+
+def wrap(n):
+    deep = []
+    for _ in range(n):
+        deep = [deep]
+    return deep
 
 
 class TestDecode:
@@ -85,4 +100,36 @@ class TestEncode:
         data = zodb_json_codec.encode_zodb_record(
             {"@cls": ["m", "C"], "@s": {"d": deep, "t": {"@t": [deep]}}}
         )
-        assert len(data) > 800
+        assert load_state(data) == {"d": deep, "t": (deep,)}
+
+    def test_encode_boundary_is_exact(self):
+        # only containers count: the state dict, the wrappers and the innermost
+        # list make 1000 levels with 998 wrappers; the 1001st level is refused
+        ok = {"deep": wrap(998)}
+        bad = {"deep": wrap(999)}
+        assert (
+            load_state(
+                zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": ok})
+            )
+            == ok
+        )
+        assert pickle.loads(zodb_json_codec.dict_to_pickle(ok)) == ok
+        with pytest.raises(ValueError, match="nesting depth"):
+            zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": bad})
+        with pytest.raises(ValueError, match="nesting depth"):
+            zodb_json_codec.dict_to_pickle(bad)
+
+    def test_scalars_do_not_count(self):
+        # a wide, flat dict at any depth is fine: the guard only counts containers
+        state = {"deep": wrap(990)}
+        state["deep"][0] if False else None
+        inner = state["deep"]
+        for _ in range(990):
+            inner = inner[0]
+        inner.extend(range(5000))
+        assert (
+            load_state(
+                zodb_json_codec.encode_zodb_record({"@cls": ["m", "C"], "@s": state})
+            )
+            == state
+        )

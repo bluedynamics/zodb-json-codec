@@ -28,8 +28,11 @@ thread_local! {
     static ENCODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// RAII guard: one level of encoder recursion. Fails past MAX_DEPTH so a crafted
-/// deeply nested input raises ValueError instead of overflowing the stack.
+/// RAII guard: one container level (dict or list) of encoder recursion. Fails
+/// past MAX_DEPTH so a crafted deeply nested input raises ValueError instead of
+/// overflowing the stack. Scalars are not counted: the two entry points take the
+/// guard only in their dict and list branches, because a guard per value costs
+/// two `__tls_get_addr` calls and measured about 9% of encode time.
 /// (Held in a local named `_depth`; dropping it on any exit keeps the counter balanced.)
 struct DepthGuard;
 
@@ -1013,7 +1016,6 @@ pub fn pyobject_to_pickle_value(
     obj: &Bound<'_, pyo3::PyAny>,
     expand_refs: bool,
 ) -> PyResult<PickleValue> {
-    let _depth = DepthGuard::enter()?;
     // Ordered by frequency in ZODB data: string > dict > int > none > float > list > bool
     if obj.is_instance_of::<PyString>() {
         let s: String = obj.extract()?;
@@ -1021,6 +1023,7 @@ pub fn pyobject_to_pickle_value(
     }
     if obj.is_instance_of::<PyDict>() {
         let dict = obj.cast::<PyDict>()?;
+        let _depth = DepthGuard::enter()?;
         return pydict_to_pickle_value(dict, expand_refs);
     }
     if obj.is_none() {
@@ -1040,6 +1043,7 @@ pub fn pyobject_to_pickle_value(
     }
     if obj.is_instance_of::<PyList>() {
         let list = obj.cast::<PyList>()?;
+        let _depth = DepthGuard::enter()?;
         let items: PyResult<Vec<PickleValue>> = list
             .iter()
             .map(|item| pyobject_to_pickle_value(&item, expand_refs))
@@ -2107,7 +2111,6 @@ pub fn encode_pyobject_to_pickle(
     buf: &mut Vec<u8>,
     expand_refs: bool,
 ) -> PyResult<()> {
-    let _depth = DepthGuard::enter()?;
     // String: borrow &str from Python, write directly (zero-copy)
     if obj.is_instance_of::<PyString>() {
         let s = obj.cast::<PyString>()?.to_str()?;
@@ -2118,6 +2121,7 @@ pub fn encode_pyobject_to_pickle(
     // Dict: handle markers or write plain dict
     if obj.is_instance_of::<PyDict>() {
         let dict = obj.cast::<PyDict>()?;
+        let _depth = DepthGuard::enter()?;
         return encode_pydict_to_pickle(dict, buf, expand_refs);
     }
 
@@ -2157,6 +2161,7 @@ pub fn encode_pyobject_to_pickle(
     // List
     if obj.is_instance_of::<PyList>() {
         let list = obj.cast::<PyList>()?;
+        let _depth = DepthGuard::enter()?;
         buf.push(EMPTY_LIST);
         if !list.is_empty() {
             buf.push(MARK);

@@ -69,7 +69,10 @@
   build values nested deeper than 1000 levels (they used to crash the
   interpreter when the value was dropped), and `encode_zodb_record` /
   `dict_to_pickle` refuse Python input nested deeper than 1000 levels (they
-  used to overflow the stack); both raise `ValueError` [#19]
+  used to overflow the stack); both raise `ValueError`. The bound assumes the
+  platform's default thread stack (8 MiB on glibc); threads created with a
+  much smaller `threading.stack_size()` can still overflow on deep input, see
+  #40 [#19]
 
 - Lower ruff's C901 max-complexity threshold from 15 to 13 as part of the
   ecosystem-wide complexity ratchet. The code base passes as-is.

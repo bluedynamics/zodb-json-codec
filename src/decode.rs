@@ -47,8 +47,10 @@ struct Decoder<'a> {
     /// Resolved lazily at BINGET or eagerly when the slot is popped.
     dirty_memo: Vec<bool>,
     /// Nesting depth of each stack slot (parallel to `stack`): 0 for scalars,
-    /// 1 + deepest child for containers. Lets container opcodes refuse a value
-    /// deeper than MAX_DEPTH before it exists (its Drop/Clone would recurse).
+    /// 1 + deepest child for containers, including the dicts BUILD wraps around
+    /// `@args`/`@state` (those may count one level more than the value has, never
+    /// less). Lets container opcodes refuse a value deeper than MAX_DEPTH before
+    /// it exists (its Drop/Clone would recurse).
     depth: Vec<u32>,
     /// Saved `depth` during MARK (parallel to metastack).
     meta_depth: Vec<Vec<u32>>,
@@ -508,11 +510,12 @@ impl<'a> Decoder<'a> {
                             PickleValue::Tuple(mut tuple_items) if tuple_items.len() == 1 => {
                                 match tuple_items.swap_remove(0) {
                                     PickleValue::List(items) => {
+                                        // the set replaces the (list,) args tuple: one level below it
                                         self.push_at(if is_set {
                                             PickleValue::Set(items)
                                         } else {
                                             PickleValue::FrozenSet(items)
-                                        }, reduce_depth);
+                                        }, da.saturating_sub(1).max(1));
                                     }
                                     other => {
                                         self.push_at(PickleValue::Reduce {
@@ -644,7 +647,7 @@ impl<'a> Decoder<'a> {
                                                 state,
                                             ),
                                         ])),
-                                    })), build_depth);
+                                    })), Self::nest(build_depth)?);
                                 }
                             }
                         }
@@ -659,7 +662,7 @@ impl<'a> Decoder<'a> {
                                 ])),
                                 dict_items: None,
                                 list_items: None,
-                            })), build_depth);
+                            })), Self::nest(build_depth)?);
                         }
                     }
                     // Transfer memo bindings from the old object to the new
@@ -900,11 +903,6 @@ impl<'a> Decoder<'a> {
     #[inline]
     fn top_value_mut(&mut self) -> Result<&mut PickleValue, CodecError> {
         self.stack.last_mut().ok_or(CodecError::StackUnderflow)
-    }
-
-    /// Pop all items above the last MARK from the stack.
-    fn pop_mark(&mut self) -> Result<Vec<PickleValue>, CodecError> {
-        Ok(self.pop_mark_d()?.0)
     }
 
     /// Pop all items above the last MARK together with their deepest nesting depth.
