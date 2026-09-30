@@ -23,6 +23,38 @@ use crate::types::{InstanceData, PickleValue};
 
 const MAX_DEPTH: usize = 1000;
 
+thread_local! {
+    /// Recursion depth of the Python-object encoders on this thread.
+    static ENCODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// RAII guard: one level of encoder recursion. Fails past MAX_DEPTH so a crafted
+/// deeply nested input raises ValueError instead of overflowing the stack.
+/// (Held in a local named `_depth`; dropping it on any exit keeps the counter balanced.)
+struct DepthGuard;
+
+impl DepthGuard {
+    #[inline]
+    fn enter() -> PyResult<Self> {
+        ENCODE_DEPTH.with(|d| {
+            if d.get() >= MAX_DEPTH {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "maximum nesting depth exceeded",
+                ));
+            }
+            d.set(d.get() + 1);
+            Ok(DepthGuard)
+        })
+    }
+}
+
+impl Drop for DepthGuard {
+    #[inline]
+    fn drop(&mut self) {
+        ENCODE_DEPTH.with(|d| d.set(d.get().saturating_sub(1)));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Forward direction: PickleValue → Py<PyAny>
 // ---------------------------------------------------------------------------
@@ -981,6 +1013,7 @@ pub fn pyobject_to_pickle_value(
     obj: &Bound<'_, pyo3::PyAny>,
     expand_refs: bool,
 ) -> PyResult<PickleValue> {
+    let _depth = DepthGuard::enter()?;
     // Ordered by frequency in ZODB data: string > dict > int > none > float > list > bool
     if obj.is_instance_of::<PyString>() {
         let s: String = obj.extract()?;
@@ -2074,6 +2107,7 @@ pub fn encode_pyobject_to_pickle(
     buf: &mut Vec<u8>,
     expand_refs: bool,
 ) -> PyResult<()> {
+    let _depth = DepthGuard::enter()?;
     // String: borrow &str from Python, write directly (zero-copy)
     if obj.is_instance_of::<PyString>() {
         let s = obj.cast::<PyString>()?.to_str()?;
