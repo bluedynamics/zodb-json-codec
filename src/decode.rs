@@ -1,3 +1,4 @@
+use crate::escape;
 use crate::error::CodecError;
 use crate::opcodes::*;
 use crate::types::{InstanceData, PickleValue};
@@ -211,17 +212,17 @@ impl<'a> Decoder<'a> {
                 }
                 STRING => {
                     let line = self.read_line()?;
-                    let s = std::str::from_utf8(line).map_err(|_| CodecError::InvalidUtf8)?;
-                    let s = s.trim();
-                    // STRING values are repr'd: strip quotes
-                    let inner = if (s.starts_with('\'') && s.ends_with('\''))
-                        || (s.starts_with('"') && s.ends_with('"'))
-                    {
-                        &s[1..s.len() - 1]
-                    } else {
-                        s
-                    };
-                    self.push(PickleValue::Bytes(inner.as_bytes().to_vec()));
+                    // CPython requires matching quotes around a bytes repr
+                    let quoted = line.len() >= 2
+                        && line[0] == line[line.len() - 1]
+                        && (line[0] == b'\'' || line[0] == b'"');
+                    if !quoted {
+                        return Err(CodecError::InvalidData(
+                            "STRING opcode argument must be quoted".to_string(),
+                        ));
+                    }
+                    let body = escape::unescape_string_repr(&line[1..line.len() - 1])?;
+                    self.push(PickleValue::Bytes(body));
                 }
 
                 // -- Unicode strings --
@@ -241,8 +242,7 @@ impl<'a> Decoder<'a> {
                 }
                 UNICODE => {
                     let line = self.read_line()?;
-                    let s = std::str::from_utf8(line).map_err(|_| CodecError::InvalidUtf8)?;
-                    self.push(PickleValue::String(s.to_string()));
+                    self.push(PickleValue::String(escape::decode_raw_unicode_escape(line)?));
                 }
                 BINUNICODE8 => {
                     let n = self.read_u64()?;

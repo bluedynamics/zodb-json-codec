@@ -8,6 +8,11 @@
   re-entrancy the extension no longer has to consider. 3.15 wheels follow once
   the release is out [#41]
 
+- Protocol 0 text opcodes decode like CPython: `STRING` unescapes the bytes repr
+  (`\'`, `\xNN`, octal, ...; it used to keep the backslashes) and requires the
+  quotes, `UNICODE` is read as raw-unicode-escape (Latin-1 bytes plus `\uXXXX`;
+  non-ASCII used to raise `InvalidUtf8` and `\u` escapes stayed literal) [#25]
+
 - Fix `encode_zodb_record` raising `TypeError` on records that hold ZODB weakref
   (`['w', ...]`) or multi-database (`['m', ...]`, `['n', ...]`) persistent ids;
   the compact `["oid", "module.Class"]` form is now only recognized when both
