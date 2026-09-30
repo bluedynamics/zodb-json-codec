@@ -53,11 +53,9 @@ class TestBigInts:
         assert back["b"] is True
         assert back["i"] == 5 and type(back["i"]) is int
 
-    def test_int_subclass_index_error_propagates(self):
-        with pytest.raises(KeyError):
-            zodb_json_codec.encode_zodb_record(
-                {"@cls": ["m", "C"], "@s": {"i": RaisingIndex(1)}}
-            )
+    def test_int_subclass_uses_stored_value_not_index(self):
+        # CPython reads the stored value of int subtypes directly; __index__ is not consulted
+        assert encode_state({"i": RaisingIndex(1)}) == {"i": 1}
 
 
 class TestUnknownTypes:
@@ -81,4 +79,31 @@ class TestUnknownTypes:
         with pytest.raises(TypeError, match="bytes"):
             zodb_json_codec.encode_zodb_record(
                 {"@cls": ["m", "C"], "@s": {"t": {"@t": [b"raw"]}}}
+            )
+
+
+class TestNonStringKeys:
+    @pytest.mark.parametrize(
+        "d",
+        [
+            {1: "a"},  # single key: direct encoder defers to the PickleValue path
+            {1: "a", "s": "b"},  # 2-4 keys, mixed
+            {None: "n", 3.5: "f", True: "b"},
+            {i: i for i in range(6)},  # more than 4 keys
+        ],
+    )
+    def test_non_string_keys_encode(self, d):
+        assert encode_state({"d": d}) == {"d": d}
+
+    def test_non_string_keys_inside_marker(self):
+        # forces the PickleValue path for a dict nested in a tuple marker
+        assert encode_state({"t": {"@t": [{1: "a", 2: "b"}]}}) == {
+            "t": ({1: "a", 2: "b"},)
+        }
+
+    def test_tuple_keys_are_rejected_like_tuple_values(self):
+        # tuples are only accepted as {"@t": [...]} markers, which cannot be dict keys
+        with pytest.raises(TypeError, match="tuple"):
+            zodb_json_codec.encode_zodb_record(
+                {"@cls": ["m", "C"], "@s": {"d": {(1, 2): "t"}}}
             )
