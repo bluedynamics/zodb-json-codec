@@ -11,6 +11,10 @@ pub struct InstanceData {
     pub dict_items: Option<Box<Vec<(PickleValue, PickleValue)>>>,
     /// List items appended via APPENDS/APPEND after BUILD (list subclasses)
     pub list_items: Option<Box<Vec<PickleValue>>>,
+    /// False when the pickle created the object with `REDUCE` (a call of the
+    /// class, so `__init__` runs on unpickling) rather than `NEWOBJ`; the
+    /// encoders emit the same opcode again (#32).
+    pub newobj: bool,
 }
 
 /// Intermediate representation of a pickle value.

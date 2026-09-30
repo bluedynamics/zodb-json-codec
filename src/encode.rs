@@ -339,17 +339,18 @@ impl Encoder {
                 self.write_u8(b'\n');
             }
             PickleValue::Instance(inst) => {
-                let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+                let InstanceData { module, name, state, dict_items, list_items, newobj } = inst.as_ref();
                 if module.is_empty() && name.is_empty() {
                     return self.encode_anonymous_instance(state, depth);
                 }
-                // Emit as: GLOBAL module\nname\n args NEWOBJ [items] state BUILD, where args is
-                // EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12).
+                // Emit as: GLOBAL module\nname\n args NEWOBJ|REDUCE [items] state BUILD, where args
+                // is EMPTY_TUPLE unless the state carries constructor args (@args/@state, #12)
+                // and the opcode follows the construction kind (#32).
                 let (args, state) = match newobj_args_state(state) {
                     Some((args, inner)) => (Some(args), inner),
                     None => (None, state.as_ref()),
                 };
-                self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+NEWOBJ
+                self.buf.reserve(5 + module.len() + name.len()); // GLOBAL+mod+\n+name+\n+EMPTY_TUPLE+opcode
                 self.write_u8(GLOBAL);
                 self.write_bytes(module.as_bytes());
                 self.write_u8(b'\n');
@@ -359,7 +360,7 @@ impl Encoder {
                     Some(args) => self.encode_value(args, depth + 1)?,
                     None => self.write_u8(EMPTY_TUPLE),
                 }
-                self.write_u8(NEWOBJ);
+                self.write_u8(if *newobj { NEWOBJ } else { REDUCE });
                 // Dict/list subclass items go before the state, in the order CPython's
                 // save_reduce writes them: APPENDS, then SETITEMS, then BUILD.
                 if let Some(items) = list_items {
@@ -586,6 +587,7 @@ mod tests {
             )])),
             dict_items: Some(Box::new(vec![(PickleValue::String("k".into()), PickleValue::Int(2))])),
             list_items: None,
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         // CPython's save_reduce: NEWOBJ, then the items (MARK ... SETITEMS), then state + BUILD.
@@ -609,6 +611,7 @@ mod tests {
             state: Box::new(PickleValue::Dict(vec![])),
             dict_items: Some(Box::new(vec![(PickleValue::Int(1), PickleValue::Int(2))])),
             list_items: Some(Box::new(vec![PickleValue::Int(3)])),
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();
@@ -618,6 +621,36 @@ mod tests {
         let build = tail.iter().position(|&b| b == BUILD).unwrap();
         assert!(appends < setitems && setitems < build, "expected APPENDS, SETITEMS, BUILD");
         assert_eq!(decode_pickle(&bytes).unwrap(), val);
+    }
+
+    #[test]
+    fn test_reduce_kind_instance_emits_reduce() {
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "m".into(),
+            name: "C".into(),
+            state: Box::new(PickleValue::Dict(vec![])),
+            dict_items: None,
+            list_items: None,
+            newobj: false,
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        assert!(bytes.contains(&REDUCE) && !bytes.contains(&NEWOBJ));
+        // with the @args/@state shape: GLOBAL args REDUCE state BUILD
+        let val = PickleValue::Instance(Box::new(InstanceData {
+            module: "m".into(),
+            name: "C".into(),
+            state: Box::new(PickleValue::Dict(vec![
+                (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::Int(1)])),
+                (PickleValue::String("@state".into()), PickleValue::Dict(vec![])),
+            ])),
+            dict_items: None,
+            list_items: None,
+            newobj: false,
+        }));
+        let bytes = encode_pickle(&val).unwrap();
+        let r = bytes.iter().position(|&b| b == REDUCE).unwrap();
+        let b = bytes.iter().position(|&b| b == BUILD).unwrap();
+        assert!(r < b && !bytes.contains(&NEWOBJ));
     }
 
     fn reduce(newobj: bool, state: Option<PickleValue>) -> PickleValue {
@@ -659,6 +692,7 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let bytes = encode_pickle(&val).unwrap();
         let newobj = bytes.iter().position(|&b| b == NEWOBJ).unwrap();

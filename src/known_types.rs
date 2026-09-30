@@ -1173,6 +1173,7 @@ fn try_decode_uuid(val: &Value) -> Result<PickleValue, CodecError> {
         )])),
         dict_items: None,
         list_items: None,
+        newobj: true,
     })))
 }
 
@@ -1683,6 +1684,7 @@ mod tests {
             )])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let json = pickle_value_to_json(&instance).unwrap();
         assert_eq!(json, json!({"@uuid": "12345678-1234-5678-1234-567812345678"}));

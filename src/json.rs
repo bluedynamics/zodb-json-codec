@@ -109,7 +109,7 @@ fn pickle_value_to_json_impl(
             Ok(json!({"@cls": [module, name]}))
         }
         PickleValue::Instance(inst) => {
-            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+            let InstanceData { module, name, state, dict_items, list_items, newobj } = inst.as_ref();
             if let Some(typed) =
                 known_types::try_instance_to_typed_json(module, name, state, &to_json)?
             {
@@ -127,6 +127,9 @@ fn pickle_value_to_json_impl(
                     "@cls": [module, name],
                     "@s": state_json,
                 });
+                if !newobj {
+                    obj.as_object_mut().unwrap().insert("@newobj".to_string(), json!(false));
+                }
                 if let Some(pairs) = dict_items {
                     let items_json: Result<Vec<Value>, CodecError> = pairs
                         .iter()
@@ -442,6 +445,7 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                 state,
                 dict_items,
                 list_items,
+                newobj,
             } = inst.as_ref();
 
             // Try known type handlers first
@@ -477,6 +481,11 @@ fn write_value_pg_depth(w: &mut JsonWriter, val: &PickleValue, depth: usize) -> 
                     btrees::btree_state_to_json_writer(info, state, &recurse, w)?;
                 } else {
                     recurse(w, state)?;
+                }
+                if !newobj {
+                    w.write_comma();
+                    w.write_key_literal("@newobj");
+                    w.write_bool(false);
                 }
                 if let Some(pairs) = dict_items {
                     w.write_comma();
@@ -768,6 +777,7 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                     state: Box::new(json_to_pickle_value(v)?),
                     dict_items: None,
                     list_items: None,
+                    newobj: true,
                 })));
             }
             if map.contains_key("@cls") && map.contains_key("@s") {
@@ -815,6 +825,7 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
                             state: Box::new(state),
                             dict_items,
                             list_items,
+                            newobj: !matches!(map.get("@newobj"), Some(Value::Bool(false))),
                         })));
                     }
                 }
@@ -822,6 +833,11 @@ pub fn json_to_pickle_value(val: &Value) -> Result<PickleValue, CodecError> {
             // Check for standalone @cls (Global reference)
             if let Some(Value::Array(cls)) = map.get("@cls") {
                 if cls.len() == 2 && !map.contains_key("@s") {
+                    if ["@items", "@appends", "@newobj"].iter().any(|k| map.contains_key(*k)) {
+                        return Err(CodecError::InvalidData(
+                            "@items/@appends/@newobj require an instance state (@s)".to_string(),
+                        ));
+                    }
                     let module = cls[0].as_str().unwrap_or("").to_string();
                     let name = cls[1].as_str().unwrap_or("").to_string();
                     return Ok(PickleValue::Global { module, name });
@@ -959,6 +975,7 @@ mod tests {
             )])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let json = pickle_value_to_json(&val).unwrap();
         assert_eq!(json["@cls"][0], "myapp");
@@ -979,6 +996,7 @@ mod tests {
                 (PickleValue::String("b".to_string()), PickleValue::Int(2)),
             ])),
             list_items: None,
+            newobj: true,
         }));
         let json = pickle_value_to_json(&val).unwrap();
         assert_eq!(json["@cls"][0], "collections");
@@ -1000,6 +1018,7 @@ mod tests {
             state: Box::new(PickleValue::None),
             dict_items: None,
             list_items: Some(Box::new(vec![PickleValue::Int(10), PickleValue::Int(20)])),
+            newobj: true,
         }));
         let json = pickle_value_to_json(&val).unwrap();
         assert!(json.get("@appends").is_some());
@@ -1198,6 +1217,18 @@ mod tests {
     #[test]
     fn test_direct_none() {
         assert_pg_paths_match(&PickleValue::None, "", "");
+        assert_pg_paths_match(
+            &PickleValue::Instance(Box::new(InstanceData {
+                module: "m".into(),
+                name: "C".into(),
+                state: Box::new(PickleValue::Dict(vec![(PickleValue::String("x".into()), PickleValue::Int(1))])),
+                dict_items: None,
+                list_items: None,
+                newobj: false,
+            })),
+            "",
+            "",
+        );
     }
 
     #[test]
@@ -1365,6 +1396,7 @@ mod tests {
             )])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         assert_pg_paths_match(&inst, "", "");
     }
@@ -1379,6 +1411,7 @@ mod tests {
                 (PickleValue::String("a".into()), PickleValue::Int(1)),
             ])),
             list_items: None,
+            newobj: true,
         }));
         assert_pg_paths_match(&inst, "", "");
     }
@@ -1391,6 +1424,7 @@ mod tests {
             state: Box::new(PickleValue::None),
             dict_items: None,
             list_items: Some(Box::new(vec![PickleValue::Int(10)])),
+            newobj: true,
         }));
         assert_pg_paths_match(&inst, "", "");
     }
@@ -1717,6 +1751,7 @@ mod tests {
             )])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         assert_pg_paths_match(&val, "", "");
     }
@@ -1733,6 +1768,7 @@ mod tests {
             )])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         assert_pg_paths_match(&val, "", "");
     }
@@ -1983,6 +2019,7 @@ mod tests {
             state: Box::new(PickleValue::Int(42)),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         assert_pg_paths_match(&inst, "", "");
     }

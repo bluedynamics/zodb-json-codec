@@ -679,6 +679,7 @@ impl<'a> Decoder<'a> {
                                 state: Box::new(state),
                                 dict_items: None,
                                 list_items: None,
+                                newobj: true,
                             })), build_depth);
                         }
                         PickleValue::Instance(inst) => {
@@ -689,6 +690,7 @@ impl<'a> Decoder<'a> {
                                 state: Box::new(state),
                                 dict_items: inst.dict_items,
                                 list_items: inst.list_items,
+                                newobj: inst.newobj,
                             })), build_depth);
                         }
                         PickleValue::Reduce {
@@ -711,6 +713,7 @@ impl<'a> Decoder<'a> {
                                             state: Box::new(state),
                                             dict_items,
                                             list_items,
+                                            newobj,
                                         })), build_depth);
                                     } else if newobj {
                                         // NEWOBJ with constructor args: the stored shape keeps
@@ -725,6 +728,7 @@ impl<'a> Decoder<'a> {
                                             ])),
                                             dict_items,
                                             list_items,
+                                            newobj: true,
                                         })), Self::nest(build_depth)?);
                                     } else {
                                         // REDUCE with args then BUILD: re-emitting as NEWOBJ would
@@ -766,6 +770,7 @@ impl<'a> Decoder<'a> {
                                 ])),
                                 dict_items: None,
                                 list_items: None,
+                                newobj: true,
                             })), Self::nest(build_depth)?);
                         }
                     }
@@ -1434,6 +1439,7 @@ mod tests {
                 )])),
                 dict_items: None,
                 list_items: None,
+                newobj: true,
             }));
 
             // First element: the Instance from BUILD (stack top)
@@ -1767,6 +1773,37 @@ mod tests {
                         (PickleValue::String("@args".into()), PickleValue::Tuple(vec![PickleValue::String("a".into())])),
                         (PickleValue::String("@state".into()), PickleValue::Dict(vec![])),
                     ])
+                );
+            }
+            other => panic!("expected Instance, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_reduce_empty_args_build_keeps_reduce_kind() {
+        // GLOBAL m.C, EMPTY_TUPLE, REDUCE, {"x": 1}, BUILD: a __reduce__ returning (cls, (), state)
+        let data = b"\x80\x03cm\nC\n)R}X\x01\x00\x00\x00xK\x01sb.";
+        match decode_pickle(data).unwrap() {
+            PickleValue::Instance(inst) => {
+                assert_eq!(inst.module, "m");
+                assert!(!inst.newobj, "REDUCE-created instance must not be marked newobj");
+            }
+            other => panic!("expected Instance, got {other:?}"),
+        }
+        // NEWOBJ stays newobj
+        let data = b"\x80\x03cm\nC\n)\x81}X\x01\x00\x00\x00xK\x01sb.";
+        match decode_pickle(data).unwrap() {
+            PickleValue::Instance(inst) => assert!(inst.newobj),
+            other => panic!("expected Instance, got {other:?}"),
+        }
+        // a second BUILD keeps the kind
+        let data = b"\x80\x03cm\nC\n)R}X\x01\x00\x00\x00xK\x01sb}X\x01\x00\x00\x00yK\x02sb.";
+        match decode_pickle(data).unwrap() {
+            PickleValue::Instance(inst) => {
+                assert!(!inst.newobj);
+                assert_eq!(
+                    *inst.state,
+                    PickleValue::Dict(vec![(PickleValue::String("y".into()), PickleValue::Int(2))])
                 );
             }
             other => panic!("expected Instance, got {other:?}"),

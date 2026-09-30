@@ -309,7 +309,7 @@ fn pickle_value_to_pyobject_impl(
             Ok(dict.into_any().unbind())
         }
         PickleValue::Instance(inst) => {
-            let InstanceData { module, name, state, dict_items, list_items } = inst.as_ref();
+            let InstanceData { module, name, state, dict_items, list_items, newobj } = inst.as_ref();
             // Try known type handlers first (e.g., uuid.UUID)
             if let Some(obj) =
                 try_instance_to_pyobject(py, module, name, state, compact_refs)?
@@ -332,6 +332,9 @@ fn pickle_value_to_pyobject_impl(
                 let dict = PyDict::new(py);
                 dict.set_item(intern!(py, "@cls"), cls_list)?;
                 dict.set_item(intern!(py, "@s"), state_obj)?;
+                if !newobj {
+                    dict.set_item(intern!(py, "@newobj"), false)?;
+                }
                 // SETITEMS/APPENDS data of dict/list subclasses (same keys as the JSON writer)
                 if let Some(pairs) = dict_items {
                     dict.set_item(intern!(py, "@items"), pairs_to_pylist(py, pairs, compact_refs, sanitize_nulls, depth)?)?;
@@ -1061,9 +1064,10 @@ pub fn pyobject_to_pickle_value(
 /// Convert a PyDict to PickleValue, checking for marker keys.
 ///
 /// Optimized dispatch:
-/// - len > 4: skip marker checks (no marker dict has >4 keys)
+/// - len > 5: skip marker checks (no marker dict has more than 5 keys:
+///   `@cls`, `@s`, `@newobj`, `@items`, `@appends`)
 /// - len == 1: direct key match (avoids all hash-based get_item lookups)
-/// - len 2-4: single-pass '@' scan, then targeted marker checks
+/// - len 2-5: single-pass '@' scan, then targeted marker checks
 fn pydict_to_pickle_value(
     dict: &Bound<'_, PyDict>,
     expand_refs: bool,
@@ -1071,8 +1075,8 @@ fn pydict_to_pickle_value(
     let py = dict.py();
     let len = dict.len();
 
-    // Fast path: no JSON marker dict has more than 4 keys.
-    if len > 4 {
+    // Fast path: no JSON marker dict has more than 5 keys (#32).
+    if len > 5 {
         return plain_dict_to_pickle_value(dict, expand_refs);
     }
 
@@ -1156,13 +1160,18 @@ fn pydict_to_pickle_value(
                         state: Box::new(state),
                         dict_items: dict_items_from_pyobject(dict.get_item(intern!(py, "@items"))?, expand_refs, "@items")?,
                         list_items: list_items_from_pyobject(dict.get_item(intern!(py, "@appends"))?, expand_refs, "@appends")?,
+                        newobj: !matches!(
+                            dict.get_item(intern!(py, "@newobj"))?.map(|v| v.extract::<bool>()),
+                            Some(Ok(false))
+                        ),
                     })));
                 }
                 if dict.get_item(intern!(py, "@items"))?.is_some()
                     || dict.get_item(intern!(py, "@appends"))?.is_some()
+                    || dict.get_item(intern!(py, "@newobj"))?.is_some()
                 {
                     return Err(CodecError::InvalidData(
-                        "@items/@appends require an instance state (@s)".into(),
+                        "@items/@appends/@newobj require an instance state (@s)".into(),
                     )
                     .into());
                 }
@@ -1357,6 +1366,7 @@ fn try_decode_single_key_marker(
                 state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
                 dict_items: None,
                 list_items: None,
+                newobj: true,
             }))));
         }
         "@set" => {
@@ -1848,6 +1858,7 @@ fn decode_uuid_from_str(s: &str) -> PyResult<PickleValue> {
         )])),
         dict_items: None,
         list_items: None,
+        newobj: true,
     })))
 }
 
@@ -2212,8 +2223,8 @@ fn encode_pydict_to_pickle(
 ) -> PyResult<()> {
     let len = dict.len();
 
-    // Fast path: no marker dict has more than 4 keys
-    if len > 4 {
+    // Fast path: no marker dict has more than 5 keys (#32)
+    if len > 5 {
         return encode_plain_dict_to_pickle(dict, buf, expand_refs);
     }
 
@@ -2263,12 +2274,13 @@ fn encode_pydict_to_pickle(
                     let module = mod_py.to_str()?;
                     let name = name_py.to_str()?;
 
-                    // Instances with SETITEMS/APPENDS data need the PickleValue path,
-                    // which emits items before BUILD like CPython does.
-                    // Only a 3- or 4-key dict can carry them; skip the lookups otherwise.
+                    // Instances with SETITEMS/APPENDS data or the REDUCE kind (#32) need the
+                    // PickleValue path, which emits items before BUILD like CPython does.
+                    // Only a 3- to 5-key dict can carry them; skip the lookups otherwise.
                     if len > 2
                         && (dict.get_item(intern!(py, "@items"))?.is_some()
-                            || dict.get_item(intern!(py, "@appends"))?.is_some())
+                            || dict.get_item(intern!(py, "@appends"))?.is_some()
+                            || dict.get_item(intern!(py, "@newobj"))?.is_some())
                     {
                         let pv = pydict_to_pickle_value(dict, expand_refs)?;
                         encode_value_into(&pv, buf)?;
@@ -2409,6 +2421,7 @@ fn try_encode_marker_to_pickle(
                 state: Box::new(pyobject_to_pickle_value(v, expand_refs)?),
                 dict_items: None,
                 list_items: None,
+                newobj: true,
             }));
             encode_value_into(&pv, buf)?;
             Ok(true)
@@ -2960,6 +2973,7 @@ mod tests {
             ])),
             dict_items: None,
             list_items: None,
+            newobj: true,
         }));
         let mut refs = Vec::new();
         collect_refs_from_pickle_value(&val, &mut refs);
