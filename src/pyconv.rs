@@ -2697,6 +2697,32 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_refs_bare_oid() {
+        // Classes with __getnewargs__ get a bare oid persistent id; referencesf counts it.
+        let val = PickleValue::PersistentRef(Box::new(PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 7])));
+        let mut refs = Vec::new();
+        collect_refs_from_pickle_value(&val, &mut refs);
+        assert_eq!(refs, vec![7]);
+    }
+
+    #[test]
+    fn test_collect_refs_skips_list_forms() {
+        // ['w', (oid,)] weakref and ['m', (db, oid, klass)] multi-database ids are not local refs.
+        let oid = PickleValue::Bytes(vec![0, 0, 0, 0, 0, 0, 0, 9]);
+        let weak = PickleValue::PersistentRef(Box::new(PickleValue::List(vec![
+            PickleValue::String("w".into()),
+            PickleValue::Tuple(vec![oid.clone()]),
+        ])));
+        let multi = PickleValue::PersistentRef(Box::new(PickleValue::List(vec![
+            PickleValue::String("m".into()),
+            PickleValue::Tuple(vec![PickleValue::String("db".into()), oid, PickleValue::None]),
+        ])));
+        let mut refs = Vec::new();
+        collect_refs_from_pickle_value(&PickleValue::List(vec![weak, multi]), &mut refs);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
     fn test_collect_refs_in_instance() {
         let oid = vec![0, 0, 0, 0, 0, 0, 0, 7];
         let pref = PickleValue::PersistentRef(Box::new(PickleValue::Tuple(vec![
