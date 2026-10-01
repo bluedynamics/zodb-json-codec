@@ -5,6 +5,10 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      # the changelog page includes this file, and a release commit
+      # changes it without touching docs/
+      - 'CHANGES.md'
+      - 'Cargo.toml'
   workflow_dispatch:
 
 # Allow only one concurrent deployment
