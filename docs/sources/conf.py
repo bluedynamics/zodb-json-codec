@@ -2,10 +2,17 @@
 
 # -- Project information -----------------------------------------------------
 
+import re
+from pathlib import Path
+
 project = "zodb-json-codec"
 copyright = "2024-2026, BlueDynamics Alliance"  # noqa: A001
 author = "Jens Klein and contributors"
-release = "1.5"
+
+# Cargo.toml is the single source of the version (see RELEASE.md).
+_cargo = (Path(__file__).parent.parent.parent / "Cargo.toml").read_text()
+version = re.search(r'^version = "([^"]+)"', _cargo, re.M).group(1)
+release = version
 
 # -- General configuration ---------------------------------------------------
 

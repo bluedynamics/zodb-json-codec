@@ -1,5 +1,18 @@
 # Changelog
 
+<!-- The documentation page `docs/sources/reference/changelog.md` includes
+     everything below this marker, so this file is the only changelog. -->
+
+<!-- changelog-start -->
+
+## unreleased
+
+- Docs: the changelog page of the documentation site includes this file
+  instead of carrying a copy of it, so the published changelog cannot fall
+  behind again (it still showed 1.6.0 as unreleased); the site's version
+  comes from `Cargo.toml`, and the docs workflow redeploys when `CHANGES.md`
+  or `Cargo.toml` changes, which a release commit does [#63]
+
 ## 1.7.0 (2026-10-01)
 
 - `NEWOBJ_EX` (protocol 4, `__getnewargs_ex__` with keyword arguments)
