@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.7.1 (unreleased)
+
+- CI tests Python 3.15 against the final release instead of allowing
+  pre-releases. 3.15 support and wheels shipped in 1.7.0.
+
 ## 1.7.0 (2026-10-01)
 
 - `NEWOBJ_EX` (protocol 4, `__getnewargs_ex__` with keyword arguments)
